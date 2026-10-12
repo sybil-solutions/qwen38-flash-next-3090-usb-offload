@@ -1,3 +1,19 @@
+PREREQUISITES: 
+
+- Tinygrad's Chestnut eGPU: https://comma.ai/shop/chestnut - 250$ + tax
+- M4 Mac Mini 16GB RAM / 256GB SSD:  900$ + tax
+- RTX 3090 24 GB VRAM: 1100$ + tax
+- Model: Qwen 3.8 Flash in exl3-3bpw by turboderp: https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/3.05bpw_h5_ng5
+
+Total Cost: 2250$ + Tax and Shipping
+Peak power consumption: 450w/h
+
+Model scores 40 on AA, on Max reasoning it's tying GPT-5.6-Sol low & Opus-4.8 low 
+This is still rather unoptimised, I for a 3090 I would recommend running Qwen3.8-27B you'll get 5-6x better performance. 
+
+<img width="958" height="590" alt="image" src="https://github.com/user-attachments/assets/14569d15-e801-4a1f-a3b5-1fa3696b8caf" />
+
+
 # qwen38-flash-next-3090-usb-offload
 
 ![Qwen3.8-Flash-Next EXL3 3bpw on one RTX 3090 over USB plus a Mac mini M4](docs/exl3-card.png)
