@@ -9,20 +9,30 @@
 #                           Metal toolchain when the mini does not (Command Line Tools alone have no `metal` compiler), then run ./run.sh on the mini
 #   ./run.sh stop           stop the server this script started (pid file $HOME/shim/server.pid)
 # options: --force (replace differing installed files / rebuild), --restart (stop a running server first), --verify-pack (sha256 of the whole 45.8 GB
-#          pack against the manifest; reads all of it)
+#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-c` = config C, the recommended
+#          recipe; the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
 # env:     RUN_ROOT (default $HOME: where shim/ exl3/ strata/ ... go; the dry run on a machine that is serving should use a scratch dir),
 #          BUNDLE (default ./out), HOST (127.0.0.1), PORT (8080), KEY_FILE ($HOME/.config/strata/flashnext.key), JOBS (host compile jobs, default 4),
 #          CLANG_BIN (directory with clang/clang++ for the CUDA host compiles of the engine; needed when `clang` is older than Apple clang 21, see below)
+# Host prerequisites of config C (checked and printed in the preflight; nothing here stores a password):
+#   wired limit   sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536   (resets on reboot; the 6,400-slot
+#                 mini-side expert LRU, STRATA_EXL3_METAL_SLOTS, locks 12.0 GB; below the limit mlock fails and the slots swap: decode drops to ~13 tok/s)
+#   no sleep      caffeinate -dimsu   (started by this script when none runs; an idle-sleeping mini freezes the engine for minutes)
+#   disk          free space for swap and logs (and ~190 GB for pack + dense GGUF on a fresh install)
 # Never overwrites an installed file that differs from the bundle's (reported, kept) unless --force; never prints the API key.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 CHECK=0; FORCE=0; RESTART=0; VERIFY_PACK=0; MODE=up
-for a in "$@"; do
+CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-c}
+while [ $# -gt 0 ]; do
+  a=$1; shift
   case $a in
     --check) CHECK=1 ;; --force) FORCE=1 ;; --restart) RESTART=1 ;; --verify-pack) VERIFY_PACK=1 ;;
     --build-metal) MODE=build-metal ;; stop) MODE=stop ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --config) [ $# -gt 0 ] || { echo "--config needs a template name" >&2; exit 2; }; CONFIG_NAME=$1; shift ;;
+    --config=*) CONFIG_NAME=${a#--config=} ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument: $a (see ./run.sh --help)" >&2; exit 2 ;;
   esac
 done
@@ -36,7 +46,9 @@ export HOME=$ROOT                      # every path below (and every child: engi
 BUNDLE=${BUNDLE:-$REPO/out}
 HOST=${HOST:-127.0.0.1}; PORT=${PORT:-8080}; JOBS=${JOBS:-4}
 KEY_FILE=${KEY_FILE:-$HOME/.config/strata/flashnext.key}
-CONFIG_TMPL=$REPO/configs/strata-exl3-full512-final-g4-lru-ht.json.tmpl
+CONFIG_NAME=${CONFIG_NAME%.json.tmpl}; CONFIG_NAME=${CONFIG_NAME#strata-exl3-full512-}; CONFIG_NAME=strata-exl3-full512-$CONFIG_NAME
+CONFIG_TMPL=$REPO/configs/$CONFIG_NAME.json.tmpl
+[ -f "$CONFIG_TMPL" ] || { echo "no config template $CONFIG_TMPL (available: $(cd "$REPO/configs" && ls *.json.tmpl | sed 's/^strata-exl3-full512-//; s/\.json\.tmpl$//' | tr '\n' ' '))" >&2; exit 2; }
 CONFIG=$HOME/shim/qwen38fn-run.json
 STAMPS=$HOME/.qwen38fn-run/stamps; mkdir -p "$STAMPS"
 CACHE=$REAL_HOME/.cache/qwen38fn-run; mkdir -p "$CACHE"
@@ -123,8 +135,7 @@ preflight() {
   if usb_dock_present; then ok "USB dock present (ASM2464 3801:0001 / ADD1:0001)"
   elif [ $CHECK -eq 1 ] || [ "$MODE" != up ]; then warn "no USB dock (3801:0001 / ADD1:0001) on this machine: fine for --check / --build-metal, the engine cannot start without it"
   else die "the RTX 3090 dock (USB 3801:0001 / ADD1:0001) is not on the bus; plug it in (and power the card) first"; fi
-  local free; free=$(df -g "$ROOT" | awk 'NR==2 {print $4}')
-  info "free disk at $ROOT: ${free} GiB (installed pack 46 GB + dense GGUF 84 GB + builds)"
+  info "free disk at $ROOT: $(df -g "$ROOT" | awk 'NR==2 {print $4}') GiB (installed pack 46 GB + dense GGUF 84 GB + builds); judged in the host prerequisites below"
   if pgrep -x strata >/dev/null 2>&1; then
     if [ $CHECK -eq 1 ] || [ "$MODE" != up ]; then info "an engine ('strata') is running on this machine: left alone"
     elif [ $RESTART -eq 0 ]; then die "an engine is already running (pgrep -x strata); ./run.sh --restart stops it first"; fi
@@ -237,7 +248,7 @@ install_bundle() {
   # the shim, exactly as shim/install.sh lays it out
   local f
   for f in tgcu.py tgcu_api.py tgcu_prof.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h tgcu_builtin.cu tgcu_libc.ptx \
-           run-strata.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh; do install_file "$REPO/shim/$f" "$HOME/shim/$f"; done
+           run-strata.sh run-d7.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh; do install_file "$REPO/shim/$f" "$HOME/shim/$f"; done
   install_tree "$REPO/shim/include" "$HOME/shim/include" "shim headers"
   install_tree "$REPO/shim/x86compat" "$HOME/shim/x86compat" "shim x86 compat headers"
   install_file "$BUNDLE/fatbins/tgcu_builtin.fatbin" "$HOME/shim/tgcu_builtin.fatbin"
@@ -410,6 +421,41 @@ PY
   elif [ $CHECK -eq 1 ]; then warn "$missing path(s) named by the config do not exist here (models/packs: expected on a machine that has not fetched them)"
   else bad "$missing path(s) named by the config do not exist"; fi
 }
+
+# ------------------------------------------------------------------ host prerequisites of the rendered config (printed; no password is ever asked for or stored)
+WIRE_CMD='sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536'
+sysnum() { sysctl -n "$1" 2>/dev/null | head -1 | tr -cd '0-9'; }
+host_prereqs() {
+  step "host prerequisites ($CONFIG_NAME)"
+  [ "$CONFIG_NAME" = strata-exl3-full512-c ] || warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 19 patches, config C's shim); see patches/README.md"
+  local slots; slots=$(python3 -c "import json,sys; print(json.load(open('$CONFIG'))['env'].get('STRATA_EXL3_METAL_SLOTS', '0'))")
+  local bytes=$((slots * 1867776))
+  info "STRATA_EXL3_METAL_SLOTS $slots: $((bytes / 1000000)) MB of mlocked, Metal-registered expert slots on the mini side (config C ships 6400)"
+  if [ "$CONFIG_NAME" = strata-exl3-full512-c ] && [ "$slots" != 6400 ]; then warn "config C is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi
+  # wired limits: the LRU is locked memory; above the default cap mlock fails (errno 35) and the slots swap out
+  local wl gl ul; wl=$(sysnum iogpu.wired_limit_mb); gl=$(sysnum vm.global_user_wire_limit); ul=$(sysnum vm.user_wire_limit)
+  # iogpu.wired_limit_mb 0 = the macOS default, which scales with RAM: on the 16 GiB mini it is below 14 GiB, and then vm.global_user_wire_limit (12,451 MiB by default) shows it
+  if { [ "${wl:-0}" -eq 0 ] || [ "$wl" -ge 14336 ]; } && [ "${gl:-0}" -ge 15032385536 ] && { [ -z "$ul" ] || [ "$ul" -ge 15032385536 ]; }; then
+    ok "wired limits: iogpu.wired_limit_mb ${wl:-0}$([ "${wl:-0}" -eq 0 ] && echo ' (macOS default)'), vm.global_user_wire_limit $gl, vm.user_wire_limit ${ul:-n/a}"
+  elif [ "$slots" -le 5600 ]; then
+    info "wired limits are the macOS defaults (iogpu.wired_limit_mb ${wl:-?}, vm.global_user_wire_limit ${gl:-?}): enough for $slots slots (the 6,400-slot config C needs: $WIRE_CMD)"
+  else
+    local msg="wired limits too low for $slots LRU slots (iogpu.wired_limit_mb ${wl:-?}, vm.global_user_wire_limit ${gl:-?}, vm.user_wire_limit ${ul:-?}); run this once per boot (it resets on reboot): $WIRE_CMD"
+    if [ $CHECK -eq 1 ]; then warn "$msg"; else bad "$msg"; fi
+  fi
+  # no idle sleep: an idle-sleeping mini froze the engine for minutes (the engine load holds no power assertion)
+  if pgrep -f 'caffeinate .*-dimsu' >/dev/null 2>&1; then ok "caffeinate -dimsu is running"
+  elif [ $CHECK -eq 1 ]; then warn "caffeinate -dimsu is not running: starting the server would run it (nohup caffeinate -dimsu, pid in \$HOME/shim/caffeinate.pid)"
+  else
+    mkdir -p "$HOME/shim"; nohup caffeinate -dimsu > /dev/null 2>&1 < /dev/null & echo $! > "$HOME/shim/caffeinate.pid"
+    ok "started caffeinate -dimsu (pid $(cat "$HOME/shim/caffeinate.pid")); ./run.sh stop ends it"
+  fi
+  local free; free=$(df -g "$ROOT" | awk 'NR==2 {print $4}')
+  if [ "${free:-0}" -lt 5 ]; then
+    if [ $CHECK -eq 1 ]; then warn "free disk at $ROOT: ${free} GiB (swap and logs need a few GiB; a fresh install needs ~190 GB for the pack and the dense GGUF)"; else bad "free disk at $ROOT: ${free} GiB < 5 GiB (swap, logs)"; fi
+  elif [ "$free" -lt 20 ]; then warn "free disk at $ROOT: ${free} GiB (enough to run, not to fetch the models: ~190 GB on a fresh install)"
+  else ok "free disk at $ROOT: ${free} GiB"; fi
+}
 stop_server() {
   local pf=$HOME/shim/server.pid
   if [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null; then
@@ -417,6 +463,8 @@ stop_server() {
     pgrep -x strata >/dev/null 2>&1 && die "engine still alive 90 s after SIGTERM (two engines fight over the USB device: not starting another)"
     ok "server stopped"
   else info "no server of ours running (no live pid in $pf)"; fi
+  local cf=$HOME/shim/caffeinate.pid
+  if [ -f "$cf" ] && kill -0 "$(cat "$cf")" 2>/dev/null; then kill "$(cat "$cf")"; rm -f "$cf"; info "stopped the caffeinate this script started"; fi
 }
 start_server() {
   step "start"
@@ -465,6 +513,7 @@ build_engine
 build_vision
 ensure_key
 render_config
+host_prereqs
 if [ $CHECK -eq 1 ]; then summary; exit $?; fi
 [ $NBAD -eq 0 ] || { summary || true; die "not starting: fix the failures above"; }
 start_server
