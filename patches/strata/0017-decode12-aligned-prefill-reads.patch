@@ -1,0 +1,83 @@
+# Decode12 (2026-10-14): STRATA_D12_PFALIGN=1 (with STRATA_D11_ALIGN=1): the prompt lane's (pf-mac) and the staged
+# fill's cold-expert reads are 4 KiB-aligned too (prefill +1.6..+3.9 %, exact). Also STRATA_D12_KQ (the Metal keepalive
+# on its own command queue; flat, default off) and STRATA_D12_FILLSTAT.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0016, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index c240a7b..6de12d1 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -1777,14 +1777,28 @@ bool ml_init(MetalLane& M) {
+     if (const char* stf = std::getenv("STRATA_D11_SELFTEST")) { const std::string stp = stf; std::thread([stp] { d11_selftest(stp); }).detach(); }
+     static const bool ka_on = [] { const char* v = std::getenv("STRATA_EXL3_METAL_KEEPALIVE"); return v == nullptr || std::atoi(v) != 0; }();
+     if (ka_on) {   // an idle Apple GPU clocks down between the 48 layer calls of a window (measured: 3 ms gaps turn a 0.75 ms call into 1.9 ms); one-expert calls back to back while requests run keep it up
+-        std::thread([&M] {
++        // Decode12 STRATA_D12_KQ=1: the dummy calls run on their OWN context (= own MTLCommandQueue, own job slots, own 1.9 MB zero blob registered there), so the ring's job A / B never queue behind a dummy command buffer
++        static const bool kq = [] { const char* v = std::getenv("STRATA_D12_KQ"); return v != nullptr && std::atoi(v) != 0; }();
++        std::thread([&M, create] {
+             float x[2560] = {}, y[2560];
+             int32_t e = 0, r = 0;
+             float w = 1.0f;
+             const void* bp[1] = {M.slots};
++            void* kctx = M.ctx;
++            if (kq) {
++                const size_t kb = ((size_t) 1862400 + 16383) & ~(size_t) 16383;
++                void* ks = mmap(nullptr, kb, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
++                void* kc = ks != MAP_FAILED ? create(0, 2) : nullptr;
++                if (kc != nullptr) {
++                    std::memset(ks, 0, kb);
++                    (void) mlock(ks, kb);
++                    if (M.reg(kc, ks, kb) > 0) { kctx = kc; bp[0] = ks; std::fprintf(stderr, "strata exl3-metal: keepalive on its own queue (STRATA_D12_KQ)\n"); }
++                    else std::fprintf(stderr, "strata exl3-metal: keepalive own-queue registration failed: %s (shared queue)\n", M.lasterr());
++                } else std::fprintf(stderr, "strata exl3-metal: keepalive own-queue context failed (shared queue)\n");
++            }
+             for (;;) {
+                 const int64_t now = (int64_t) std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-                if (now - M.last_us.load(std::memory_order_relaxed) < 200000) (void) M.rows(M.ctx, x, 1, 1, &e, &r, &w, bp, y);
++                if (now - M.last_us.load(std::memory_order_relaxed) < 200000) (void) M.rows(kctx, x, 1, 1, &e, &r, &w, bp, y);
+                 else usleep(2000);
+             }
+         }).detach();
+@@ -1997,7 +2011,12 @@ extern "C" int strata_stage_begin(void* srcv, const int32_t* idx, const uint64_t
+     return S.rc;
+ }
+ extern "C" int strata_stage_finish() {
++    // Decode12 STRATA_D12_FILLSTAT=1: how long the join waits for the SSD gather (the rest of a staged piece's cycle is the H2D copy of the previous piece): cumulative stderr line every 250 pieces
++    static const bool st = std::getenv("STRATA_D12_FILLSTAT") != nullptr && std::atoi(std::getenv("STRATA_D12_FILLSTAT")) != 0;
++    static int64_t calls = 0; static double wait_ms = 0, first = 0;
++    const double t0 = st ? PfReader::now_ms() : 0.0;
+     mac_pull().finish();
++    if (st) { const double t1 = PfReader::now_ms(); if (calls == 0) first = t0; wait_ms += t1 - t0; if (++calls % 250 == 0) std::fprintf(stderr, "strata stage-fill stat: %lld pieces, join waited %.1f ms total (%.2f ms/piece) over %.1f s\n", (long long) calls, wait_ms, wait_ms / (double) calls, (t1 - first) / 1000.0); }
+     return mac_pull().short_reads.load();
+ }
+ extern "C" void strata_curve_mark(int tag) { g_cv_calls = 0; g_cv_n = 0; g_cv_k[0] = g_cv_k[1] = g_cv_k[2] = 0; g_cv_tag = tag; }
+@@ -2462,6 +2481,7 @@ static inline bool d11_ok(uint64_t off0, uint64_t bytes, size_t stride) {
+     return d11_align_on() && (off0 & 127u) == 0 && ((off0 & 4095u) + bytes + 4095u) / 4096u * 4096u <= (uint64_t) stride;
+ }
+ static inline uint32_t d11_skew(uint64_t off0, uint64_t bytes, size_t stride) { return d11_ok(off0, bytes, stride) ? (uint32_t) (off0 & 4095u) : 0u; }
++static bool d12_pf_on() { static const bool v = d11_align_on() && std::getenv("STRATA_D12_PFALIGN") != nullptr && std::atoi(std::getenv("STRATA_D12_PFALIGN")) != 0; return v; }   // Decode12: the prompt lane's (pf-mac) cold-expert reads are 4 KiB-aligned too
+ static inline void d11_job(uint64_t off0, uint64_t bytes, size_t stride, uint8_t* slot, std::vector<std::pair<uint64_t, uint64_t>>& jobs, std::vector<uint8_t*>& dsts) {
+     if (!d11_ok(off0, bytes, stride)) { jobs.emplace_back(off0, bytes); dsts.push_back(slot); return; }
+     const uint64_t a0 = off0 & ~(uint64_t) 4095u, end = (off0 + bytes + 4095u) & ~(uint64_t) 4095u;
+@@ -2689,8 +2709,10 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+                 if (p == nullptr || P.used[s] >= P.per_set) { P.bad = true; continue; }
+                 const int sl = P.used[s]++;
+                 P.slot_of[s][(size_t) e] = (int16_t) sl;
+-                jobs.emplace_back((uint64_t) (p - base_), layer_blob_bytes_[(size_t) layer]);
+-                dsts.push_back(P.sptr[(size_t) s * (size_t) P.per_set + (size_t) sl]);
++                const uint64_t off0 = (uint64_t) (p - base_);
++                uint8_t* const dst = P.sptr[(size_t) s * (size_t) P.per_set + (size_t) sl];
++                if (d12_pf_on()) d11_job(off0, layer_blob_bytes_[(size_t) layer], P.stride, dst, jobs, dsts);   // Decode12 STRATA_D12_PFALIGN: 4 KiB-aligned read into the slot start, the blob sits d11_skew bytes in
++                else { jobs.emplace_back(off0, layer_blob_bytes_[(size_t) layer]); dsts.push_back(dst); }
+             }
+         };
+         if (P.mode == 1) {   // start the reads of every given expert (all of the layer's cold ones), do not wait
+@@ -2719,7 +2741,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+             P.ptrs[i] = nullptr;
+             if (in_tier(index)) { P.ptrs[i] = resident_blob(index); ++P.tier_hits; }
+             else if (const int ls = in_lru(index); ls >= 0) { P.ptrs[i] = M.slots + (size_t) ls * M.stride + d11_skew_lam(layer, e); ++P.lru_hits; }
+-            else if (P.slot_of[s][(size_t) e] >= 0) P.ptrs[i] = P.sptr[(size_t) s * (size_t) P.per_set + (size_t) P.slot_of[s][(size_t) e]];
++            else if (P.slot_of[s][(size_t) e] >= 0) P.ptrs[i] = P.sptr[(size_t) s * (size_t) P.per_set + (size_t) P.slot_of[s][(size_t) e]] + (d12_pf_on() ? d11_skew_lam(layer, e) : 0u);
+             if (P.ptrs[i] == nullptr) P.bad = true;
+         }
+         return;

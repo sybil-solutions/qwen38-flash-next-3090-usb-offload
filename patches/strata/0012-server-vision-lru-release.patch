@@ -1,0 +1,110 @@
+# Decode7 (2026-10-13): serve/server.py hooks for the LRUMIB command: config key vision.lru_release_mib (config C: 1400)
+# shrinks the engine's mini-side LRU around the vision encoder's lifetime (Vision.on_start / on_stop).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0011, applied in order with `git apply -p1`.
+
+diff --git a/serve/server.py b/serve/server.py
+index 2567b93..15a6c09 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -922,6 +922,29 @@ class StrataEngine:
+             if time.time() > deadline:
+                 raise EngineDied("the engine did not answer the VRAM command")
+ 
++    def lru_mib(self, mib: int, timeout: float = 120.0) -> int:
++        """Decode7: `LRUMIB <mib>` between requests (the caller holds the service's FIFO): the engine gives <mib> MiB of its mini-side expert LRU back to the OS (the vision encoder's RAM + Metal working set), or
++        all of it again with 0 (the regained slots are warmed by profile rank).  -> the LRU slots in use; raises ValueError with the engine's reason, EngineDied when it ended."""
++        if not self.alive():
++            raise EngineDied("the engine is not running")
++        self.proc.stdin.write(f"LRUMIB {int(mib)}\n")
++        self.proc.stdin.flush()
++        deadline = time.time() + timeout
++        while True:
++            try:
++                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
++            except queue.Empty:
++                raise EngineDied("the engine did not answer the LRUMIB command") from None
++            if line is None:
++                raise EngineDied("the engine ended")
++            line = line.strip()
++            if line.startswith("ERR"):
++                raise ValueError(line[4:].strip() or "the engine refused the LRUMIB command")
++            if line.startswith("LRUMIB "):
++                return int(line.split()[1])
++            if time.time() > deadline:
++                raise EngineDied("the engine did not answer the LRUMIB command")
++
+     @staticmethod
+     def sampling_keys(sampling: dict) -> str:
+         keys = ""
+@@ -1864,12 +1887,19 @@ class Vision:
+         self.idle_s = float(cfg.get("idle_unload_s") or 0)
+         self.idle_unloaded = self.idle_s > 0 and not lazy
+         self.last_used = time.monotonic()
++        # Decode7 (hand-edited key "lru_release_mib", 0/absent = off): the engine gives that many MiB of its mini-side expert LRU back while the encoder runs (on_start, called with the service FIFO held, before the
++        # encoder is spawned) and takes them again when the encoder is ended after idle_unload_s (on_stop, called without any lock held); both are set by the Service
++        self.release_mib = int(cfg.get("lru_release_mib") or 0)
++        self.on_start = None
++        self.on_stop = None
+         if self.idle_s > 0:
+             threading.Thread(target=self._idle_loop, daemon=True).start()
+         if not lazy and not self.idle_unloaded:
+             self._start()
+ 
+     def _start(self):
++        if self.on_start is not None:
++            self.on_start()
+         args, log, env = self.spawn
+         # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
+         self.proc = popen("the image encoder", args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+@@ -1922,13 +1952,20 @@ class Vision:
+     def _idle_loop(self):
+         while True:
+             time.sleep(max(1.0, min(10.0, self.idle_s / 4)))
++            ended = False
+             with self.lock:                                            # encode() holds it for a whole image
+                 if (self.proc is not None and not self.stopped and not self.idle_unloaded and
+                         time.monotonic() - self.last_used > self.idle_s):
+                     self.close()
+                     self.idle_unloaded = True
++                    ended = True
+                     print(f"[strata] vision encoder ended after {self.idle_s:.0f} s idle (its ~1.2 GB goes back); "
+                           "the next image starts it", flush=True)
++            if ended and self.on_stop is not None:                     # outside self.lock: the Service takes its FIFO, and encode() holds FIFO then self.lock
++                try:
++                    self.on_stop()
++                except Exception as e:
++                    print(f"[strata] the engine's LRU could not be regrown after the encoder ended: {e}", flush=True)
+ 
+     def unload(self):
+         """Stop the encoder process (its VRAM or RAM goes back); the encoded images stay cached on disk."""
+@@ -2632,6 +2669,9 @@ class Service:
+         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
+         self.shared_path = None                       # where they are kept between starts (next to the config)
+         self.fifo = threading.Lock()
++        if vision is not None and getattr(vision, "release_mib", 0) > 0 and hasattr(engine, "lru_mib"):   # Decode7: the encoder's RAM comes out of the engine's mini-side LRU while it runs
++            vision.on_start = self._lru_release
++            vision.on_stop = self._lru_regain
+         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
+         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
+         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+@@ -3239,6 +3279,20 @@ class Service:
+                     content[n] = {"type": "text", "text": f"[image omitted: {why}]"}
+         return fetched
+ 
++    def _lru_release(self):
++        """Decode7: called by Vision._start with the FIFO held (an image request's encode turn, or restart())."""
++        try:
++            n = self.engine.lru_mib(self.vision.release_mib)
++            print(f"[strata] the vision encoder starts: the engine's LRU gave {self.vision.release_mib} MiB back ({n} slots left)", flush=True)
++        except Exception as e:
++            print(f"[strata] the engine's LRU could not give RAM back for the vision encoder: {e}", flush=True)
++
++    def _lru_regain(self):
++        """Decode7: the encoder ended after idle_unload_s; its RAM goes back to the engine's LRU."""
++        with self.fifo:
++            n = self.engine.lru_mib(0)
++        print(f"[strata] the vision encoder ended: the engine's LRU is back to {n} slots", flush=True)
++
+     def prepare(self, messages, tools, kwargs, max_new=None, force=None, req=None):
+         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
+         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the

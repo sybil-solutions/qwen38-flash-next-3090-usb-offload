@@ -1,0 +1,931 @@
+# Xport8 + pair job (2026-10-12): STRATA_PF_XPORT8 (1 x+y, 2 x only, 3 y only): the Mac lane's x rows (card -> Mac) and
+# y rows (Mac -> card) travel as int8 + one fp16 scale per 32 values (53 % of fp16 bytes;
+# include/strata/prefill/xport8.hpp, CUDA quant/dequant kernels in src/prefill/xport8_kernels.cuh + kernels.cu, NEON on
+# the Mac); STRATA_PF_PAIR (two chunks per Metal job) and STRATA_PF_MIN_CHUNKS. Default 0 = the previous code path.
+# Tests: xport8_test.cpp (CPU, byte-exact NEON vs reference), xport8_gpu_test.cpp + xport8_gpu_launch.cu (GPU).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0007, applied in order with `git apply -p1`.
+
+diff --git a/include/strata/prefill/kernels.hpp b/include/strata/prefill/kernels.hpp
+index 34cc5f6..21d3e26 100644
+--- a/include/strata/prefill/kernels.hpp
++++ b/include/strata/prefill/kernels.hpp
+@@ -109,6 +109,10 @@ void moe_combine_peer16(const float* D, const int32_t* slot, const float* w, con
+ void sums_to_f16(const float* x, uint16_t* y, int64_t n, void* stream);
+ /// dst[0, n) = FP32 of the FP16 src[0, n) (n a multiple of 8, 16-byte aligned; src may be mapped host memory)
+ void f16_to_f32_wide(float* dst, const uint16_t* src, int64_t n, void* stream);
++/// STRATA_PF_XPORT8 (include/strata/prefill/xport8.hpp): out[0, xport8::packed_bytes(n)) = int8 block-32 form of the fp16 x16[0, n) (n a multiple of 32; out 2-byte aligned)
++void xport8_quant(const uint16_t* x16, uint8_t* out, int64_t n, void* stream);
++/// out16[0, n) = fp16 of the packed form in[0, packed_bytes(n)) (clamped to +-65504)
++void xport8_dequant(const uint8_t* in, uint16_t* out16, int64_t n, void* stream);
+ 
+ // ---- QSA helpers
+ /// In place: x[r, :] = x[r, :] * rsqrt(mean x^2 + eps) * w  over rows of `cols` (row stride `ld`).
+diff --git a/include/strata/prefill/xport8.hpp b/include/strata/prefill/xport8.hpp
+new file mode 100644
+index 0000000..3f5b854
+--- /dev/null
++++ b/include/strata/prefill/xport8.hpp
+@@ -0,0 +1,198 @@
++// xport8.hpp - 8-bit block-32 transport of the Mac lane's x (card -> Mac) and y (Mac -> card) rows (STRATA_PF_XPORT8, Prefill600 follow-up "Xport8").
++//
++// Why: in steady state the lane's USB host thread is the binding cost (per chunk-layer: x download 31.5 ms + y push ~36 ms + ~21 ms other API calls = 88 ms);
++// the link moves fp16 rows (T x 2560 x 2 B = 10.2 MB each way).  An int8 block-32 row (one signed byte per value + one fp16 scale per 32 values) is 17/16 B per
++// value = 53% of fp16's bytes.
++//
++// Wire format of n values (n a multiple of 32; the rows of a T x 2560 matrix are consecutive, a block never crosses a row):
++//     [ q: n x int8 ][ scale: n/32 x fp16 (little endian) ]          = n + n/16 bytes
++// Quantisation of a block (the CUDA kernels in prefill/kernels.cu and the NEON code below do exactly this, bit for bit):
++//     amax  = max |x_i|  over the 32 fp16 values read as fp32 (NaNs ignored, like fmaxf / vmaxnm)
++//     sh    = fp16(amax / 127)  (round to nearest even; IEEE fp32 division)           sf = fp32(sh)
++//     q_i   = sf == 0 ? 0 : clamp(rne(x_i / sf), -127, 127)   (IEEE fp32 division; a NaN quotient gives 0)
++// Dequantisation: out_i = fp16(clamp(fp32(q_i) * sf, -65504, 65504))  (the product is exact in fp32; the clamp keeps 127 * sf, which can be a hair above the largest
++// fp16, from rounding to infinity).
++//
++// This header: the scalar reference (ref_*), the NEON versions (quant / dequant; scalar elsewhere), and a dispatch_apply split over blocks (the result does not depend
++// on the split).  Used by prefill.cpp (host side), xport8_test.cpp (byte-exact checks) and mirrored by the device kernels.
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++#if defined(__ARM_NEON)
++#include <arm_neon.h>
++#endif
++#if defined(__APPLE__)
++#include <dispatch/dispatch.h>
++#endif
++
++namespace strata::prefill::xport8 {
++
++inline constexpr int64_t kBlock = 32;
++inline constexpr float kQMax = 127.0f;
++inline constexpr float kHalfMax = 65504.0f;
++
++// bytes of the packed form of n values (n % 32 == 0): n int8 + n / 32 fp16 scales
++inline constexpr size_t packed_bytes(int64_t n) { return (size_t) n + (size_t) (n / kBlock) * 2; }
++inline constexpr bool packable(int64_t n) { return n > 0 && n % kBlock == 0; }
++
++inline float h2f(uint16_t h) { _Float16 v; std::memcpy(&v, &h, 2); return (float) v; }
++inline uint16_t f2h(float f) { const _Float16 v = (_Float16) f; uint16_t h; std::memcpy(&h, &v, 2); return h; }
++
++// ---- scalar reference
++inline void ref_quant(const uint16_t* x, uint8_t* out, int64_t n) {
++    int8_t* q = reinterpret_cast<int8_t*>(out);
++    uint8_t* sc = out + n;
++    for (int64_t b = 0; b < n / kBlock; ++b) {
++        const uint16_t* xb = x + b * kBlock;
++        float amax = 0.0f;
++        for (int i = 0; i < kBlock; ++i) { const float a = std::fabs(h2f(xb[i])); if (a > amax) amax = a; }
++        const uint16_t sh = f2h(amax / kQMax);
++        const float sf = h2f(sh);
++        std::memcpy(sc + b * 2, &sh, 2);
++        for (int i = 0; i < kBlock; ++i) {
++            int qi = 0;
++            if (sf != 0.0f) {
++                float r = h2f(xb[i]) / sf;
++                if (r == r) {
++                    r = std::nearbyint(r);
++                    r = r > kQMax ? kQMax : (r < -kQMax ? -kQMax : r);
++                    qi = (int) r;
++                }
++            }
++            q[b * kBlock + i] = (int8_t) qi;
++        }
++    }
++}
++inline void ref_dequant(const uint8_t* in, uint16_t* out, int64_t n) {
++    const int8_t* q = reinterpret_cast<const int8_t*>(in);
++    const uint8_t* sc = in + n;
++    for (int64_t b = 0; b < n / kBlock; ++b) {
++        uint16_t sh;
++        std::memcpy(&sh, sc + b * 2, 2);
++        const float sf = h2f(sh);
++        for (int i = 0; i < kBlock; ++i) {
++            float v = (float) q[b * kBlock + i] * sf;
++            v = v > kHalfMax ? kHalfMax : (v < -kHalfMax ? -kHalfMax : v);
++            out[b * kBlock + i] = f2h(v);
++        }
++    }
++}
++
++// ---- the same, blocks [b0, b1) of a packed array of n values (NEON when available)
++inline void quant_blocks(const uint16_t* x, uint8_t* out, int64_t n, int64_t b0, int64_t b1) {
++#if defined(__ARM_NEON)
++    int8_t* q = reinterpret_cast<int8_t*>(out);
++    uint8_t* sc = out + n;
++    for (int64_t b = b0; b < b1; ++b) {
++        const uint16_t* xb = x + b * kBlock;
++        float32x4_t v[8];
++        for (int j = 0; j < 4; ++j) {
++            const float16x8_t h = vreinterpretq_f16_u16(vld1q_u16(xb + 8 * j));
++            v[2 * j] = vcvt_f32_f16(vget_low_f16(h));
++            v[2 * j + 1] = vcvt_high_f32_f16(h);
++        }
++        float32x4_t m = vabsq_f32(v[0]);
++        for (int j = 1; j < 8; ++j) m = vmaxnmq_f32(m, vabsq_f32(v[j]));
++        const float amax = vmaxnmvq_f32(m);
++        const uint16_t sh = f2h(amax / kQMax);
++        const float sf = h2f(sh);
++        std::memcpy(sc + b * 2, &sh, 2);
++        if (sf == 0.0f) { std::memset(q + b * kBlock, 0, kBlock); continue; }
++        const float32x4_t vs = vdupq_n_f32(sf);
++        for (int j = 0; j < 4; ++j) {
++            int32x4_t a = vcvtnq_s32_f32(vdivq_f32(v[2 * j], vs)), c = vcvtnq_s32_f32(vdivq_f32(v[2 * j + 1], vs));
++            // clamp to +-127 in the integer domain (vcvtn saturates and maps NaN to 0, as the device's cvt.rni does)
++            a = vminq_s32(vmaxq_s32(a, vdupq_n_s32(-127)), vdupq_n_s32(127));
++            c = vminq_s32(vmaxq_s32(c, vdupq_n_s32(-127)), vdupq_n_s32(127));
++            vst1_s8(q + b * kBlock + 8 * j, vmovn_s16(vcombine_s16(vmovn_s32(a), vmovn_s32(c))));
++        }
++    }
++#else
++    // scalar fallback = the reference on these blocks
++    for (int64_t b = b0; b < b1; ++b) {
++        uint8_t tmp[kBlock + 2];
++        ref_quant(x + b * kBlock, tmp, kBlock);
++        std::memcpy(out + b * kBlock, tmp, kBlock);
++        std::memcpy(out + n + b * 2, tmp + kBlock, 2);
++    }
++#endif
++}
++inline void dequant_blocks(const uint8_t* in, uint16_t* out, int64_t n, int64_t b0, int64_t b1) {
++#if defined(__ARM_NEON)
++    const int8_t* q = reinterpret_cast<const int8_t*>(in);
++    const uint8_t* sc = in + n;
++    const float32x4_t hi = vdupq_n_f32(kHalfMax), lo = vdupq_n_f32(-kHalfMax);
++    for (int64_t b = b0; b < b1; ++b) {
++        uint16_t sh;
++        std::memcpy(&sh, sc + b * 2, 2);
++        const float32x4_t vs = vdupq_n_f32(h2f(sh));
++        for (int j = 0; j < 2; ++j) {   // 16 values per step
++            const int8x16_t w = vld1q_s8(q + b * kBlock + 16 * j);
++            const int16x8_t w0 = vmovl_s8(vget_low_s8(w)), w1 = vmovl_s8(vget_high_s8(w));
++            const int32x4_t i4[4] = {vmovl_s16(vget_low_s16(w0)), vmovl_s16(vget_high_s16(w0)), vmovl_s16(vget_low_s16(w1)), vmovl_s16(vget_high_s16(w1))};
++            uint16x4_t r[4];
++            for (int k = 0; k < 4; ++k) {
++                float32x4_t f = vmulq_f32(vcvtq_f32_s32(i4[k]), vs);
++                f = vminq_f32(vmaxq_f32(f, lo), hi);
++                r[k] = vreinterpret_u16_f16(vcvt_f16_f32(f));
++            }
++            vst1q_u16(out + b * kBlock + 16 * j, vcombine_u16(r[0], r[1]));
++            vst1q_u16(out + b * kBlock + 16 * j + 8, vcombine_u16(r[2], r[3]));
++        }
++    }
++#else
++    for (int64_t b = b0; b < b1; ++b) {
++        uint8_t tmp[kBlock + 2];
++        std::memcpy(tmp, in + b * kBlock, kBlock);
++        std::memcpy(tmp + kBlock, in + n + b * 2, 2);
++        ref_dequant(tmp, out + b * kBlock, kBlock);
++    }
++#endif
++}
++
++// ---- over all blocks, split over `threads` (dispatch_apply on macOS; serial elsewhere or for small arrays)
++namespace detail {
++struct Job {
++    const void* in;
++    void* out;
++    int64_t n, nb, per;
++    bool is_quant;
++};
++inline void run_part(const Job& j, int64_t part) {
++    const int64_t b0 = part * j.per, b1 = std::min(j.nb, b0 + j.per);
++    if (b0 >= b1) return;
++    if (j.is_quant) quant_blocks((const uint16_t*) j.in, (uint8_t*) j.out, j.n, b0, b1);
++    else dequant_blocks((const uint8_t*) j.in, (uint16_t*) j.out, j.n, b0, b1);
++}
++#if defined(__APPLE__)
++inline void apply_fn(void* ctx, size_t i) { run_part(*static_cast<const Job*>(ctx), (int64_t) i); }
++#endif
++inline void run(const Job& j, int threads) {
++    const int64_t parts = std::max<int64_t>(1, std::min<int64_t>(threads, j.nb / 1024));   // >= 1024 blocks (32K values) per part
++    Job jj = j;
++    jj.per = (j.nb + parts - 1) / parts;
++#if defined(__APPLE__)
++    if (parts > 1) {
++        dispatch_apply_f((size_t) parts, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &jj, apply_fn);
++        return;
++    }
++#endif
++    for (int64_t p = 0; p < parts; ++p) run_part(jj, p);
++}
++}  // namespace detail
++
++// x16[n] -> out[packed_bytes(n)]
++inline void quant(const uint16_t* x16, uint8_t* out, int64_t n, int threads = 1) {
++    detail::run(detail::Job{x16, out, n, n / kBlock, 0, true}, threads);
++}
++// in[packed_bytes(n)] -> out16[n]
++inline void dequant(const uint8_t* in, uint16_t* out16, int64_t n, int threads = 1) {
++    detail::run(detail::Job{in, out16, n, n / kBlock, 0, false}, threads);
++}
++
++}  // namespace strata::prefill::xport8
+diff --git a/src/prefill/kernels.cu b/src/prefill/kernels.cu
+index 18ec999..9522922 100644
+--- a/src/prefill/kernels.cu
++++ b/src/prefill/kernels.cu
+@@ -4,6 +4,7 @@
+ #include "strata/kernels/gfx_arch.hpp"
+ #include "strata/kernels/router_top10.hpp"
+ #include "strata/core/emulate.hpp"
++#include "xport8_kernels.cuh"
+ 
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+@@ -2133,6 +2134,17 @@ void moe_combine_peer16(const float* Dm, const int32_t* slot, const float* w, co
+                                                                                       rows_local, bo, T);
+     check("moe_combine_peer16");
+ }
++// STRATA_PF_XPORT8: the lane's x rows (fp16 -> packed int8 block-32, before the device-to-host copy) and y rows (packed -> fp16, after the host-to-device copy); xport8_kernels.cuh
++void xport8_quant(const uint16_t* x16, uint8_t* out, int64_t n, void* stream) {
++    if (n <= 0 || n % 32 != 0) { std::fprintf(stderr, "prefill xport8_quant: n=%lld is not a multiple of 32\n", (long long) n); std::exit(1); }
++    xp8::launch_quant(x16, out, n, (cudaStream_t) stream);
++    check("xport8_quant");
++}
++void xport8_dequant(const uint8_t* in, uint16_t* out16, int64_t n, void* stream) {
++    if (n <= 0 || n % 32 != 0) { std::fprintf(stderr, "prefill xport8_dequant: n=%lld is not a multiple of 32\n", (long long) n); std::exit(1); }
++    xp8::launch_dequant(in, out16, n, (cudaStream_t) stream);
++    check("xport8_dequant");
++}
+ void peer_gather_add(float* sum, const float* rows, int64_t r0, const float* wk, const int32_t* pair, const int32_t* tok,
+                      const int32_t* start, const int32_t* list, int64_t n_tok, void* stream) {
+     if (n_tok <= 0) return;
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 292dbde..e372556 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -31,6 +31,7 @@
+ #include "strata/kernels/qsa_prompt_attn.hpp"
+ #include "strata/kernels/qsa_select.hpp"
+ #include "strata/prefill/path_select.hpp"
++#include "strata/prefill/xport8.hpp"
+ #include "strata/prefill/gemm.hpp"
+ #include "strata/prefill/moe_fused.hpp"
+ #include "strata/prefill/moe_fused_iq.hpp"
+@@ -177,6 +178,28 @@ inline bool pf_mac_y16() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_MAC_Y16"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+ }
++// STRATA_PF_XPORT8 (default 0): the lane's x and y rows cross the link as int8 block-32 (include/strata/prefill/xport8.hpp), 53% of the fp16 bytes.
++// 1 = x and y, 2 = x only (card -> Mac), 3 = y only (Mac -> card; needs STRATA_PF_MAC_Y16=1).  STRATA_PF_XPORT8_THREADS (4): the host's quantise / dequantise split.
++inline int pf_xport8_mode() {
++    static const int v = [] {
++        const char* e = std::getenv("STRATA_PF_XPORT8");
++        const int m = e ? std::atoi(e) : 0;
++        return pf_mac_enabled() && m >= 1 && m <= 3 ? m : 0;
++    }();
++    return v;
++}
++inline bool pf_xport8_x() { return pf_xport8_mode() == 1 || pf_xport8_mode() == 2; }
++inline bool pf_xport8_y() { return (pf_xport8_mode() == 1 || pf_xport8_mode() == 3) && pf_mac_y16(); }
++// STRATA_PF_PAIR=1 (default 0; needs the lockstep group + STRATA_PF_MAC_Y16): chunks 2p and 2p + 1 of a group submit ONE Metal job per layer (their x rows and pair lists concatenated): the job's
++// fixed cost (decoding every cold expert's weights, ~50 ms) is paid once per two chunks instead of once per chunk.
++inline bool pf_pair() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_PF_PAIR"); return v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
++inline int pf_xport8_threads() {
++    static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT8_THREADS"); return e ? std::clamp(std::atoi(e), 1, 16) : 4; }();
++    return v;
++}
+ inline bool pf_mac_stats() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_MAC_STATS"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+@@ -188,7 +211,7 @@ inline int pf_group_n() {
+     static const int v = [] {
+         const char* e = std::getenv("STRATA_PF_GROUP");
+         const int g = e ? std::atoi(e) : 1;
+-        return pf_mac_enabled() ? std::clamp(g, 1, 8) : 1;
++        return pf_mac_enabled() ? std::clamp(g, 1, 12) : 1;   // (8 before STRATA_PF_PAIR: the pair jobs let a group of up to 12 chunks run)
+     }();
+     return v;
+ }
+@@ -248,6 +271,7 @@ struct Lockstep {
+     size_t turn = 0;
+     bool aborted = false;
+     bool more = false;         // another lockstep group follows this one (its first layers' reads start behind this group's last layers)
++    bool pair = false;         // STRATA_PF_PAIR: chunks 2p / 2p + 1 share one Mac job per layer
+     bool wait(int64_t step, int j) {
+         std::unique_lock<std::mutex> lk(mu);
+         cv.wait(lk, [&] { return aborted || (turn < order.size() && order[turn].first == j && order[turn].second == step); });
+@@ -847,9 +871,22 @@ struct Prefill::Impl {
+     // STRATA_PF_MAC: the Mac cold-expert lane's buffers (host: the fp16 input rows, their fp32 widening, the fp32 partial sums, the weights readback)
+     float* mac_y_dev = nullptr;
+     uint16_t *mac_x16 = nullptr, *mac_y16h = nullptr;
++    // STRATA_PF_XPORT8: the packed x rows on the device (quantised before the copy down) and the host's landing buffer (lazy download) / packed y rows (pushed up, dequantised
++    // into mac_y_dev's first half from the packed copy in its second half)
++    uint8_t *x8_dev = nullptr, *mac_x8 = nullptr, *mac_y8h = nullptr;
+     float *mac_x32 = nullptr, *mac_y32 = nullptr;
+     std::vector<float> mac_wh, mac_wt;
+     std::vector<int32_t> mac_cold, mac_eidx, mac_ridx, mac_idx_of, mac_next;
++    struct PairSt {   // STRATA_PF_PAIR: chunks 2p (leader) and 2p + 1 (follower) of a lockstep group share ONE Metal job per layer, submitted at the follower's F turn
++        bool pending = false, y_ok = false;
++        int64_t l = -1, T0 = 0;
++        std::vector<int32_t> cold, eidx, ridx;
++        std::vector<float> wt;
++        void* job = nullptr;
++        uint16_t *x16 = nullptr, *y16 = nullptr;   // [2 * T_max x N] fp16: the pair's x rows (leader's, then follower's), the job's y rows (same order)
++    } pairs[6];
++    std::vector<int32_t> pair_pos, pair_u, pair_e, pair_r;
++    std::vector<float> pair_w;
+     int64_t mac_pref_l = -1;   // the last layer whose cold experts' reads were queued
+     int64_t mac_ahead = 0;     // the first mac_ahead layers of the next group (or of this chunk, before its layer loop) have their reads queued already
+     std::vector<float*> R_x;          // STRATA_PF_GROUP: the extra chunks' residual streams [T x D] (chunk 1.. of a lockstep group)
+@@ -1287,6 +1324,7 @@ bool Prefill::carve(size_t T, void* alloc) {
+     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
+     m.mixed_h = o.take<uint16_t>(T * N, ok);
+     if (pf_mac_enabled()) m.mac_y_dev = o.take<float>(T * N, ok);   // STRATA_PF_MAC: the Mac's partial sums [T x N] fp32 (or fp16 in the first half)
++    if (pf_mac_enabled() && pf_xport8_x()) m.x8_dev = o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)), ok);   // STRATA_PF_XPORT8: the packed x rows (the y rows' packed copy lives in mac_y_dev's idle second half)
+     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
+     m.bo = m.emb;
+     if (bf16x2_hc(m.f16_io)) { m.xn16_lo = o.take<uint16_t>(T * D, ok); m.lo16_lo = o.take<uint16_t>(T * LR, ok); }
+@@ -1970,6 +2008,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+         for (int i = 0; i < ring_slots(T); ++i) o.take<uint8_t>((size_t) MAXBLOB(), ok);
+     }
+     f(T * N);
++    if (pf_mac_enabled() && pf_xport8_x()) o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)), ok);   // carve's x8_dev
+     f((size_t) strata::kernels::NG_HC_DIM);
+     strata::kernels::KvHostPools stage;
+     take_stage(o, ss, s, stage, ok);
+@@ -2174,7 +2213,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+     const int64_t Tc = [&]() -> int64_t {
+         static const bool even = [] { const char* v = std::getenv("STRATA_PF_EVEN"); return v == nullptr || std::atoi(v) != 0; }();
+         if (!pf_mac_enabled() || hand_in_ != nullptr || next_ != nullptr) return m.T;
+-        return strata::prefill::even_chunk(n, m.T, even);
++        int64_t tc = strata::prefill::even_chunk(n, m.T, even);
++        static const int64_t min_chunks = [] { const char* v = std::getenv("STRATA_PF_MIN_CHUNKS"); return v != nullptr ? (int64_t) std::max(1, std::atoi(v)) : (int64_t) 1; }();   // pair jobs want deep groups: a prompt of >= min_chunks * 512 tokens is cut into at least that many chunks
++        if (min_chunks > 1 && n >= min_chunks * 512 && (n + tc - 1) / tc < min_chunks) tc = std::min<int64_t>(tc, (((n + min_chunks - 1) / min_chunks) + 15) & ~(int64_t) 15);
++        return tc;
+     }();
+     const bool helped = single_chunk && bind_stage_helper(n);
+     if (helped) std::swap(m.pp, m.help_pp);
+@@ -2434,6 +2476,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             m.mac_x16 = (uint16_t*) px; m.mac_x32 = (float*) p32; m.mac_y32 = (float*) py; m.mac_y16h = (uint16_t*) py16;
+             m.mac_wh.assign((size_t) m.T_max * K, 0.0f);
+         }
++        if (mac_pf && pf_pair() && pf_mac_y16() && m.pairs[0].x16 == nullptr) {   // STRATA_PF_PAIR: per pair of a lockstep group: the parked x rows + the job's y rows of two chunks
++            const size_t pb = (((size_t) m.T_max * N * 2) * 2 + 16383) & ~(size_t) 16383;
++            for (int pi = 0; pi < 6; ++pi) {
++                void *px2 = nullptr, *py2 = nullptr;
++                if (posix_memalign(&px2, 16384, pb) != 0 || posix_memalign(&py2, 16384, pb) != 0) { err = "prefill: cannot allocate the pair-job buffers"; return false; }
++                m.pairs[pi].x16 = (uint16_t*) px2; m.pairs[pi].y16 = (uint16_t*) py2;
++            }
++        }
++        if (mac_pf && pf_xport8_mode() != 0 && m.mac_x8 == nullptr) {   // STRATA_PF_XPORT8: the lazy landing buffer of the packed x rows and the host's packed y rows
++            const size_t nb8 = strata::prefill::xport8::packed_bytes((int64_t) ((size_t) m.T_max * N));
++            void* p8 = mmap(nullptr, (nb8 + 16383) & ~(size_t) 16383, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
++            void* py8 = nullptr;
++            if (p8 == MAP_FAILED || posix_memalign(&py8, 16384, (nb8 + 16383) & ~(size_t) 16383) != 0) {
++                err = "prefill: cannot allocate the Mac lane's packed transport buffers";
++                return false;
++            }
++            m.mac_x8 = (uint8_t*) p8; m.mac_y8h = (uint8_t*) py8;
++            std::fprintf(stderr, "strata pf-mac: xport8 mode %d (x %s, y %s), host threads %d\n", pf_xport8_mode(), pf_xport8_x() && m.x8_dev ? "int8 block-32" : "fp16",
++                         pf_xport8_y() ? "int8 block-32" : "fp16", pf_xport8_threads());
++        }
++        const bool xp8_x = mac_pf && pf_xport8_x() && m.x8_dev != nullptr && m.mac_x8 != nullptr && strata::prefill::xport8::packable((int64_t) N);   // this chunk's rows cross as int8 block-32
++        const bool xp8_y = mac_pf && pf_xport8_y() && m.mac_y8h != nullptr && strata::prefill::xport8::packable((int64_t) N);
+         const bool stream_all = m.ring > STAGE && T >= stream_all_min() && m.src != nullptr && !mac_pf &&
+                                 !(strata::kernels::cpu::expert_layout().exl3 && core::exl3_resident_only());
+         // the CPU share: this chunk takes the pool if no other stage of a layer split has it now (released at the end
+@@ -2638,16 +2702,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             strata_pf_mac_prefetch(m.src, (int) ll, (int) (ll & 1), m.mac_next.data(), (int) m.mac_next.size());
+             m.mac_pref_l = ll;
+         };
+-        auto pf_push_y = [&](const void* src, size_t bytes) {   // the Mac rows to the card: plain on the compute stream, or (split) on the copy stream with the host waiting there
++        auto pf_push_y = [&](const void* src, size_t bytes, size_t dst_off = 0, int64_t dq_n = 0) {   // the Mac rows to the card: plain on the compute stream, or (split) on the copy stream with the host waiting there
++            // dq_n > 0 (STRATA_PF_XPORT8): src is the packed form of dq_n values, landed at mac_y_dev + dst_off (its idle second half); once it is there the device widens it to fp16 in the first half
++            uint8_t* dst = reinterpret_cast<uint8_t*>(m.mac_y_dev) + dst_off;
+             if (ls != nullptr && ls->split) {
+                 cudaStreamWaitEvent(m.copy, m.grp_ev_comb, 0);   // the last combine that read mac_y_dev is done
+-                cudaMemcpyAsync(m.mac_y_dev, src, bytes, cudaMemcpyHostToDevice, m.copy);
++                cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, m.copy);
+                 cudaEventRecord(m.grp_ev_push, m.copy);
+                 cudaStreamSynchronize(m.copy);                    // the link is idle again before the next chunk's x comes down (the opposite direction must not overlap)
+                 cudaStreamWaitEvent(m.cs, m.grp_ev_push, 0);
+             } else {
+-                cudaMemcpyAsync(m.mac_y_dev, src, bytes, cudaMemcpyHostToDevice, m.cs);
++                cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, m.cs);
+             }
++            if (dq_n > 0) strata::prefill::xport8_dequant(dst, reinterpret_cast<uint16_t*>(m.mac_y_dev), dq_n, m.cs);
+         };
+         if (mac_pf && T >= 512 && (ls == nullptr || lj == 0) && m.mac_ahead == 0 && std::getenv("STRATA_PF_NOEARLYQ") == nullptr) {   // the group's first reads start before layer 0's front (the SSD join of the first layers hides behind the setup + front)
+             for (int64_t ll = LB; ll < std::min<int64_t>(LE, LB + (ls != nullptr ? (int64_t) strata_pf_mac_nsets() : 2)); ++ll) pf_queue_reads(ll);
+@@ -3200,6 +3267,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     std::future<bool> cpu_fut;
+                     int64_t rows_cpu = 0, n_cpu = 0, n_stream = 0;
+                     bool mac_layer = false;               // STRATA_PF_MAC: this layer's cold experts run on the Apple GPU (rows_cpu counts their rows)
++                    bool mac_x8 = false;                  // STRATA_PF_XPORT8: this layer's x rows were issued packed (int8 block-32) into m.mac_x8
+                     bool cpu_arm = true;                  // auto: this layer may share (false: the arm without)
+                     int cpu_set = -1;                     // auto: the wall events' set, -1 when not measured
+                     bool cpu_cold = false;                // auto: one-time costs in the window (no reading)
+@@ -3280,7 +3348,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                         if (mac_pf) {   // STRATA_PF_MAC: the layer's fp16 MoE input rows start their (lazy) download with the routing readback, for a layer with cold experts
+                             bool any_cold = false;
+                             for (int32_t e = 0; e < m.g->n_expert && !any_cold; ++e) any_cold = m.host_res[(size_t) l * m.g->n_expert + e] < 0;
+-                            if (any_cold) { cudaMemcpyAsync(m.mac_x16, m.mixed_h, (size_t) T * N * 2, cudaMemcpyDeviceToHost, m.cs); mac_x_issued = true; }
++                            if (any_cold) {
++                                if (xp8_x) {
++                                    strata::prefill::xport8_quant(m.mixed_h, m.x8_dev, (int64_t) (T * N), m.cs);   // 53% of the fp16 bytes cross the link
++                                    cudaMemcpyAsync(m.mac_x8, m.x8_dev, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), cudaMemcpyDeviceToHost, m.cs);
++                                    mac_x8 = true;
++                                } else {
++                                    cudaMemcpyAsync(m.mac_x16, m.mixed_h, (size_t) T * N * 2, cudaMemcpyDeviceToHost, m.cs);
++                                }
++                                mac_x_issued = true;
++                            }
+                             if (any_cold && T >= 512 && (ls == nullptr || (lj == 0 && l == LB))) {   // (a lockstep group queues the first two layers' reads here; layer l + 2's are queued once every job of layer l is done)
+                                 const int64_t ahead = ls != nullptr ? (int64_t) strata_pf_mac_nsets() - 1 : 1;   // a group starts with every slot set reading
+                                 for (int64_t ll = l; ll <= l + ahead && ll < LE; ++ll) {
+@@ -4142,8 +4219,24 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             using Clk = std::chrono::steady_clock;
+                             const bool half_path = pf_mac_y16() && strata_pf_mac_half_ok() != 0;   // x16 rows in, fp16 rows out: no host widening, no host clamp/cast (the lane's own GPU does both)
+                             const auto t0 = Clk::now();
+-                            { volatile uint8_t t = ((volatile uint8_t*) m.mac_x16)[0]; (void) t; }   // the first touch downloads the whole lazy range over the link
++                            { volatile uint8_t t = ((volatile uint8_t*) (mac_x8 ? m.mac_x8 : (uint8_t*) m.mac_x16))[0]; (void) t; }   // the first touch downloads the whole lazy range over the link
+                             const auto t1 = Clk::now();
++                            // STRATA_PF_PAIR roles (lockstep group, chunks 2p / 2p + 1): 1 = leader (parks its x rows + lists), 2 = follower (submits the shared job), 0 = alone
++                            Impl::PairSt* ps = nullptr;
++                            int pr_role = 0;
++                            int64_t pr_y_off = 0;
++                            const uint16_t* y16src = m.mac_y16h;
++                            if (ls != nullptr && ls->pair && half_path) {
++                                ps = &m.pairs[lj / 2];
++                                if (lj % 2 == 0) pr_role = lj + 1 < ls->n ? 1 : 0;
++                                else if (ps->pending && ps->l == l) { pr_role = 2; pr_y_off = ps->T0; }
++                            }
++                            uint16_t* xdst = m.mac_x16;
++                            if (pr_role == 1) xdst = ps->x16;
++                            else if (pr_role == 2) xdst = ps->x16 + (size_t) ps->T0 * N;
++                            if (mac_x8) strata::prefill::xport8::dequant(m.mac_x8, xdst, (int64_t) (T * N), pf_xport8_threads());   // NEON: the lane's fp16 input rows
++                            else if (xdst != m.mac_x16) std::memcpy(xdst, m.mac_x16, (size_t) T * N * 2);
++                            const double xdq_ms = std::chrono::duration<double, std::milli>(Clk::now() - t1).count();
+                             if (!half_path) { const _Float16* h = (const _Float16*) m.mac_x16; float* d = m.mac_x32; for (int64_t i = 0; i < T * N; ++i) d[i] = (float) h[i]; }
+                             std::vector<int32_t>& eidx = m.mac_eidx;
+                             std::vector<int32_t>& ridx = m.mac_ridx;
+@@ -4191,20 +4284,52 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
+                                 void* job = nullptr;
+                                 const auto tsb0 = Clk::now();
+-                                const int rcs = half_path
+-                                    ? strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), m.mac_cold.data(), (int) m.mac_cold.size(), m.mac_x16, (int) T,
+-                                                             (int64_t) eidx.size(), eidx.data(), ridx.data(), wt.data(), m.mac_y16h, &job, mm)
+-                                    : strata_pf_mac_submit(m.src, (int) l, (int) (l & 1), m.mac_cold.data(), (int) m.mac_cold.size(), m.mac_x32, (int) T,
+-                                                           (int64_t) eidx.size(), eidx.data(), ridx.data(), wt.data(), m.mac_y32, &job, mm);
++                                int rcs = 0;
++                                if (pr_role == 1) {   // pair leader: park the x rows (already in the pair's buffer) and the lists; the follower's F turn submits the shared job
++                                    ps->cold = m.mac_cold; ps->eidx = eidx; ps->ridx = ridx; ps->wt = wt;
++                                    ps->T0 = T; ps->l = l; ps->pending = true; ps->job = nullptr;   // (y_ok is NOT reset here: the previous layer's follower B turn may still be to come)
++                                } else if (pr_role == 2) {   // pair follower: the union of both chunks' cold experts, both chunks' pairs (rows of the follower offset by T0), one job
++                                    const int ne = (int) m.g->n_expert;
++                                    std::vector<int32_t>& pos = m.pair_pos; std::vector<int32_t>& U = m.pair_u;
++                                    pos.assign((size_t) ne, -1); U.clear();
++                                    for (int32_t e : ps->cold) pos[(size_t) e] = 0;
++                                    for (int32_t e : m.mac_cold) pos[(size_t) e] = 0;
++                                    for (int32_t e = 0; e < ne; ++e) if (pos[(size_t) e] == 0) { pos[(size_t) e] = (int32_t) U.size(); U.push_back(e); }
++                                    std::vector<int32_t>& pe = m.pair_e; std::vector<int32_t>& pr = m.pair_r; std::vector<float>& pw = m.pair_w;
++                                    pe.clear(); pr.clear(); pw.clear();
++                                    for (size_t k = 0; k < ps->eidx.size(); ++k) { pe.push_back(pos[(size_t) ps->cold[(size_t) ps->eidx[k]]]); pr.push_back(ps->ridx[k]); pw.push_back(ps->wt[k]); }
++                                    for (size_t k = 0; k < eidx.size(); ++k) { pe.push_back(pos[(size_t) m.mac_cold[(size_t) eidx[k]]]); pr.push_back(ridx[k] + (int32_t) ps->T0); pw.push_back(wt[k]); }
++                                    rcs = strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), U.data(), (int) U.size(), ps->x16, (int) (ps->T0 + T),
++                                                                 (int64_t) pe.size(), pe.data(), pr.data(), pw.data(), ps->y16, &ps->job, mm);
++                                    ps->pending = false;
++                                } else {
++                                    rcs = half_path
++                                        ? strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), m.mac_cold.data(), (int) m.mac_cold.size(), m.mac_x16, (int) T,
++                                                                 (int64_t) eidx.size(), eidx.data(), ridx.data(), wt.data(), m.mac_y16h, &job, mm)
++                                        : strata_pf_mac_submit(m.src, (int) l, (int) (l & 1), m.mac_cold.data(), (int) m.mac_cold.size(), m.mac_x32, (int) T,
++                                                               (int64_t) eidx.size(), eidx.data(), ridx.data(), wt.data(), m.mac_y32, &job, mm);
++                                }
+                                 st_sub = std::chrono::duration<double, std::milli>(Clk::now() - tsb0).count();
+                                 if (rcs != 0) { err = "prefill: the Mac cold-expert lane failed to start at layer " + std::to_string(l) + " (" + std::to_string(rcs) + ")"; return false; }
+                                 ls->done();
+-                                if (!bind(ls->sB(l - LB))) { strata_pf_mac_wait(job); return false; }   // B turn of this layer (the job's slot is released either way)
++                                if (!bind(ls->sB(l - LB))) { strata_pf_mac_wait(pr_role == 1 ? ps->job : job); return false; }   // B turn of this layer (the job's slot is released either way)
+                                 b_taken = true;
+                                 if (ls->split) { inj_saved = m.inj; m.inj = m.INJ_x[sj]; }   // (the next chunk's front already wrote m.inj: B reads the parked injection in place)
+                                 else cudaMemcpyAsync(m.inj, m.INJ_x[sj], (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
+                                 const auto tw = Clk::now();
+-                                const int rcw = strata_pf_mac_wait(job);
++                                int rcw = 0;
++                                if (pr_role == 1) {   // the shared job: the leader's B turn (before the follower's) collects it into the pair's y buffer
++                                    if (ps->job == nullptr) { err = "prefill: the pair's Mac job was never submitted at layer " + std::to_string(l) + " (the follower chunk had no cold experts)"; return false; }
++                                    rcw = strata_pf_mac_wait(ps->job);
++                                    ps->job = nullptr; ps->y_ok = true;
++                                    y16src = ps->y16;
++                                } else if (pr_role == 2) {
++                                    if (!ps->y_ok) { err = "prefill: the pair's Mac rows were not collected at layer " + std::to_string(l); return false; }
++                                    ps->y_ok = false;
++                                    y16src = ps->y16 + (size_t) pr_y_off * N;
++                                } else {
++                                    rcw = strata_pf_mac_wait(job);
++                                }
+                                 if (rcw != 0) { err = "prefill: the Mac cold-expert lane failed at layer " + std::to_string(l) + " (" + std::to_string(rcw) + ")"; return false; }
+                                 t3 = Clk::now();
+                                 t3c = t3;
+@@ -4225,7 +4350,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                     }
+                                     std::fprintf(stderr, "strata pf-mac: HCHK L%lld c%d rc %d mismatching fp16 words %lld of %lld\n", (long long) l, lj, rc, (long long) bad, (long long) (T * N));
+                                 }
+-                                pf_push_y(m.mac_y16h, (size_t) T * N * 2);
++                                if (xp8_y) {
++                                    strata::prefill::xport8::quant(y16src, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());   // NEON: 53% of the fp16 bytes go up
++                                    t3c = Clk::now();
++                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
++                                } else {
++                                    pf_push_y(y16src, (size_t) T * N * 2);
++                                }
+                             } else if (pf_mac_y16()) {
+                                 for (int64_t i = 0; i < T * N; ++i) {
+                                     float v = m.mac_y32[i];
+@@ -4234,15 +4365,21 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                     std::memcpy(&m.mac_y16h[i], &hv, 2);
+                                 }
+                                 t3c = Clk::now();
+-                                pf_push_y(m.mac_y16h, (size_t) T * N * 2);
++                                if (xp8_y) {
++                                    strata::prefill::xport8::quant(m.mac_y16h, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());
++                                    t3c = Clk::now();
++                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
++                                } else {
++                                    pf_push_y(m.mac_y16h, (size_t) T * N * 2);
++                                }
+                             } else {
+                                 pf_push_y(m.mac_y32, (size_t) T * N * 4);
+                             }
+                             t4 = Clk::now();
+                             if (pf_mac_stats()) {
+                                 auto ms = [](Clk::time_point a, Clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+-                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f mgpu %.1f ms\n",
+-                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period, strata_pf_mac_gpu_ms());
++                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f mgpu %.1f xdq %.1f ms\n",
++                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period, strata_pf_mac_gpu_ms(), xdq_ms);
+                             }
+                         }
+                     }
+@@ -4534,9 +4671,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             }
+             static const int split_min = [] { const char* v = std::getenv("STRATA_PF_SPLITF_MIN"); return v != nullptr ? std::max(2, std::atoi(v)) : 2; }();   // measured: the split order gains on 4-chunk groups (+9%) and loses on 2-chunk ones (-25%)
+             const bool split = pf_splitf() && gn >= split_min;   // F1 / F2 / B turns (the y push on the copy stream behind the next chunk's front): lag >= 1, Mac jobs in flight = lag
+-            const int lag = split ? std::clamp(pf_lag_req(G), 1, std::min(gn - 1, pf_jobs()))
+-                                  : std::clamp(pf_lag_req(G), 0, std::min(gn - 1, pf_jobs() - 1));   // Mac jobs in flight = lag + 1 (lag when split) <= the Metal context's job slots
++            const int jobs_eff = pf_pair() ? 2 * pf_jobs() : pf_jobs();   // a pair job covers two chunks: Mac jobs in flight = lag / 2
++            const int lag = split ? std::clamp(pf_lag_req(G), 1, std::min(gn - 1, jobs_eff))
++                                  : std::clamp(pf_lag_req(G), 0, std::min(gn - 1, jobs_eff - 1));   // Mac jobs in flight = lag + 1 (lag when split) <= the Metal context's job slots
+             Lockstep ls(gn, LE - LB, lag, split);
++            ls.pair = pf_pair() && pf_mac_y16() && lag >= (split ? 2 : 1);   // a pair's leader B turn must come after its follower's submit (F2 when split)
+             {   // another lockstep group follows (>= 2 lane-sized chunks left)?  Its first layers' reads start behind this group's last layers
+                 int64_t rem = 0;
+                 for (int64_t c = g0 + (int64_t) gn * Tc; c < n && std::min<int64_t>(Tc, n - c) >= pf_mac_min(); c += Tc) ++rem;
+diff --git a/src/prefill/xport8_gpu_launch.cu b/src/prefill/xport8_gpu_launch.cu
+new file mode 100644
+index 0000000..9934628
+--- /dev/null
++++ b/src/prefill/xport8_gpu_launch.cu
+@@ -0,0 +1,27 @@
++// xport8_gpu_launch.cu - standalone launcher of the device kernels (xport8_kernels.cuh), for xport8_gpu_test.cpp (a different translation unit: nvcc cannot parse <arm_neon.h>).
++//   nvcc -O3 -std=c++17 -arch=native -c xport8_gpu_launch.cu -o xport8_gpu_launch.o
++#include "xport8_kernels.cuh"
++
++#include <cstdio>
++
++extern "C" int xp8_gpu_roundtrip(const uint16_t* x, int64_t n, uint8_t* packed_out, uint16_t* dq_of_gpu_packed, const uint8_t* packed_in, uint16_t* dq_of_given_packed) {
++    const size_t pb = (size_t) n + (size_t) n / 16;
++    uint16_t *dx = nullptr, *dy = nullptr, *dz = nullptr;
++    uint8_t *dp = nullptr, *dq = nullptr;
++    auto ck = [](cudaError_t e, const char* w) { if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(e)); return 1; } return 0; };
++    if (ck(cudaMalloc(&dx, (size_t) n * 2), "malloc x") || ck(cudaMalloc(&dy, (size_t) n * 2), "malloc y") || ck(cudaMalloc(&dz, (size_t) n * 2), "malloc z") ||
++        ck(cudaMalloc(&dp, pb), "malloc p") || ck(cudaMalloc(&dq, pb), "malloc q"))
++        return 1;
++    cudaMemcpy(dx, x, (size_t) n * 2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dq, packed_in, pb, cudaMemcpyHostToDevice);
++    cudaMemset(dp, 0xcd, pb);
++    strata::prefill::xp8::launch_quant(dx, dp, n, 0);                 // x -> packed (the card's quantiser)
++    strata::prefill::xp8::launch_dequant(dp, dy, n, 0);               // that packed -> fp16
++    strata::prefill::xp8::launch_dequant(dq, dz, n, 0);               // a host-made packed (the NEON quantiser's) -> fp16: the y path
++    if (ck(cudaDeviceSynchronize(), "sync")) return 1;
++    cudaMemcpy(packed_out, dp, pb, cudaMemcpyDeviceToHost);
++    cudaMemcpy(dq_of_gpu_packed, dy, (size_t) n * 2, cudaMemcpyDeviceToHost);
++    cudaMemcpy(dq_of_given_packed, dz, (size_t) n * 2, cudaMemcpyDeviceToHost);
++    cudaFree(dx); cudaFree(dy); cudaFree(dz); cudaFree(dp); cudaFree(dq);
++    return 0;
++}
+diff --git a/src/prefill/xport8_gpu_test.cpp b/src/prefill/xport8_gpu_test.cpp
+new file mode 100644
+index 0000000..6e9f8eb
+--- /dev/null
++++ b/src/prefill/xport8_gpu_test.cpp
+@@ -0,0 +1,82 @@
++// xport8_gpu_test.cpp - the CUDA kernels against the host code (scalar reference and NEON), byte for byte, on a real GPU.  Run on an aarch64 box with nvcc and a GPU
++// (a DGX Spark; the RTX 3090 stays with the server):
++//   nvcc -O3 -std=c++17 -arch=native -c xport8_gpu_launch.cu -o xport8_gpu_launch.o
++//   g++ -O2 -std=c++20 -I ../../include -I /usr/local/cuda/include xport8_gpu_test.cpp xport8_gpu_launch.o -L /usr/local/cuda/lib64 -lcudart -o xport8_gpu_test && ./xport8_gpu_test [real.u16]
++#include "strata/prefill/xport8.hpp"
++
++#include <cstdio>
++#include <cstdlib>
++#include <random>
++#include <vector>
++
++using namespace strata::prefill::xport8;
++
++extern "C" int xp8_gpu_roundtrip(const uint16_t* x, int64_t n, uint8_t* packed_out, uint16_t* dq_of_gpu_packed, const uint8_t* packed_in, uint16_t* dq_of_given_packed);
++
++static int g_fail = 0;
++
++static std::vector<uint16_t> gen(int kind, int64_t n, std::mt19937_64& rng) {
++    std::vector<uint16_t> x((size_t) n);
++    std::normal_distribution<float> g(0.0f, 1.0f);
++    std::uniform_real_distribution<float> u(0.0f, 1.0f);
++    for (int64_t i = 0; i < n; ++i) {
++        float v = 0;
++        switch (kind) {
++            case 0: v = g(rng); break;
++            case 1: v = g(rng) * (u(rng) < 0.01f ? 60.0f : 1.0f); break;
++            case 2: v = g(rng) * std::exp(8.0f * (u(rng) - 0.5f)); break;
++            case 3: v = g(rng) * 1e-6f; break;
++            case 4: v = (u(rng) < 0.5f ? 0.0f : g(rng) * 30000.0f); v = std::fmax(std::fmin(v, 65504.0f), -65504.0f); break;
++            case 5: v = (float) ((int) (g(rng) * 8)) * 0.25f; break;
++            case 6: v = g(rng) * 0.3f + 0.003f * (float) (i % 7); break;
++            default: v = 0;
++        }
++        x[(size_t) i] = f2h(v);
++    }
++    return x;
++}
++
++static void run(const char* what, const std::vector<uint16_t>& x) {
++    const int64_t n = (int64_t) x.size();
++    const size_t pb = packed_bytes(n);
++    std::vector<uint8_t> ref(pb), neon(pb), gpu(pb);
++    std::vector<uint16_t> ref_dq((size_t) n), neon_dq((size_t) n), gpu_dq((size_t) n), gpu_dq_of_host((size_t) n);
++    ref_quant(x.data(), ref.data(), n);
++    quant(x.data(), neon.data(), n, 1);
++    ref_dequant(ref.data(), ref_dq.data(), n);
++    dequant(neon.data(), neon_dq.data(), n, 1);
++    if (xp8_gpu_roundtrip(x.data(), n, gpu.data(), gpu_dq.data(), neon.data(), gpu_dq_of_host.data()) != 0) { ++g_fail; std::printf("FAIL %s: gpu run\n", what); return; }
++    const bool q_ref = std::memcmp(ref.data(), gpu.data(), pb) == 0, q_neon = std::memcmp(neon.data(), gpu.data(), pb) == 0;
++    const bool d_gpu = std::memcmp(ref_dq.data(), gpu_dq.data(), (size_t) n * 2) == 0;       // GPU dequant of GPU-quantised == ref dequant of ref-quantised
++    const bool d_host = std::memcmp(neon_dq.data(), gpu_dq_of_host.data(), (size_t) n * 2) == 0;   // GPU dequant of NEON-quantised == NEON dequant of it
++    std::printf("%-28s n=%-9lld quant GPU==ref %s  GPU==NEON %s | dequant GPU==ref %s  (host packed) GPU==NEON %s\n", what, (long long) n, q_ref ? "yes" : "NO", q_neon ? "yes" : "NO", d_gpu ? "yes" : "NO", d_host ? "yes" : "NO");
++    if (!q_ref || !q_neon || !d_gpu || !d_host) {
++        ++g_fail;
++        for (size_t i = 0; i < pb; ++i) if (ref[i] != gpu[i]) { std::printf("  first quant byte diff at %zu: ref %02x gpu %02x\n", i, ref[i], gpu[i]); break; }
++        for (size_t i = 0; i < (size_t) n; ++i) if (ref_dq[i] != gpu_dq[i]) { std::printf("  first dequant diff at %zu: ref %04x gpu %04x\n", i, ref_dq[i], gpu_dq[i]); break; }
++    }
++}
++
++int main(int argc, char** argv) {
++    std::mt19937_64 rng(777);
++    static const char* names[] = {"gaussian", "outlier channels", "log-uniform scale", "tiny (flush)", "huge + zeros", "grid", "offset ramp"};
++    for (int kind = 0; kind <= 6; ++kind)
++        for (int64_t n : {32LL, 2560LL, 32LL * 4099, 2560LL * 2048}) {
++            char nm[64];
++            std::snprintf(nm, sizeof nm, "%s", names[kind]);
++            run(nm, gen(kind, n, rng));
++        }
++    if (argc > 1) {
++        FILE* f = std::fopen(argv[1], "rb");
++        if (f) {
++            std::fseek(f, 0, SEEK_END);
++            const long sz = std::ftell(f);
++            std::fseek(f, 0, SEEK_SET);
++            std::vector<uint16_t> x((size_t) (sz / 2 / 2560 * 2560));
++            if (std::fread(x.data(), 2, x.size(), f) == x.size()) run("real activations", x);
++            std::fclose(f);
++        }
++    }
++    std::printf(g_fail ? "FAILED %d\n" : "ALL OK\n", g_fail);
++    return g_fail != 0;
++}
+diff --git a/src/prefill/xport8_kernels.cuh b/src/prefill/xport8_kernels.cuh
+new file mode 100644
+index 0000000..cbf8492
+--- /dev/null
++++ b/src/prefill/xport8_kernels.cuh
+@@ -0,0 +1,54 @@
++// xport8_kernels.cuh - the device half of the 8-bit block-32 lane transport (STRATA_PF_XPORT8; format + semantics: include/strata/prefill/xport8.hpp).
++// Included by kernels.cu (public wrappers xport8_quant / xport8_dequant in kernels.hpp) and by the standalone byte-exactness test (xport8_gpu_test.cu).
++// quant: one warp per 32-value block; amax by warp shuffle; IEEE fp32 divisions (__fdiv_rn), round-to-nearest-even conversions - bit for bit the host code's arithmetic.
++// dequant: one thread per value.
++#pragma once
++
++#include <cuda_fp16.h>
++#include <cuda_runtime.h>
++#include <cstdint>
++
++namespace strata::prefill::xp8 {
++
++// x[n] (fp16 bits) -> q[n] int8 | scale[n / 32] fp16 bits; nb = n / 32 blocks
++__global__ void quant_kernel(const uint16_t* __restrict__ x, int8_t* __restrict__ q, uint16_t* __restrict__ sc, int64_t nb) {
++    const int64_t b = ((int64_t) blockIdx.x * blockDim.x + threadIdx.x) >> 5;
++    if (b >= nb) return;   // a whole warp leaves together (blockDim.x % 32 == 0)
++    const int lane = threadIdx.x & 31;
++    const int64_t i = b * 32 + lane;
++    const float v = __half2float(__ushort_as_half(x[i]));
++    float a = fabsf(v);
++    a = (a == a) ? a : 0.0f;   // NaNs are ignored (the host's vmaxnm / a > amax)
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, o));
++    const uint16_t sh = __half_as_ushort(__float2half_rn(__fdiv_rn(a, 127.0f)));
++    const float sf = __half2float(__ushort_as_half(sh));
++    int qi = 0;
++    if (sf != 0.0f) {
++        qi = __float2int_rn(__fdiv_rn(v, sf));   // saturating, NaN -> 0
++        qi = min(max(qi, -127), 127);
++    }
++    q[i] = (int8_t) qi;
++    if (lane == 0) sc[b] = sh;
++}
++
++// q[n] | scale[n / 32] -> out[n] fp16 bits
++__global__ void dequant_kernel(const int8_t* __restrict__ q, const uint16_t* __restrict__ sc, uint16_t* __restrict__ out, int64_t n) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    float v = (float) q[i] * __half2float(__ushort_as_half(sc[i >> 5]));
++    v = fminf(fmaxf(v, -65504.0f), 65504.0f);
++    out[i] = __half_as_ushort(__float2half_rn(v));
++}
++
++// launchers (n % 32 == 0; `in` / `out` of the packed form: n bytes of q, then n / 16 bytes of scales, 2-byte aligned)
++inline void launch_quant(const uint16_t* x16, uint8_t* out, int64_t n, cudaStream_t stream) {
++    const int64_t nb = n / 32;
++    const unsigned blocks = (unsigned) ((nb * 32 + 255) / 256);
++    quant_kernel<<<blocks, 256, 0, stream>>>(x16, reinterpret_cast<int8_t*>(out), reinterpret_cast<uint16_t*>(out + n), nb);
++}
++inline void launch_dequant(const uint8_t* in, uint16_t* out16, int64_t n, cudaStream_t stream) {
++    dequant_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, stream>>>(reinterpret_cast<const int8_t*>(in), reinterpret_cast<const uint16_t*>(in + n), out16, n);
++}
++
++}  // namespace strata::prefill::xp8
+diff --git a/src/prefill/xport8_test.cpp b/src/prefill/xport8_test.cpp
+new file mode 100644
+index 0000000..96cba4c
+--- /dev/null
++++ b/src/prefill/xport8_test.cpp
+@@ -0,0 +1,161 @@
++// xport8_test.cpp - card-free checks of the 8-bit block-32 lane transport (include/strata/prefill/xport8.hpp).
++//   clang++ -std=c++20 -O2 -mcpu=apple-m4 -I include src/prefill/xport8_test.cpp -o xport8_test && ./xport8_test [real.u16 [rows]]
++// 1. golden blocks (hand-computed expectations of the format)
++// 2. scalar reference vs the NEON path (quant and dequant), byte for byte, over many distributions, array sizes and thread splits
++// 3. round-trip error (rel RMS / max rel to the block max) per distribution
++// 4. optional: a raw little-endian fp16 file of [rows x 2560] real activations: rel RMS of the round trip (the numbers quoted in EXL3_PLAN.md)
++#include "strata/prefill/xport8.hpp"
++
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <random>
++#include <vector>
++
++using namespace strata::prefill::xport8;
++
++static int g_fail = 0;
++#define CHECK(c, ...) do { if (!(c)) { ++g_fail; std::printf("FAIL %s:%d: ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
++
++static int8_t qat(const std::vector<uint8_t>& p, int64_t i) { return (int8_t) p[(size_t) i]; }
++static uint16_t sat(const std::vector<uint8_t>& p, int64_t n, int64_t b) { uint16_t h; std::memcpy(&h, p.data() + n + b * 2, 2); return h; }
++
++static void golden() {
++    std::vector<uint16_t> x(64, 0);
++    for (int i = 0; i < 32; ++i) x[(size_t) i] = f2h(1.0f);                  // block 0: all ones
++    for (int i = 0; i < 32; ++i) x[(size_t) (32 + i)] = f2h(i % 2 ? -2.0f : 0.0f);   // block 1: 0, -2, 0, -2 ...
++    std::vector<uint8_t> p(packed_bytes(64));
++    ref_quant(x.data(), p.data(), 64);
++    CHECK(packed_bytes(64) == 64 + 4, "packed_bytes");
++    // block 0: amax 1 -> scale fp16(1/127), q = rne(1 / scale) = 127 (scale is rounded: 1/127 = 0.007874..., fp16 0.0078735 -> 1/0.0078735 = 127.0024 -> 127)
++    CHECK(sat(p, 64, 0) == f2h(1.0f / 127.0f), "scale0 %04x", sat(p, 64, 0));
++    for (int i = 0; i < 32; ++i) CHECK(qat(p, i) == 127, "q0[%d]=%d", i, qat(p, i));
++    // block 1: amax 2 -> q(-2) = -127, q(0) = 0
++    CHECK(sat(p, 64, 1) == f2h(2.0f / 127.0f), "scale1");
++    for (int i = 0; i < 32; ++i) CHECK(qat(p, 32 + i) == (i % 2 ? -127 : 0), "q1[%d]=%d", i, qat(p, 32 + i));
++    std::vector<uint16_t> y(64);
++    ref_dequant(p.data(), y.data(), 64);
++    CHECK(std::fabs(h2f(y[0]) - 1.0f) < 1e-3f, "y0 %g", h2f(y[0]));
++    CHECK(std::fabs(h2f(y[33]) + 2.0f) < 2e-3f, "y33 %g", h2f(y[33]));
++    CHECK(y[32] == f2h(0.0f) || y[32] == 0x8000, "y32 zero");
++    // zeros -> scale 0, q 0, back to 0 (no NaN)
++    std::vector<uint16_t> z(32, f2h(0.0f)), zy(32, 0xffff);
++    std::vector<uint8_t> zp(packed_bytes(32), 0x55);
++    quant(z.data(), zp.data(), 32);
++    dequant(zp.data(), zy.data(), 32);
++    for (int i = 0; i < 32; ++i) CHECK(h2f(zy[(size_t) i]) == 0.0f, "zero roundtrip %g", h2f(zy[(size_t) i]));
++    // the largest fp16 survives (127 * rounded scale can exceed 65504: the dequant clamps instead of overflowing to inf)
++    std::vector<uint16_t> big(32, f2h(65504.0f)), by(32);
++    std::vector<uint8_t> bp(packed_bytes(32));
++    quant(big.data(), bp.data(), 32);
++    dequant(bp.data(), by.data(), 32);
++    for (int i = 0; i < 32; ++i) CHECK(std::isfinite(h2f(by[(size_t) i])) && h2f(by[(size_t) i]) > 65000.0f, "big %g", h2f(by[(size_t) i]));
++}
++
++static std::vector<uint16_t> gen(int kind, int64_t n, std::mt19937_64& rng) {
++    std::vector<uint16_t> x((size_t) n);
++    std::normal_distribution<float> g(0.0f, 1.0f);
++    std::uniform_real_distribution<float> u(0.0f, 1.0f);
++    for (int64_t i = 0; i < n; ++i) {
++        float v = 0;
++        switch (kind) {
++            case 0: v = g(rng); break;                                   // gaussian
++            case 1: v = g(rng) * (u(rng) < 0.01f ? 60.0f : 1.0f); break;   // outlier channels
++            case 2: v = g(rng) * std::exp(8.0f * (u(rng) - 0.5f)); break;  // log-uniform scale
++            case 3: v = g(rng) * 1e-6f; break;                           // tiny (scale underflows to subnormal / zero)
++            case 4: v = (u(rng) < 0.5f ? 0.0f : g(rng) * 30000.0f); v = std::fmax(std::fmin(v, 65504.0f), -65504.0f); break;   // huge + zeros
++            case 5: v = (float) ((int) (g(rng) * 8)) * 0.25f; break;       // exactly representable grid
++            default: v = 0;
++        }
++        x[(size_t) i] = f2h(v);
++    }
++    return x;
++}
++
++static void exact(int kind, int64_t n, int threads, std::mt19937_64& rng) {
++    const auto x = gen(kind, n, rng);
++    std::vector<uint8_t> a(packed_bytes(n)), b(packed_bytes(n), 0xcd);
++    ref_quant(x.data(), a.data(), n);
++    quant(x.data(), b.data(), n, threads);
++    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0, "quant kind %d n %lld threads %d: first diff at %zu", kind, (long long) n, threads,
++          (size_t) (std::mismatch(a.begin(), a.end(), b.begin()).first - a.begin()));
++    std::vector<uint16_t> ya((size_t) n), yb((size_t) n, 0xdead);
++    ref_dequant(a.data(), ya.data(), n);
++    dequant(a.data(), yb.data(), n, threads);
++    CHECK(std::memcmp(ya.data(), yb.data(), (size_t) n * 2) == 0, "dequant kind %d n %lld threads %d", kind, (long long) n, threads);
++}
++
++struct Err { double rel_rms, max_rel_blk; };
++static Err roundtrip(const std::vector<uint16_t>& x, int64_t n) {
++    std::vector<uint8_t> p(packed_bytes(n));
++    std::vector<uint16_t> y((size_t) n);
++    quant(x.data(), p.data(), n, 4);
++    dequant(p.data(), y.data(), n, 4);
++    double se = 0, sx = 0, mx = 0;
++    for (int64_t b = 0; b < n / kBlock; ++b) {
++        float amax = 0;
++        for (int i = 0; i < kBlock; ++i) amax = std::fmax(amax, std::fabs(h2f(x[(size_t) (b * kBlock + i)])));
++        for (int i = 0; i < kBlock; ++i) {
++            const double a = h2f(x[(size_t) (b * kBlock + i)]), c = h2f(y[(size_t) (b * kBlock + i)]);
++            se += (a - c) * (a - c);
++            sx += a * a;
++            if (amax > 0) mx = std::fmax(mx, std::fabs(a - c) / amax);
++        }
++    }
++    return {std::sqrt(se / std::fmax(sx, 1e-300)), mx};
++}
++
++int main(int argc, char** argv) {
++    golden();
++    std::mt19937_64 rng(12345);
++    int cases = 0;
++    for (int kind = 0; kind <= 5; ++kind)
++        for (int64_t n : {32LL, 64LL, 2560LL, 32768LL, 32LL * 1024 * 3 + 32, 2560LL * 2048, 2560LL * 1648})
++            for (int th : {1, 2, 4, 8}) { exact(kind, n, th, rng); ++cases; }
++    std::printf("byte-exact scalar-vs-NEON cases: %d (fail %d)\n", cases, g_fail);
++    for (int kind = 0; kind <= 5; ++kind) {
++        const int64_t n = 2560LL * 512;
++        const auto x = gen(kind, n, rng);
++        const Err e = roundtrip(x, n);
++        std::printf("round trip kind %d: rel RMS %.4f%%  max |err|/blockmax %.4f%% (bound 0.5/127 = %.4f%% + fp16 rounding; kind 3 = amax/127 below fp16's range: flushed to 0)\n", kind, 100 * e.rel_rms, 100 * e.max_rel_blk, 100 * 0.5 / 127);
++        // bound: half a step of the (fp16-rounded) scale, plus the output's own fp16 rounding (2^-11 of the value)
++        if (kind != 3) CHECK(e.max_rel_blk < 0.5 / 127 + 1.0 / 1024, "max err kind %d %g", kind, e.max_rel_blk);
++        else CHECK(e.rel_rms > 0.9, "kind 3 (all blocks below 3.8e-6) flushes to zero by design");
++    }
++    // speed of the NEON path on a 2048 x 2560 chunk
++    {
++        const int64_t n = 2560LL * 2048;
++        const auto x = gen(1, n, rng);
++        std::vector<uint8_t> p(packed_bytes(n));
++        std::vector<uint16_t> y((size_t) n);
++        for (int th : {1, 4, 8}) {
++            double tq = 1e9, td = 1e9;
++            for (int r = 0; r < 6; ++r) {
++                auto t0 = std::chrono::steady_clock::now();
++                quant(x.data(), p.data(), n, th);
++                auto t1 = std::chrono::steady_clock::now();
++                dequant(p.data(), y.data(), n, th);
++                auto t2 = std::chrono::steady_clock::now();
++                tq = std::min(tq, std::chrono::duration<double, std::milli>(t1 - t0).count());
++                td = std::min(td, std::chrono::duration<double, std::milli>(t2 - t1).count());
++            }
++            std::printf("2048x2560: threads %d: quant %.3f ms, dequant %.3f ms\n", th, tq, td);
++        }
++    }
++    if (argc > 1) {
++        FILE* f = std::fopen(argv[1], "rb");
++        if (!f) { std::printf("cannot open %s\n", argv[1]); return 2; }
++        std::fseek(f, 0, SEEK_END);
++        const long sz = std::ftell(f);
++        std::fseek(f, 0, SEEK_SET);
++        int64_t n = sz / 2 / 2560 * 2560;
++        if (argc > 2) n = std::min<int64_t>(n, (int64_t) std::atoll(argv[2]) * 2560);
++        std::vector<uint16_t> x((size_t) n);
++        if (std::fread(x.data(), 2, (size_t) n, f) != (size_t) n) { std::printf("short read\n"); return 2; }
++        std::fclose(f);
++        const Err e = roundtrip(x, n);
++        std::printf("REAL %s: %lld rows x 2560: rel RMS %.4f%%  max |err|/blockmax %.4f%%\n", argv[1], (long long) (n / 2560), 100 * e.rel_rms, 100 * e.max_rel_blk);
++    }
++    std::printf(g_fail ? "FAILED %d\n" : "ALL OK\n", g_fail);
++    return g_fail != 0;
++}

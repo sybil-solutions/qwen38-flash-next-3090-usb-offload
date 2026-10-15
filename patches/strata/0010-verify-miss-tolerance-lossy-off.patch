@@ -1,0 +1,164 @@
+# Decode6 (2026-10-13): STRATA_MISS_TOL / STRATA_MISS_TOL_MODE, a LOSSY routing-weight miss tolerance (LRU-missing cold
+# experts with a small weight are neither read nor computed). Default OFF and OFF in config C (quality gate not passed
+# for it); adds strata_exl3_in_place() to expert_source.cpp. Part of the engine source of the shipped binary, with the
+# knob unset it changes nothing.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0009, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index f9fcd8d..5716337 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -1557,6 +1557,8 @@ struct MetalLane {
+     int early_ntok = 0;
+     float ya[8 * 2560] = {};
+     int64_t apre_calls = 0;
++    std::function<bool(size_t)> tier_has;   // set by the gather: is blob index (layer * n_expert + e) in the locked RAM tier (STRATA_MISS_TOL asks, read only)
++    size_t n_expert_idx = 0;
+ };
+ MetalLane& ml() { static MetalLane m; return m; }
+ bool ml_early_enabled() {
+@@ -1878,6 +1880,13 @@ extern "C" int strata_exl3_metal_taken() {
+     M.taken = false; M.w = nullptr; M.y = nullptr;
+     return t ? 1 : 0;
+ }
++// verify.cpp STRATA_MISS_TOL: is (layer, expert) readable without an SSD read (locked tier or a mini-LRU slot)?  1 also when the lane is not up yet (nothing is ever dropped then)
++extern "C" int strata_exl3_in_place(int64_t layer, int64_t e) {
++    MetalLane& M = ml();
++    if (!M.ok || !M.tier_has || M.n_expert_idx == 0 || layer < 0 || e < 0) return 1;
++    const size_t index = (size_t) layer * M.n_expert_idx + (size_t) e;
++    return (M.where.find((int64_t) index) != M.where.end() || M.tier_has(index)) ? 1 : 0;
++}
+ // 1+: distinct experts computed (rows written to M.y); 0: not handled (the NEON pool takes the layer); -1: d.failed set
+ constexpr int EXL3M_ROW = 2560;   // hidden size: one x / y row
+ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, const int32_t* kind,
+@@ -2000,6 +2009,7 @@ extern "C" int strata_pf_mac_submit_h(void*, int, int, const int32_t*, int, cons
+ extern "C" int strata_pf_mac_half_ok() { return 0; }
+ extern "C" int strata_pf_mac_nsets() { return 2; }
+ extern "C" int strata_exl3_metal_taken() { return 0; }
++extern "C" int strata_exl3_in_place(int64_t, int64_t) { return 1; }
+ static int exl3_metal_lane(ExpertDispatch&, const float*, const int32_t*, int64_t, int64_t, const int32_t*, double&, double&) { return 0; }
+ #endif
+ 
+@@ -2250,6 +2260,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+         const int pfd = (base_ != nullptr && !paths_.empty() && role_ptr_.empty() && !io_pf_ && direct_.empty() && layer >= 0 && layer < n_layers_)
+                             ? mac_pull_fd(paths_.front()) : -1;
+         int si = 0;
++        if (!M.tier_has) { M.n_expert_idx = (size_t) n_expert_; M.tier_has = [this](size_t ix) { return complement_ready_ && resident_blob(ix) != nullptr; }; }
+         for (int64_t i = 0; i < n && i < 128; ++i) {
+             M.ptrs[i] = nullptr;
+             M.status[i] = 255;
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 8cab814..89b82df 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -64,12 +64,69 @@ extern "C" void strata_mac_pull_begin(int64_t layer, const int64_t* experts, int
+ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64_t nc, const float* x, const int32_t* ids, const float* w, float* y, int n_tok, int64_t k);   // STRATA_EXL3_METAL_EARLY: start the layer's reads + the in-place experts' Metal job before the CE push is queued; 1 = taken
+ extern "C" void strata_exl3_metal_arm(const float* w, float* y);   // STRATA_EXL3_METAL: weights + output rows of the next pool call
+ extern "C" int strata_exl3_metal_taken();                           // 1: the Metal lane wrote the weighted, reduced CPU rows
++extern "C" int strata_exl3_in_place(int64_t layer, int64_t expert);   // 1: the expert's blob is in the mini's locked tier or LRU (reading it costs nothing)
+ namespace strata::core {
+ namespace {
+ 
+ constexpr float EPS = 1e-6f;
+ using Clock = std::chrono::steady_clock;
+ double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
++// STRATA_MISS_TOL=tau (LOSSY, default off; STRATA_MISS_TOL_MODE 0: per-row mass budget, 1: per-pair weight threshold): the Metal lane's LRU MISSES (an SSD read each) whose routing weight
++// is small are skipped.  Mode 0: an expert is dropped only if, in every row it appears in, the row's already dropped routing mass + its weight (as a fraction of the row's weight sum) stays <= tau,
++// smallest first.  Mode 1: dropped when its largest row fraction <= tau.  Dropped pairs get weight 0 and a VRAM-resident expert id of the layer (so the lane skips them); VRAM-resident and
++// in-place experts are never touched.  Counters go to stderr every 4800 rings.
++struct MissTolCfg {
++    double tau = 0.0; int mode = 0;
++    static MissTolCfg from_env() {
++        MissTolCfg c;
++        if (const char* v = std::getenv("STRATA_MISS_TOL")) c.tau = std::atof(v);
++        if (const char* v = std::getenv("STRATA_MISS_TOL_MODE")) c.mode = std::atoi(v);
++        if (c.tau > 0.0) std::fprintf(stderr, "strata misstol: LOSSY routing-weight miss tolerance ON: tau %.4f mode %d\n", c.tau, c.mode);
++        return c;
++    }
++};
++bool miss_tol_apply(const MissTolCfg& cfg, int64_t layer, int64_t ne, const int32_t* res, int n, int K, const int32_t* ids, const float* w, int32_t* io, float* wo) {
++    static int64_t rings = 0, dropped_pairs = 0, miss_experts = 0, rows = 0; static double mass = 0.0;
++    const int np = n * K;
++    if (n < 1 || n > 8 || np > 128) return false;
++    float rs[8] = {};
++    for (int i = 0; i < np; ++i) rs[i / K] += w[i];
++    struct C { int32_t e; float maxw; } c[128];
++    int nc = 0;
++    for (int i = 0; i < np; ++i) {
++        const int32_t e = ids[i];
++        if (e < 0 || e >= ne || res[e] >= 0 || rs[i / K] <= 0.0f) continue;
++        if (strata_exl3_in_place(layer, e)) continue;
++        const float fr = w[i] / rs[i / K];
++        int q = 0;
++        while (q < nc && c[q].e != e) ++q;
++        if (q == nc) { c[nc].e = e; c[nc++].maxw = fr; } else c[q].maxw = std::max(c[q].maxw, fr);
++    }
++    ++rings; rows += n; miss_experts += nc;
++    int dropped = 0;
++    if (nc > 0) {
++        for (int a = 1; a < nc; ++a) { const C t = c[a]; int b = a - 1; while (b >= 0 && c[b].maxw > t.maxw) { c[b + 1] = c[b]; --b; } c[b + 1] = t; }
++        int rep = -1;
++        for (int64_t e = 0; e < ne; ++e) if (res[e] >= 0) { rep = (int) e; break; }
++        if (rep >= 0) {
++            for (int i = 0; i < np; ++i) { io[i] = ids[i]; wo[i] = w[i]; }
++            float spent[8] = {};
++            for (int a = 0; a < nc; ++a) {
++                bool ok = true;
++                if (cfg.mode == 1) ok = c[a].maxw <= cfg.tau;
++                else for (int i = 0; ok && i < np; ++i) if (ids[i] == c[a].e && spent[i / K] + w[i] / rs[i / K] > cfg.tau) ok = false;
++                if (!ok) continue;
++                for (int i = 0; i < np; ++i)
++                    if (ids[i] == c[a].e) { const float fr = w[i] / rs[i / K]; spent[i / K] += fr; mass += fr; io[i] = rep; wo[i] = 0.0f; ++dropped_pairs; }
++                ++dropped;
++            }
++        }
++    }
++    if (rings % 4800 == 0)
++        std::fprintf(stderr, "strata misstol: %lld rings, LRU-miss experts/ring %.3f, dropped experts/ring %.3f, mean dropped routing mass per row-layer %.5f\n", (long long) rings,
++                     (double) miss_experts / (double) rings, (double) dropped_pairs / (double) rings, mass / (double) std::max<int64_t>(rows, 1));
++    return dropped > 0;
++}
+ const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
+ inline bool g_lfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE"); return v != nullptr && v[0] == '1'; }(); return on; }
+ // STRATA_ROUTE_RESIDENT=<margin logits> (+ STRATA_ROUTE_RESIDENT_RANKS=lo-hi, default 6-9): residency-biased routing.
+@@ -2199,6 +2256,13 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+             }
+             const double hs1 = hs_now();
+             const int32_t* ids = h_ids_ + (size_t) tb * K_;
++            const float* wsrc = h_w_ + (size_t) tb * K_;   // the weights the host side (Metal lane / CPU reduce) uses
++            int32_t ids_tol[kVerifyMaxT * 16]; float w_tol[kVerifyMaxT * 16];
++            {   // STRATA_MISS_TOL (LOSSY, default off): LRU-missing cold experts with a small routing weight are not read and not computed (their pairs get weight 0 and a resident expert id)
++                static const MissTolCfg mtc = MissTolCfg::from_env();
++                if (mtc.tau > 0.0 && n * K_ <= (int64_t) (sizeof ids_tol / sizeof ids_tol[0]) && h_res_ != nullptr)
++                    if (miss_tol_apply(mtc, l, ne_, h_res_ + l * ne_, (int) n, (int) K_, ids, wsrc, ids_tol, w_tol)) { ids = ids_tol; wsrc = w_tol; }
++            }
+             int r0 = -1, r1 = -1;
+             for (int t = 0; t < n; ++t)
+                 for (int64_t j = 0; j < K_; ++j) {
+@@ -2224,7 +2288,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+                         if (!dup) cold[nc++] = e;
+                     }
+                 // rows outside r0..r1 have no cold experts by construction of r0/r1 only for the first/last; scan all rows
+-                if (!(hs_got && strata_exl3_metal_begin(l, cold, nc, h_x_ + (size_t) tb * N_, ids, h_w_ + (size_t) tb * K_, h_yred_ + (size_t) tb * N_, n, K_)))
++                if (!(hs_got && strata_exl3_metal_begin(l, cold, nc, h_x_ + (size_t) tb * N_, ids, wsrc, h_yred_ + (size_t) tb * N_, n, K_)))
+                     strata_mac_pull_begin(l, cold, nc);
+             }
+             if (r0 >= 0) {
+@@ -2241,7 +2305,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+                     hs_merged = strata::tgcu::hs_push_pre(ps, ns, 2) == 0;
+                 }
+                 progress_at("verify window: the CPU experts of layer", l);
+-                strata_exl3_metal_arm(h_w_ + (size_t) tb * K_, h_yred_ + (size_t) tb * N_);
++                strata_exl3_metal_arm(wsrc, h_yred_ + (size_t) tb * N_);
+                 if (pool != nullptr)
+                     pool(user, h_x_ + (size_t) tb * N_, ids, n, ss.k, h_ymiss_ + (size_t) tb * K_ * N_, l);
+                 progress_tick();
+@@ -2254,7 +2318,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+                     for (int64_t j = 0; j < K_; ++j) {
+                         const int32_t e = ids[(size_t) t * K_ + j];
+                         if (!(e < 0 || e >= ne_ || h_res_ == nullptr || h_res_[l * ne_ + e] < 0)) continue;
+-                        const float wj = h_w_[(size_t) (tb + t) * K_ + j];
++                        const float wj = wsrc[(size_t) t * K_ + j];
+                         const float* y = h_ymiss_ + ((size_t) (tb + t) * K_ + j) * N_;
+                         if (first) { for (int64_t i = 0; i < N_; ++i) acc[i] = wj * y[i]; first = false; }
+                         else for (int64_t i = 0; i < N_; ++i) acc[i] += wj * y[i];

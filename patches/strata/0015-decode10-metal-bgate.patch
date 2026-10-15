@@ -1,0 +1,146 @@
+# Decode10 (2026-10-14): STRATA_D10_BGATE=1 (+ STRATA_D10_BGATE_CHECK): the misses' Metal job committed at the ring's
+# start gated on a Metal shared event, signalled when the reads have landed. Bit-exact, measured slower, default OFF;
+# needs libexl3metal_d10 (exl3m_moe_rows_submit_gated), not in this repo, so it stays off.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0014, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index eef8906..2e56930 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -1558,6 +1558,11 @@ struct MetalLane {
+     // 1: classify only, the reads are stashed in sj/sd; 2: run the stashed reads.
+     int (*rows_submit)(void*, const float*, int, int, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**) = nullptr;
+     int (*waitj)(void*, void*) = nullptr;
++    // Decode10 STRATA_D10_BGATE=1: the misses' job (B) is committed by strata_exl3_metal_begin at once, gated on a Metal shared event; the lane signals it when the reads have landed (the ~0.25 ms commit-to-start latency overlaps the reads)
++    int (*rows_submit_g)(void*, const float*, int, int, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**, uint64_t*) = nullptr;
++    void (*gate_signal)(void*, uint64_t) = nullptr;
++    void* jb = nullptr; uint64_t b_gate = 0; bool early_b = false, early_b_all = false;
++    int64_t bpre_calls = 0, bchk_calls = 0, bchk_bad = 0;
+     int phase = 0, spfd = -1;
+     uint8_t status[128] = {};   // per distinct expert of the last gather: 0 locked tier, 1 LRU hit, 2 miss read from the page cache, 3 miss read from the SSD, 255 none
+     std::vector<std::pair<uint64_t, uint64_t>> sj;
+@@ -1579,6 +1584,10 @@ struct MetalLane {
+     size_t n_expert_idx = 0;
+ };
+ MetalLane& ml() { static MetalLane m; return m; }
++bool ml_bgate_enabled() {
++    static const bool on = std::getenv("STRATA_D10_BGATE") != nullptr && std::atoi(std::getenv("STRATA_D10_BGATE")) != 0;
++    return on;
++}
+ bool ml_early_enabled() {
+     static const bool on = std::getenv("STRATA_EXL3_METAL_EARLY") != nullptr && std::atoi(std::getenv("STRATA_EXL3_METAL_EARLY")) != 0;
+     return on;
+@@ -1599,6 +1608,8 @@ bool ml_init(MetalLane& M) {
+     M.rows = (int (*)(void*, const float*, int, int, const int32_t*, const int32_t*, const float*, const void* const*, float*)) dlsym(M.lib, "exl3m_moe_rows");
+     M.rows_submit = (int (*)(void*, const float*, int, int, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**)) dlsym(M.lib, "exl3m_moe_rows_submit");
+     M.waitj = (int (*)(void*, void*)) dlsym(M.lib, "exl3m_wait");
++    M.rows_submit_g = (int (*)(void*, const float*, int, int, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**, uint64_t*)) dlsym(M.lib, "exl3m_moe_rows_submit_gated");
++    M.gate_signal = (void (*)(void*, uint64_t)) dlsym(M.lib, "exl3m_gate_signal");
+     M.lasterr = (const char* (*)()) dlsym(M.lib, "exl3m_last_error");
+     if (!create || !M.reg || !M.rows || !M.lasterr) { std::fprintf(stderr, "strata exl3-metal: missing symbols in %s\n", path.c_str()); return false; }
+     // STRATA_EXL3_METAL_JOBS (default 2): the context's job slots = Metal jobs in flight (the lockstep prompt lane keeps lag + 1 of them; prefill.cpp pf_jobs reads the same variable)
+@@ -2070,14 +2081,17 @@ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* i
+     bool ready[128];
+     int nready = 0;
+     bool split = false;
+-    bool early = false, a_pre = false;
++    bool early = false, a_pre = false, b_pre = false;
+     if (M.early_ok) {   // strata_mac_pull_begin / strata_exl3_metal_begin already mapped the slots and started the misses' reads (and the in-place job) for this layer's cold experts
+         early = M.early_layer == d.layers && M.early_n == nd;
+         for (int q = 0; early && q < nd; ++q) if (M.early_e[q] != distinct[q]) early = false;
+-        a_pre = early && M.early_a && M.early_x == x_f && M.early_w == M.w && M.early_y == M.y && M.early_ids == ids && M.early_ntok == (int) n_tok;
++        const bool xm = early && M.early_x == x_f && M.early_w == M.w && M.early_y == M.y && M.early_ids == ids && M.early_ntok == (int) n_tok;
++        a_pre = xm && M.early_a;
++        b_pre = xm && M.early_b;
+         M.early_ok = false;
+         if (a_pre) ++M.apre_calls;
+         if (!a_pre && M.early_a) { (void) M.waitj(M.ctx, M.ja); M.early_a = false; }   // not the job this call needs: let it finish, run the plain path
++        if (!b_pre && M.early_b) { mac_pull().finish(); M.gate_signal(M.ctx, M.b_gate); (void) M.waitj(M.ctx, M.jb); M.early_b = false; }   // Decode10: a gated job nobody will use: release it (its reads first), let it finish
+         if (!early) mac_pull().finish();   // another set was started: its reads must land before anything reads those slots
+     }
+     if (early || (split_on && nd >= 2)) {
+@@ -2110,12 +2124,32 @@ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* i
+         else rc = M.rows_submit(M.ctx, x_f, (int) n_tok, npa, ea, ra, wa, pa, M.ya, &ja);   // the in-place experts run on the GPU while the misses are read
+         if (early) mac_pull().finish(); else gather_phase(2);
+         t1 = std::chrono::steady_clock::now();
+-        if (rc == 0) rc = M.rows_submit(M.ctx, x_f, (int) n_tok, npb, eb, rb, wb, pb, M.y, &jb);
++        if (b_pre) { jb = M.jb; M.early_b = false; M.gate_signal(M.ctx, M.b_gate); ++M.bpre_calls; }   // Decode10: committed at the ring's start, released now that the reads have landed
++        else if (rc == 0) rc = M.rows_submit(M.ctx, x_f, (int) n_tok, npb, eb, rb, wb, pb, M.y, &jb);
+         if (ja != nullptr) { const int r2 = M.waitj(M.ctx, ja); if (rc == 0) rc = r2; }
+         if (jb != nullptr) { const int r2 = M.waitj(M.ctx, jb); if (rc == 0) rc = r2; }
++        {   // STRATA_D10_BGATE_CHECK=1: recompute the misses' job the plain way (after the reads, ungated) and compare it bit for bit with the gated job's rows
++            static const bool chk = std::getenv("STRATA_D10_BGATE_CHECK") != nullptr && std::atoi(std::getenv("STRATA_D10_BGATE_CHECK")) != 0;
++            if (chk && b_pre && rc == 0) {
++                static float yc[8 * 2560];
++                void* jc = nullptr;
++                if (M.rows_submit(M.ctx, x_f, (int) n_tok, npb, eb, rb, wb, pb, yc, &jc) == 0 && jc != nullptr && M.waitj(M.ctx, jc) == 0) {
++                    ++M.bchk_calls;
++                    if (std::memcmp(yc, M.y, (size_t) n_tok * EXL3M_ROW * sizeof(float)) != 0) { ++M.bchk_bad; std::fprintf(stderr, "strata exl3-metal: BGATE CHECK MISMATCH layer %lld (%lld bad of %lld)\n", (long long) d.layers, (long long) M.bchk_bad, (long long) M.bchk_calls); }
++                    else if (M.bchk_calls % 5000 == 0) std::fprintf(stderr, "strata exl3-metal: BGATE CHECK %lld gated jobs bit-identical to the plain job, %lld bad\n", (long long) M.bchk_calls, (long long) M.bchk_bad);
++                }
++            }
++        }
+         if (rc == 0) for (int64_t i = 0; i < n_tok * EXL3M_ROW; ++i) M.y[i] += M.ya[i];
+         t2 = std::chrono::steady_clock::now();
+         ++M.split_calls;
++    } else if (b_pre && M.early_b_all) {   // Decode10: no expert was in place: the one (gated) job of strata_exl3_metal_begin computes the layer's rows (into M.y)
++        mac_pull().finish();
++        t1 = std::chrono::steady_clock::now();
++        M.early_b = false;
++        M.gate_signal(M.ctx, M.b_gate); ++M.bpre_calls;
++        rc = M.waitj(M.ctx, M.jb);
++        t2 = std::chrono::steady_clock::now();
+     } else if (a_pre && M.early_all) {   // every expert was in place: strata_exl3_metal_begin submitted the one job (into M.y)
+         mac_pull().finish();
+         t1 = std::chrono::steady_clock::now();
+@@ -2200,6 +2234,7 @@ extern "C" void strata_mac_pull_begin(int64_t layer, const int64_t* experts, int
+ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64_t nc, const float* x, const int32_t* ids, const float* w, float* y, int n_tok, int64_t k) {
+     if (!ml_early_enabled()) return 0;
+     MetalLane& M = ml();
++    if (M.early_b) { mac_pull().finish(); M.gate_signal(M.ctx, M.b_gate); (void) M.waitj(M.ctx, M.jb); M.early_b = false; }   // Decode10: the previous ring's gated job was never claimed
+     if (M.early_a) { (void) M.waitj(M.ctx, M.ja); M.early_a = false; }
+     static const bool split_env = [] { const char* v = std::getenv("STRATA_EXL3_METAL_SPLIT"); return v != nullptr && std::atoi(v) != 0; }();
+     const bool split_on = split_env && M.rows_submit != nullptr && M.waitj != nullptr;
+@@ -2209,7 +2244,33 @@ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64
+     int nready = 0, amap[128];
+     const void* pa[128];
+     for (int q = 0; q < nc; ++q) { ready[q] = M.status[q] <= 1; if (ready[q]) { amap[q] = nready; pa[nready++] = M.ptrs[q]; } }
+-    if (nready == 0) return 1;
++    const bool bgate = ml_bgate_enabled() && M.rows_submit_g != nullptr && M.gate_signal != nullptr && M.waitj != nullptr;
++    auto submit_b = [&]() {   // Decode10: the misses' job, committed now, started by strata_exl3_metal_begin's caller-side gate (the lane signals it once the reads have landed)
++        const void* pb[128];
++        int bmap[128], nb = 0;
++        for (int q = 0; q < nc; ++q) if (!ready[q]) { bmap[q] = nb; pb[nb++] = M.ptrs[q]; }
++        int32_t eb[128], rb[128];
++        float wb[128];
++        int npb = 0;
++        for (int t = 0; t < n_tok; ++t)
++            for (int64_t j = 0; j < k; ++j) {
++                const int64_t i = (int64_t) t * k + j, e = ids[i];
++                int q = 0;
++                while (q < nc && cold[q] != e) ++q;
++                if (q == nc || ready[q]) continue;
++                if (npb >= 128) return false;
++                eb[npb] = bmap[q]; rb[npb] = t; wb[npb++] = w[i];
++            }
++        if (npb == 0) return false;
++        void* job = nullptr; uint64_t gv = 0;
++        if (M.rows_submit_g(M.ctx, x, n_tok, npb, eb, rb, wb, pb, y, &job, &gv) != 0 || job == nullptr) return false;
++        M.jb = job; M.b_gate = gv; M.early_b = true; M.early_b_all = nready == 0;
++        return true;
++    };
++    if (nready == 0) {
++        if (bgate && submit_b()) { M.early_x = x; M.early_w = w; M.early_y = y; M.early_ids = ids; M.early_ntok = n_tok; M.early_all = false; }
++        return 1;
++    }
+     int32_t ea[128], ra[128];
+     float wa[128];
+     int npa = 0;
+@@ -2227,6 +2288,7 @@ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64
+     if (M.rows_submit(M.ctx, x, n_tok, npa, ea, ra, wa, pa, out, &job) != 0 || job == nullptr) return 1;   // the lane does it the plain way
+     M.ja = job; M.early_a = true; M.early_all = nready == nc;
+     M.early_x = x; M.early_w = w; M.early_y = y; M.early_ids = ids; M.early_ntok = n_tok;
++    if (bgate && nready < nc) submit_b();   // Decode10: B follows A on the queue; it starts once the lane has signalled its gate
+     return 1;
+ }
+ #else

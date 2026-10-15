@@ -1,0 +1,300 @@
+# Prefill600 (2026-10-12): path_select lane-min + PLE warm-ahead. include/strata/prefill/path_select.hpp (new, with
+# src/prefill/path_select_test.cpp): the Mac cold-expert lane takes every batched chunk (default minimum 1 instead of
+# 256; chunks of 65..255 new tokens used to fall to the streaming prefill at ~0.3 s/token) and the chunk is cut into
+# equal parts; ngram.cpp/hpp + prefill.cpp: STRATA_PF_PLE_WARM_AHEAD (default 12) pre-reads the PLE n-gram rows of the
+# chunks after the first lockstep group; expert_source.cpp: exports the last Metal prefill job's GPU time (strata_pf_mac_gpu_ms) for the stats line.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0005, applied in order with `git apply -p1`.
+
+diff --git a/include/strata/kernels/ngram.hpp b/include/strata/kernels/ngram.hpp
+index 207707d..f19b0d0 100644
+--- a/include/strata/kernels/ngram.hpp
++++ b/include/strata/kernels/ngram.hpp
+@@ -186,6 +186,9 @@ public:
+     /// as ONE reader request - page dedupe and sort across the whole batch, the reader's full queue depth.  Not
+     /// while a single-token `issue` is pending.  The mapped mode gathers row by row.
+     bool gather_batch(const uint32_t* rows, size_t n_tokens, float* out, std::string& err);
++    /// Prefill600: read `n_rows` rows (a chunk's `rows`, 16 per token) into the reader's row cache and throw the data away, so a later `gather_batch` of the same
++    /// rows is served from the cache.  Safe beside a `gather_batch` on another thread (the reader serialises requests); Direct mode only (else a no-op).
++    bool warm_rows(const uint32_t* rows, size_t n_rows, std::string& err);
+ 
+     /// Fault injection (Direct mode): every row read completes no earlier than `us` after issue.
+     void set_injected_delay_us(double us);
+diff --git a/include/strata/prefill/path_select.hpp b/include/strata/prefill/path_select.hpp
+new file mode 100644
+index 0000000..afa53db
+--- /dev/null
++++ b/include/strata/prefill/path_select.hpp
+@@ -0,0 +1,48 @@
++// path_select.hpp - which way a fresh prompt part is read: the decode windows, the Mac cold-expert lane (STRATA_PF_MAC) or the plain streaming prefill.
++// Pure functions shared by generate.cpp (the windows/batched split), prefill.cpp (the lane / stream choice per chunk, the chunk size) and path_select_test.cpp.
++//
++// Why this exists (Prefill600, 2026-10-12): a chunk below the lane's minimum (default 256) did not take the lane; it fell back to the streaming prefill, which pushes
++// every cold expert of every layer over the 190 MB/s USB link: 82-239 new tokens (just above --short-read 64) took 42-77 s (2-3 tok/s), while 26-60 tokens
++// (windows) took 1-2.5 s and 368+ tokens (lane) 10-13 s.  The lane's cost is the SSD read of the cold experts, about the same for 70 or 2,000 tokens, so there is no
++// size at which the streaming path wins: with the lane on, every batched chunk takes it.
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace strata::prefill {
++
++enum class ReadPath { Windows, MacLane, Stream };
++
++// the largest chunk the lane's host buffers are sized for
++inline constexpr int64_t kMacLaneMaxChunk = 16384;
++
++// STRATA_PF_MAC_MIN default: the lane takes any chunk (the batched path is only entered for parts of more than --short-read tokens or picture rows)
++inline constexpr int64_t kMacLaneMinDefault = 1;
++
++// the path of one chunk of t tokens on the batched path
++inline ReadPath batched_chunk_path(int64_t t, bool lane_on, int64_t lane_min) {
++    return lane_on && t >= lane_min && t <= kMacLaneMaxChunk ? ReadPath::MacLane : ReadPath::Stream;
++}
++
++// STRATA_PF_EVEN: a lane prompt of more than one chunk of at most t_max tokens is cut into ceil(n / t_max) chunks of (nearly) equal size, rounded up to 16
++inline int64_t even_chunk(int64_t n, int64_t t_max, bool even_on) {
++    if (!even_on || n <= t_max) return t_max;
++    const int64_t k = (n + t_max - 1) / t_max;
++    return std::min<int64_t>(t_max, ((n + k - 1) / k + 15) & ~(int64_t) 15);
++}
++
++// the path of a fresh prompt part of n tokens: windows when n <= short_read, else the batched path, whose chunks (even_chunk) all take the same path unless a
++// short tail falls below lane_min; returns the slowest path any chunk takes (Stream > MacLane > Windows)
++inline ReadPath part_path(int64_t n, int64_t short_read, int64_t t_max, bool lane_on, int64_t lane_min, bool even_on = true) {
++    if (n <= short_read) return ReadPath::Windows;
++    const int64_t tc = lane_on ? even_chunk(n, t_max, even_on) : t_max;
++    ReadPath worst = ReadPath::MacLane;
++    for (int64_t c = 0; c < n; c += tc) {
++        const int64_t t = std::min(tc, n - c);
++        if (batched_chunk_path(t, lane_on, lane_min) == ReadPath::Stream) worst = ReadPath::Stream;
++    }
++    return worst;
++}
++
++}  // namespace strata::prefill
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index 3838c3f..f9fcd8d 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -1706,6 +1706,8 @@ struct PfMac {
+     int (*psub)(void*, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**) = nullptr;
+     int (*pwait)(void*, void*) = nullptr;
+     int (*psubh)(void*, const uint16_t*, int, int64_t, const int32_t*, const int32_t*, const float*, const void* const*, uint16_t*, void**) = nullptr;
++    void (*pstats)(void*, void*) = nullptr;   // exl3m_get_stats (Prefill600: the Metal job time of the stats line)
++    double gpu_ms = 0;
+ };
+ PfMac& pfm() { static PfMac p; return p; }
+ }  // namespace
+@@ -1721,6 +1723,7 @@ extern "C" int strata_pf_mac_init(void* srcv, const int32_t* host_res, int64_t h
+     P.psub = (int (*)(void*, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, const void* const*, float*, void**)) dlsym(M.lib, "exl3m_moe_prefill_submit");
+     P.pwait = (int (*)(void*, void*)) dlsym(M.lib, "exl3m_wait");
+     P.psubh = (int (*)(void*, const uint16_t*, int, int64_t, const int32_t*, const int32_t*, const float*, const void* const*, uint16_t*, void**)) dlsym(M.lib, "exl3m_moe_prefill_h_submit");
++    P.pstats = (void (*)(void*, void*)) dlsym(M.lib, "exl3m_get_stats");
+     if (P.pfill == nullptr || P.unreg == nullptr) { std::fprintf(stderr, "strata pf-mac: exl3m_moe_prefill / exl3m_unregister missing in the Metal lib\n"); return -2; }
+     P.host_res = host_res; P.host_layers = host_layers; P.mode = 3;
+     static_cast<ExpertSource*>(srcv)->prefetch(0, (const int64_t*) nullptr, 0);
+@@ -1854,8 +1857,14 @@ extern "C" int strata_pf_mac_wait(void* job) {
+         if (P.warned++ < 5) std::fprintf(stderr, "strata pf-mac: exl3m_wait failed (%d): %s\n", rc, M.lasterr());
+         return -3;
+     }
++    if (P.pstats != nullptr) {   // mirror of exl3m_stats (exl3_metal.h): 4 counters, then gpu_ms_last
++        struct { uint64_t c[4]; double gpu_ms_last, wall_ms_last, encode_ms_last, copy_ms_last; } st{};
++        P.pstats(M.ctx, &st);
++        P.gpu_ms = st.gpu_ms_last;
++    }
+     return 0;
+ }
++extern "C" double strata_pf_mac_gpu_ms() { return pfm().gpu_ms; }   // the last waited Metal job's GPU time (ms)
+ // verify.cpp: arm the weights + output rows of the next pool call; after it, ask whether the Metal lane produced the reduced rows
+ extern "C" void strata_exl3_metal_arm(const float* w, float* y) {
+     if (!ml_enabled()) return;
+diff --git a/src/kernels/ngram.cpp b/src/kernels/ngram.cpp
+index 90631b4..0e5a8d7 100644
+--- a/src/kernels/ngram.cpp
++++ b/src/kernels/ngram.cpp
+@@ -504,6 +504,13 @@ bool PleTable::collect(float* out2560, std::string& err) {
+     return true;
+ }
+ 
++bool PleTable::warm_rows(const uint32_t* rows, size_t n_rows, std::string& err) {
++    if (impl_->mode != PleIo::Direct || !impl_->reader.is_open() || n_rows == 0) return true;
++    std::vector<uint8_t> raw(n_rows * (size_t) impl_->rb);
++    const auto ticket = impl_->reader.issue(rows, n_rows, raw.data());
++    return impl_->reader.collect(ticket, err);
++}
++
+ bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, std::string& err) {
+     if (impl_->pending) { err = "PleTable::gather_batch while a token is in flight"; return false; }
+     const size_t n = n_tokens * (size_t) PLE_N_HEADS;
+diff --git a/src/prefill/path_select_test.cpp b/src/prefill/path_select_test.cpp
+new file mode 100644
+index 0000000..2bc1c05
+--- /dev/null
++++ b/src/prefill/path_select_test.cpp
+@@ -0,0 +1,51 @@
++// path_select_test.cpp - card-free test of the read-path selection (include/strata/prefill/path_select.hpp).
++// Build: clang++ -std=c++20 -I include src/prefill/path_select_test.cpp -o path_select_test && ./path_select_test
++#include <cstdio>
++#include <cstdlib>
++
++#include "strata/prefill/path_select.hpp"
++
++using namespace strata::prefill;
++
++static int fails = 0;
++#define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++fails; } } while (0)
++
++int main() {
++    const int64_t T = 2048, SHORT = 64;
++
++    // the anomaly: with the lane's old minimum (256) every part of 65..255 tokens streamed its experts over the link (42-77 s on the card)
++    for (int64_t n = SHORT + 1; n < 256; ++n) CHECK(part_path(n, SHORT, T, true, 256) == ReadPath::Stream);
++    for (int64_t n = 256; n <= 3000; ++n) CHECK(part_path(n, SHORT, T, true, 256) == ReadPath::MacLane || n > 2048);   // (n > 2048: a tail below 256 can still stream)
++    CHECK(part_path(2048 + 100, SHORT, T, true, 256) == ReadPath::MacLane);   // even chunks 1074 + 1074: no tail pass
++    CHECK(part_path(2048 * 3 + 5, SHORT, T, true, 256) == ReadPath::MacLane);
++
++    // the fix: with the new default no part ever takes the streaming path while the lane is on
++    for (int64_t n = 1; n <= 40000; ++n) {
++        const ReadPath p = part_path(n, SHORT, T, true, kMacLaneMinDefault);
++        if (n <= SHORT) CHECK(p == ReadPath::Windows);
++        else CHECK(p == ReadPath::MacLane);
++    }
++    // picture rows / other callers enter the batched path with any size, including 1..64 tokens
++    for (int64_t t = 1; t <= T; ++t) CHECK(batched_chunk_path(t, true, kMacLaneMinDefault) == ReadPath::MacLane);
++
++    // without the lane the batched path is the streaming one, whatever the size
++    for (int64_t n = SHORT + 1; n <= 5000; n += 7) CHECK(part_path(n, SHORT, T, false, kMacLaneMinDefault) == ReadPath::Stream);
++
++    // chunking: equal chunks <= T, a multiple of 16, covering the part; never a runt tail
++    for (int64_t n = 1; n <= 70000; n += 13) {
++        const int64_t tc = even_chunk(n, T, true);
++        CHECK(tc >= 1 && tc <= T);
++        if (n > T) {
++            CHECK(tc % 16 == 0);
++            const int64_t k = (n + tc - 1) / tc;
++            CHECK(k == (n + T - 1) / T);              // as many chunks as the plain split
++            CHECK(n - (k - 1) * tc >= tc - 16 * (k + 1));   // the last chunk is within the rounding of the others
++        } else CHECK(tc == T);
++    }
++    CHECK(even_chunk(8218, T, true) == 1648);          // the measured case: 5 x 1648, not 4 x 2048 + 26
++    CHECK(even_chunk(8218, T, false) == T);
++
++    if (fails) { std::printf("%d failure(s)\n", fails); return 1; }
++    std::printf("path_select_test: all ok\n");
++    return 0;
++}
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 3305e29..292dbde 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -30,6 +30,7 @@
+ #include "strata/kernels/qsa_decode_attn.hpp"
+ #include "strata/kernels/qsa_prompt_attn.hpp"
+ #include "strata/kernels/qsa_select.hpp"
++#include "strata/prefill/path_select.hpp"
+ #include "strata/prefill/gemm.hpp"
+ #include "strata/prefill/moe_fused.hpp"
+ #include "strata/prefill/moe_fused_iq.hpp"
+@@ -101,6 +102,7 @@ extern "C" void strata_pf_mac_release();
+ extern "C" int strata_pf_mac_compute(void*, int, int, const int32_t*, int, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, float*, double*);
+ extern "C" int strata_pf_mac_submit(void*, int, int, const int32_t*, int, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, float*, void**, double*);
+ extern "C" int strata_pf_mac_wait(void*);
++extern "C" double strata_pf_mac_gpu_ms();
+ extern "C" int strata_pf_mac_submit_h(void*, int, int, const int32_t*, int, const uint16_t*, int, int64_t, const int32_t*, const int32_t*, const float*, uint16_t*, void**, double*);
+ extern "C" int strata_pf_mac_half_ok();
+ extern "C" int strata_pf_mac_nsets();
+@@ -167,8 +169,8 @@ inline bool pf_mac_enabled() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_MAC"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+ }
+-inline int64_t pf_mac_min() {
+-    static const int64_t v = [] { const char* e = std::getenv("STRATA_PF_MAC_MIN"); return e ? (int64_t) std::atoll(e) : (int64_t) 256; }();
++inline int64_t pf_mac_min() {   // default kMacLaneMinDefault (1): every batched chunk takes the lane (path_select.hpp: below the old 256 a chunk streamed its experts over the USB link, 2-3 tok/s)
++    static const int64_t v = [] { const char* e = std::getenv("STRATA_PF_MAC_MIN"); return e ? (int64_t) std::atoll(e) : strata::prefill::kMacLaneMinDefault; }();
+     return v;
+ }
+ inline bool pf_mac_y16() {
+@@ -2171,9 +2173,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+     // the tail (8218 = 4 x 2048 + 26) was a separate plain pass that streams its cold experts over the link
+     const int64_t Tc = [&]() -> int64_t {
+         static const bool even = [] { const char* v = std::getenv("STRATA_PF_EVEN"); return v == nullptr || std::atoi(v) != 0; }();
+-        if (!even || !pf_mac_enabled() || hand_in_ != nullptr || next_ != nullptr || n <= m.T) return m.T;
+-        const int64_t k = (n + m.T - 1) / m.T;
+-        return std::min<int64_t>(m.T, ((n + k - 1) / k + 15) & ~(int64_t) 15);
++        if (!pf_mac_enabled() || hand_in_ != nullptr || next_ != nullptr) return m.T;
++        return strata::prefill::even_chunk(n, m.T, even);
+     }();
+     const bool helped = single_chunk && bind_stage_helper(n);
+     if (helped) std::swap(m.pp, m.help_pp);
+@@ -2226,6 +2227,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+     std::string ple_next_err;
+     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
+     int ple_buf = 0;
++    std::atomic<int64_t> ple_landed{0};      // Prefill600: chunks whose PLE rows have landed (paces the warm-ahead thread)
++    std::atomic<bool> ple_warm_stop{false};
++    std::thread ple_warm_thr;                // joined before anything it reads goes away (declared after ple_next: destroyed first)
++    struct WarmJoin { std::atomic<bool>& stop; std::thread& th; ~WarmJoin() { stop.store(true); if (th.joinable()) th.join(); } } ple_warm_join{ple_warm_stop, ple_warm_thr};
+ 
+     // STRATA_PF_GROUP: the chunk loop's body, callable on its own stack so a lockstep group of chunks can interleave at layer granularity (`ls` null: the plain loop)
+     struct BufRestore {
+@@ -2311,6 +2316,30 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
+                 return ple_gather(c0, b, ple_next_err);
+             });
++        if (ple_on && n > Tc * std::max(1, pf_group_n()) && !ple_warm_thr.joinable()) {   // Prefill600: the rows of the chunks after the first group are read ahead (a chunk's gather only started when the one before it landed at layer 1: ~0.75 s each on fresh text, chained)
++            static const int warm_ahead = [] { const char* v = std::getenv("STRATA_PF_PLE_WARM_AHEAD"); return v != nullptr ? std::atoi(v) : 12; }();
++            if (warm_ahead > 0)
++                ple_warm_thr = std::thread([&ss, tokens, n, prev0, Tc, &ple_landed, &ple_warm_stop] {
++                    std::this_thread::sleep_for(std::chrono::milliseconds(20));   // the first chunk's own gather is queued first
++                    auto at = [&](int64_t i) { return i < 2 ? prev0[i] : (int32_t) tokens[i - 2]; };
++                    std::vector<uint32_t> rows;
++                    std::string werr;
++                    for (int64_t k = std::max<int64_t>(1, pf_group_n()), nk = (n + Tc - 1) / Tc; k < nk && !ple_warm_stop.load(); ++k) {   // (the first group's rows are needed within a second of the start: warming them only queues behind/ahead of each other on the same SSD)
++                        while (!ple_warm_stop.load() && k > ple_landed.load(std::memory_order_relaxed) + warm_ahead) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++                        if (ple_warm_stop.load()) break;
++                        const int64_t c1 = k * Tc, T1 = std::min(Tc, n - c1);
++                        rows.resize((size_t) T1 * strata::kernels::PLE_N_HEADS);
++                        int32_t pv[2] = {at(c1), at(c1 + 1)};
++                        for (int64_t t = 0; t < T1; ++t) {
++                            const int32_t tok = (int32_t) tokens[c1 + t];
++                            strata::kernels::ngram_rows(&tok, pv, 1, ss.ple.consts, rows.data() + t * strata::kernels::PLE_N_HEADS);
++                            pv[0] = pv[1];
++                            pv[1] = tok;
++                        }
++                        if (!ss.ple.table->warm_rows(rows.data(), rows.size(), werr)) break;   // best effort: the chunk's own gather reports a real error
++                    }
++                });
++        }
+         bool ple_pending = ple_on;
+         // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
+         auto ple_land = [&]() -> bool {
+@@ -2338,6 +2367,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                 });
+             }
+             ple_buf ^= 1;
++            ple_landed.fetch_add(1, std::memory_order_relaxed);
+             stats_.ms_ple += ms_since(tp);
+             return true;
+         };
+@@ -2386,7 +2416,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         // STRATA_PF_MAC: from pf_mac_min() tokens a chunk's cold EXL3 experts (not VRAM-resident) are computed on the Mac's GPU (expert_source.cpp PfMac): the
+         // layer's input rows come down the link, the fp32 partial sums go back, instead of every cold blob streaming up it
+         int mac_per_set = 0;
+-        if (pf_mac_enabled() && lay0.exl3 && m.host_res != nullptr && m.cache != nullptr && m.src != nullptr && m.mac_y_dev != nullptr && T >= pf_mac_min() && T <= 16384) {
++        if (lay0.exl3 && m.host_res != nullptr && m.cache != nullptr && m.src != nullptr && m.mac_y_dev != nullptr &&
++            strata::prefill::batched_chunk_path(T, pf_mac_enabled(), pf_mac_min()) == strata::prefill::ReadPath::MacLane) {
+             mac_per_set = strata_pf_mac_init(m.src, m.host_res, LE);   // the slot sets live for the duration of one prompt (released in Prefill::run)
+             if (mac_per_set <= 0) std::fprintf(stderr, "strata pf-mac: lane NOT available (%d)\n", mac_per_set);
+         }
+@@ -4210,8 +4241,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             t4 = Clk::now();
+                             if (pf_mac_stats()) {
+                                 auto ms = [](Clk::time_point a, Clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+-                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f ms\n",
+-                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period);
++                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f mgpu %.1f ms\n",
++                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period, strata_pf_mac_gpu_ms());
+                             }
+                         }
+                     }

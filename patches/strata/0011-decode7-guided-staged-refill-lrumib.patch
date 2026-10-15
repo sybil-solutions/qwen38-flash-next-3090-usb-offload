@@ -1,0 +1,729 @@
+# Decode7 (2026-10-13): STRATA_D7_MODE bits: 1 = guided refill of the prefill-lent VRAM slots (prompt routing histogram
+# + usage EMA score), 2 = LRU warm of the free scratch slots, 4 = staged refill (strata_stage_begin/finish: F_NOCACHE
+# preads into a staging buffer, one multi-blob H2D per 8-slot piece). Also the engine command `LRUMIB <mib>`
+# (strata_lru_resize_mib: the mini-side expert LRU gives RAM back for the vision encoder and takes it again). Files:
+# generate.cpp, expert_source.cpp, verify.cpp, prefill.cpp.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0010, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index 5716337..95315d2 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -33,6 +33,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <thread>
++#include <unordered_set>
+ #include <functional>
+ #include <utility>
+ #include <vector>
+@@ -1333,6 +1334,7 @@ struct MacPull {
+     const std::vector<std::pair<uint64_t, uint64_t>>* jobs = nullptr;
+     int fd = -1;
+     std::atomic<size_t> next{0}, completed{0};
++    std::atomic<int> short_reads{0};
+     size_t n = 0;
+     uint64_t gen = 0;
+     bool quit = false;
+@@ -1351,6 +1353,7 @@ struct MacPull {
+                 if (r <= 0) break;
+                 got += (uint64_t) r;
+             }
++            if (got < j.second) short_reads.fetch_add(1);   // Decode7: the staged refill must not copy a short read into VRAM
+             if (completed.fetch_add(1) + 1 == n) { std::lock_guard<std::mutex> lk(mu); done_cv.notify_all(); }
+         }
+     }
+@@ -1504,6 +1507,7 @@ struct MetalLane {
+     uint8_t* slots = nullptr;
+     size_t stride = 0;
+     int nslots = 64;
++    int nslots_max = 0;   // Decode7: the slots mapped at start; nslots <= nslots_max is the part in use (strata_lru_resize_mib)
+     const float* w = nullptr;     // armed by verify.cpp for one pool call: the window's routing weights [n x k] and the output rows [n x 2560]
+     float* y = nullptr;
+     bool taken = false, gather = false;
+@@ -1587,6 +1591,7 @@ bool ml_init(MetalLane& M) {
+     M.ctx = create(0, std::max(2, std::min(8, std::getenv("STRATA_EXL3_METAL_JOBS") ? std::atoi(std::getenv("STRATA_EXL3_METAL_JOBS")) : 2)));
+     if (M.ctx == nullptr) { std::fprintf(stderr, "strata exl3-metal: exl3m_create failed: %s\n", M.lasterr()); return false; }
+     if (const char* ev = std::getenv("STRATA_EXL3_METAL_SLOTS")) M.nslots = std::max(64, std::min(8192, std::atoi(ev)));
++    M.nslots_max = M.nslots;
+     M.stamp.assign((size_t) M.nslots, 0u);
+     M.key.assign((size_t) M.nslots, (int64_t) -1);
+     M.lprev.assign((size_t) M.nslots, -1); M.lnext.assign((size_t) M.nslots, -1);
+@@ -1712,6 +1717,28 @@ struct PfMac {
+     double gpu_ms = 0;
+ };
+ PfMac& pfm() { static PfMac p; return p; }
++// ---- Decode7: prompt-guided warm of the mini LRU, staged loan refill, cold-start hit-rate curve
++thread_local int tl_d7_mode = 0;   // 5: warm the LRU from D7Warm, 6: begin the staged blob reads of D7Stage (FileExpertSource::prefetch, which owns the file mapping)
++struct D7Warm { std::vector<uint32_t> idx; int extra = 0, nthr = 6; int rc = -1; int64_t loaded = 0, nfree = 0; double ms = 0; };
++D7Warm& d7w() { static D7Warm w; return w; }
++struct D7Stage { std::vector<uint32_t> idx; std::vector<uint64_t> off; uint8_t* base = nullptr; int rc = -1; };
++D7Stage& d7s() { static D7Stage s; return s; }
++// STRATA_CURVE=1: per 100 ring calls after strata_curve_mark (a request's first decode ring), up to STRATA_CURVE_N (2400) calls: experts per call, split into locked-tier / LRU hit / LRU miss
++const bool g_cv_on = std::getenv("STRATA_CURVE") != nullptr && std::atoi(std::getenv("STRATA_CURVE")) != 0;
++int64_t g_cv_calls = 0, g_cv_n = 0, g_cv_k[3] = {0, 0, 0};
++int g_cv_tag = 0;
++void cv_note(const MetalLane& M, int nd) {
++    static const int64_t lim = [] { const char* e = std::getenv("STRATA_CURVE_N"); return e ? (int64_t) std::atoll(e) : (int64_t) 2400; }();
++    if (g_cv_calls >= lim) return;
++    for (int q = 0; q < nd; ++q) { const int s = M.status[q]; if (s == 0) ++g_cv_k[0]; else if (s == 1) ++g_cv_k[1]; else if (s == 2 || s == 3) ++g_cv_k[2]; }
++    g_cv_n += nd;
++    if (++g_cv_calls % 100 == 0) {
++        const double c = 100.0;
++        std::fprintf(stderr, "strata curve: tag %d calls %lld-%lld experts/call %.2f tier %.2f hit %.2f miss %.2f\n", g_cv_tag, (long long) g_cv_calls - 99, (long long) g_cv_calls,
++                     (double) g_cv_n / c, (double) g_cv_k[0] / c, (double) g_cv_k[1] / c, (double) g_cv_k[2] / c);
++        g_cv_n = 0; g_cv_k[0] = g_cv_k[1] = g_cv_k[2] = 0;
++    }
++}
+ }  // namespace
+ // prefill.cpp (STRATA_PF_MAC): size + allocate the slot sets from the placement (per_set = the most non-tier cold experts of any layer) and register
+ // them with the Metal lane.  Returns per_set (>0), or <0.  The mapping is read through src->prefetch, which sees mode 3.
+@@ -1758,6 +1785,111 @@ extern "C" void strata_pf_mac_release() {
+     P.slots = nullptr;
+     for (int s = 0; s < 4; ++s) P.tag[s] = -1;
+ }
++// ---- Decode7 API (generate.cpp).  All of them run on a thread that owns the LRU while no decode ring is in flight (between a prompt's end and its first window).
++// strata_lru_warm: the experts `idx` (layer * n_expert + e, hottest first) that the locked tier and the LRU do not hold are read (F_NOCACHE, `nthr` threads) into the LRU's free slots (the
++// scratch sets the prompt just gave back) plus `extra` of its coldest, and become its most recent entries in that order.  Returns the number loaded (<0: not available).
++extern "C" int64_t strata_lru_warm(void* srcv, const int32_t* idx, int n, int extra, int nthr, double* ms_out) {
++    D7Warm& W = d7w();
++    W.idx.assign((size_t) (n > 0 ? n : 0), 0u);
++    for (int i = 0; i < n; ++i) W.idx[(size_t) i] = (uint32_t) idx[i];
++    W.extra = extra; W.nthr = nthr; W.rc = -1; W.loaded = 0; W.ms = 0; W.nfree = 0;
++    tl_d7_mode = 5;
++    static_cast<ExpertSource*>(srcv)->prefetch(0, (const int64_t*) nullptr, 0);
++    tl_d7_mode = 0;
++    if (ms_out != nullptr) *ms_out = W.ms;
++    return W.rc == 0 ? W.loaded : -1;
++}
++// strata_lru_drop: the experts `idx` are in VRAM now: free their LRU slots (they are the next victims).  Returns the number freed.
++extern "C" int strata_lru_drop(const int32_t* idx, int n) {
++    MetalLane& M = ml();
++    if (M.slots == nullptr || M.where.empty()) return 0;
++    int freed = 0;
++    for (int i = 0; i < n; ++i) {
++        const auto h = M.where.find((int64_t) idx[i]);
++        if (h == M.where.end()) continue;
++        const int vs = h->second;
++        M.where.erase(h);
++        M.key[(size_t) vs] = -1; M.stamp[(size_t) vs] = 0;
++        M.lru_unlink(vs); M.lru_push_back(vs);
++        ++freed;
++    }
++    return freed;
++}
++// strata_stage_begin / strata_stage_finish: read the blobs `idx` (layer * n_expert + e) straight from experts.bin into `base + off[i]` on the mac-pull threads (F_NOCACHE with STRATA_MAC_PULL_NOCACHE),
++// begin returns at once, finish joins and returns the number of short reads (0 = every byte landed).  begin < 0: not available (the caller refills the old way).
++extern "C" int strata_stage_begin(void* srcv, const int32_t* idx, const uint64_t* off, int n, uint8_t* base) {
++    D7Stage& S = d7s();
++    S.idx.assign((size_t) (n > 0 ? n : 0), 0u); S.off.assign((size_t) (n > 0 ? n : 0), 0u);
++    for (int i = 0; i < n; ++i) { S.idx[(size_t) i] = (uint32_t) idx[i]; S.off[(size_t) i] = off[i]; }
++    S.base = base; S.rc = -1;
++    tl_d7_mode = 6;
++    static_cast<ExpertSource*>(srcv)->prefetch(0, (const int64_t*) nullptr, 0);
++    tl_d7_mode = 0;
++    return S.rc;
++}
++extern "C" int strata_stage_finish() {
++    mac_pull().finish();
++    return mac_pull().short_reads.load();
++}
++extern "C" void strata_curve_mark(int tag) { g_cv_calls = 0; g_cv_n = 0; g_cv_k[0] = g_cv_k[1] = g_cv_k[2] = 0; g_cv_tag = tag; }
++// strata_lru_resize_mib (Decode7 lever 4, the LRUMIB engine command between requests): give `mib` MiB of the mini LRU's slots back to the OS (the vision encoder needs ~1.2 GB of wired RAM and Metal working set
++// while it runs), or all of it back with mib <= 0.  The released tail slots leave the recency list and the Metal registration (re-registered smaller) and their pages are unlocked and dropped; growing maps + locks
++// them again (empty slots at the victim end; the caller warms them).  Returns the slots in use afterwards, < 0 on failure (nothing changed then, or the old size is registered again).
++extern "C" int strata_lru_resize_mib(int mib, double* ms_out) {
++    MetalLane& M = ml();
++    if (!M.ok || M.slots == nullptr || M.nslots_max <= 0 || M.lib == nullptr) return -1;
++    if (pfm().slots != nullptr) return -2;   // a prompt's scratch sets are out of the LRU
++    const auto t0 = std::chrono::steady_clock::now();
++    int target = M.nslots_max;
++    if (mib > 0) target = std::max(1024, M.nslots_max - (int) (((size_t) mib * 1048576u + M.stride - 1) / M.stride));
++    target = std::min(target, M.nslots_max);
++    const int old = M.nslots;
++    if (target == old) return old;
++    auto unreg = (int (*)(void*, const void*)) dlsym(M.lib, "exl3m_unregister");
++    if (unreg == nullptr) return -3;
++    uint8_t* const lo = M.slots + M.stride * (size_t) std::min(old, target);
++    const size_t len = M.stride * (size_t) std::abs(old - target);
++    if (target < old) {
++        for (int s = target; s < old; ++s) {
++            if (M.key[(size_t) s] >= 0) { M.where.erase(M.key[(size_t) s]); M.key[(size_t) s] = -1; }
++            M.lru_unlink(s);
++            M.stamp[(size_t) s] = 0;
++        }
++        (void) unreg(M.ctx, M.slots);
++        if (M.reg(M.ctx, M.slots, M.stride * (size_t) target) <= 0) {
++            std::fprintf(stderr, "strata exl3-metal: LRU shrink: re-registration failed: %s\n", M.lasterr());
++            (void) M.reg(M.ctx, M.slots, M.stride * (size_t) old);
++            for (int s = target; s < old; ++s) M.lru_push_back(s);
++            return -4;
++        }
++        (void) munlock(lo, len);
++        if (mmap(lo, len, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) == MAP_FAILED) std::fprintf(stderr, "strata exl3-metal: LRU shrink: could not drop the tail pages (errno %d)\n", errno);
++    } else {
++        if (mmap(lo, len, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) == MAP_FAILED) { std::fprintf(stderr, "strata exl3-metal: LRU grow: mmap failed (errno %d)\n", errno); return -5; }
++        std::memset(lo, 0, len);
++        if (mlock(lo, len) != 0) std::fprintf(stderr, "strata exl3-metal: LRU grow: mlock of %d slots FAILED (errno %d)\n", target - old, errno);
++        (void) unreg(M.ctx, M.slots);
++        if (M.reg(M.ctx, M.slots, M.stride * (size_t) target) <= 0) {
++            std::fprintf(stderr, "strata exl3-metal: LRU grow: re-registration failed: %s\n", M.lasterr());
++            (void) M.reg(M.ctx, M.slots, M.stride * (size_t) old);
++            (void) munlock(lo, len);
++            (void) mmap(lo, len, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0);
++            return -4;
++        }
++        for (int s = old; s < target; ++s) { M.key[(size_t) s] = -1; M.stamp[(size_t) s] = 0; M.lru_push_back(s); }
++    }
++    M.nslots = target;
++    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++    if (ms_out != nullptr) *ms_out = ms;
++    std::fprintf(stderr, "strata exl3-metal: LRU %s %d -> %d slots (%.2f GB) in %.0f ms\n", target < old ? "shrunk" : "grown", old, target, (double) len / 1e9, ms);
++    if (target > old && M.src != nullptr && !g_cold_rank.empty()) {   // the regained slots start with the hottest cold experts by profile rank, as at startup
++        std::vector<int32_t> idx(g_cold_rank.begin(), g_cold_rank.end());
++        double wms = 0;
++        const int64_t got = strata_lru_warm(M.src, idx.data(), (int) idx.size(), 0, 6, &wms);
++        std::fprintf(stderr, "strata exl3-metal: LRU regrown slots warmed with %lld experts by profile rank in %.0f ms\n", (long long) got, wms);
++    }
++    return target;
++}
+ // the reads of every cold expert of `layer` (n ids) into the set's slots, started now and joined by the compute call
+ extern "C" int strata_pf_mac_prefetch(void* srcv, int layer, int set, const int32_t* experts, int n) {
+     PfMac& P = pfm();
+@@ -1942,6 +2074,7 @@ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* i
+         if (!split) { if (early) mac_pull().finish(); else gather_phase(2); }   // nothing to overlap (or a failure): the reads, then the plain single job
+     } else gather_phase(0);
+     for (int q = 0; q < nd; ++q) if (M.ptrs[q] == nullptr) { ++M.fallbacks; return 0; }
++    if (g_cv_on) cv_note(M, nd);
+     if (split) {
+         int amap[128], bmap[128];
+         const void* pa[128]; const void* pb[128];
+@@ -2010,6 +2143,12 @@ extern "C" int strata_pf_mac_half_ok() { return 0; }
+ extern "C" int strata_pf_mac_nsets() { return 2; }
+ extern "C" int strata_exl3_metal_taken() { return 0; }
+ extern "C" int strata_exl3_in_place(int64_t, int64_t) { return 1; }
++extern "C" int64_t strata_lru_warm(void*, const int32_t*, int, int, int, double*) { return -1; }
++extern "C" int strata_lru_drop(const int32_t*, int) { return 0; }
++extern "C" int strata_stage_begin(void*, const int32_t*, const uint64_t*, int, uint8_t*) { return -1; }
++extern "C" int strata_stage_finish() { return 0; }
++extern "C" void strata_curve_mark(int) {}
++extern "C" int strata_lru_resize_mib(int, double*) { return -1; }
+ static int exl3_metal_lane(ExpertDispatch&, const float*, const int32_t*, int64_t, int64_t, const int32_t*, double&, double&) { return 0; }
+ #endif
+ 
+@@ -2083,6 +2222,95 @@ extern "C" int strata_exl3_metal_begin(int64_t, const int64_t*, int64_t, const f
+ 
+ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n) {
+ #if defined(__APPLE__)
++    if (tl_d7_mode == 5) {   // Decode7: strata_lru_warm (this thread owns the LRU: no decode ring is in flight)
++        D7Warm& W = d7w();
++        MetalLane& M = ml();
++        W.rc = -1;
++        if (!M.ok || M.slots == nullptr || M.nslots <= 0 || base_ == nullptr || paths_.empty() || !role_ptr_.empty() || io_pf_ || !direct_.empty()) return;
++        const double t0 = PfReader::now_ms();
++        int nfree = 0;
++        for (int s = M.ltail; s >= 0 && M.key[(size_t) s] < 0; s = M.lprev[(size_t) s]) ++nfree;
++        const int cap = std::min(M.nslots, nfree + std::max(0, W.extra));
++        std::vector<size_t> pick;
++        std::unordered_set<size_t> seen;
++        for (const uint32_t idx : W.idx) {
++            if ((int) pick.size() >= cap) break;
++            const int64_t l = (int64_t) idx / n_expert_, e = (int64_t) idx % n_expert_;
++            if (l >= n_layers_ || layer_blob_bytes_[(size_t) l] > M.stride || M.where.count((int64_t) idx) != 0) continue;
++            if (complement_ready_ && resident_blob((size_t) idx) != nullptr) continue;
++            if (mapped_blob(l, e) == nullptr || !seen.insert((size_t) idx).second) continue;
++            pick.push_back((size_t) idx);
++        }
++        std::vector<std::pair<uint64_t, uint64_t>> jobs;
++        std::vector<uint8_t*> dsts;
++        std::vector<int> vss;
++        for (size_t q = pick.size(); q-- > 0;) {   // coldest of the picked first: the hottest end up at the head of the recency list
++            const size_t idx = pick[q];
++            const int64_t l = (int64_t) idx / n_expert_, e = (int64_t) idx % n_expert_;
++            const int vs = M.ltail;
++            if (vs < 0) break;
++            if (M.key[(size_t) vs] >= 0) M.where.erase(M.key[(size_t) vs]);
++            M.key[(size_t) vs] = (int64_t) idx; M.where[(int64_t) idx] = vs; M.stamp[(size_t) vs] = 0;
++            M.lru_touch(vs);
++            jobs.emplace_back((uint64_t) (mapped_blob(l, e) - base_), layer_blob_bytes_[(size_t) l]);
++            dsts.push_back(M.slots + (size_t) vs * M.stride);
++            vss.push_back(vs);
++        }
++        const int fd = ::open(paths_.front().c_str(), O_RDONLY | O_CLOEXEC);
++        if (fd < 0 && !jobs.empty()) {   // the slots are mapped but unread: unmap them
++            for (const int vs : vss) { M.where.erase(M.key[(size_t) vs]); M.key[(size_t) vs] = -1; M.lru_unlink(vs); M.lru_push_back(vs); }
++            return;
++        }
++        if (fd >= 0) (void) fcntl(fd, F_NOCACHE, 1);
++        std::atomic<size_t> nx{0};
++        std::vector<char> bad(jobs.size(), 0);
++        auto worker = [&] {
++            for (;;) {
++                const size_t i = nx.fetch_add(1);
++                if (i >= jobs.size()) return;
++                uint64_t got = 0;
++                while (got < jobs[i].second) {
++                    const ssize_t r = ::pread(fd, dsts[i] + got, (size_t) (jobs[i].second - got), (off_t) (jobs[i].first + got));
++                    if (r <= 0) break;
++                    got += (uint64_t) r;
++                }
++                if (got < jobs[i].second) bad[i] = 1;
++            }
++        };
++        std::vector<std::thread> th;
++        const int nt = std::max(1, std::min(16, W.nthr));
++        for (int t = 1; t < nt; ++t) th.emplace_back(worker);
++        worker();
++        for (auto& t : th) t.join();
++        if (fd >= 0) ::close(fd);
++        int64_t nbad = 0;
++        for (size_t i = 0; i < jobs.size(); ++i)
++            if (bad[i]) { const int vs = vss[i]; ++nbad; M.where.erase(M.key[(size_t) vs]); M.key[(size_t) vs] = -1; M.lru_unlink(vs); M.lru_push_back(vs); }
++        W.loaded = (int64_t) jobs.size() - nbad; W.nfree = nfree; W.rc = 0;
++        W.ms = PfReader::now_ms() - t0;
++        return;
++    }
++    if (tl_d7_mode == 6) {   // Decode7: strata_stage_begin
++        D7Stage& S = d7s();
++        S.rc = -1;
++        if (base_ == nullptr || paths_.empty() || !role_ptr_.empty() || io_pf_ || !direct_.empty() || S.base == nullptr) return;
++        const int pfd = mac_pull_fd(paths_.front());
++        if (pfd < 0) return;
++        std::vector<std::pair<uint64_t, uint64_t>> jobs;
++        std::vector<uint8_t*> dsts;
++        for (size_t i = 0; i < S.idx.size(); ++i) {
++            const int64_t l = (int64_t) S.idx[i] / n_expert_, e = (int64_t) S.idx[i] % n_expert_;
++            if (l >= n_layers_) return;
++            const uint8_t* p = mapped_blob(l, e);
++            if (p == nullptr) return;
++            jobs.emplace_back((uint64_t) (p - base_), layer_blob_bytes_[(size_t) l]);
++            dsts.push_back(S.base + S.off[i]);
++        }
++        mac_pull().short_reads.store(0);
++        mac_pull().begin_to(pfd, jobs, dsts);
++        S.rc = 0;
++        return;
++    }
+     if (PfMac& P = pfm(); P.mode != 0) {   // STRATA_PF_MAC: the prompt path's cold-expert lane (see PfMac)
+         MetalLane& M = ml();
+         auto in_tier = [&](size_t index) { return complement_ready_ && resident_blob(index) != nullptr; };
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 89b82df..b3e8f4c 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -65,6 +65,22 @@ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64
+ extern "C" void strata_exl3_metal_arm(const float* w, float* y);   // STRATA_EXL3_METAL: weights + output rows of the next pool call
+ extern "C" int strata_exl3_metal_taken();                           // 1: the Metal lane wrote the weighted, reduced CPU rows
+ extern "C" int strata_exl3_in_place(int64_t layer, int64_t expert);   // 1: the expert's blob is in the mini's locked tier or LRU (reading it costs nothing)
++static std::FILE* strata_route_dump_file() {
++    static std::FILE* f = [] { const char* p = std::getenv("STRATA_DEC_ROUTE_DUMP"); return p != nullptr && p[0] != '\0' ? std::fopen(p, "ab") : (std::FILE*) nullptr; }();
++    return f;
++}
++extern "C" void strata_route_mark(int32_t tag) {
++    if (std::FILE* f = strata_route_dump_file()) { const int32_t hdr[3] = {-1, tag, 0}; std::fwrite(hdr, sizeof hdr, 1, f); std::fflush(f); }
++}
++static uint32_t g_dec_use[65536], g_dec_last[65536], g_dec_rings[64], g_dec_ring_id = 0;
++extern "C" int strata_dec_use_take(uint32_t* use, uint32_t* rings, int ni, int nl) {   // copies and clears; the caller runs while no decode ring is in flight
++    if (ni < 0 || ni > 65536 || nl < 0 || nl > 64) return -1;
++    std::memcpy(use, g_dec_use, sizeof(uint32_t) * (size_t) ni);
++    std::memcpy(rings, g_dec_rings, sizeof(uint32_t) * (size_t) nl);
++    std::memset(g_dec_use, 0, sizeof g_dec_use);
++    std::memset(g_dec_rings, 0, sizeof g_dec_rings);
++    return 0;
++}
+ namespace strata::core {
+ namespace {
+ 
+@@ -2257,6 +2273,25 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+             const double hs1 = hs_now();
+             const int32_t* ids = h_ids_ + (size_t) tb * K_;
+             const float* wsrc = h_w_ + (size_t) tb * K_;   // the weights the host side (Metal lane / CPU reduce) uses
++            {   // STRATA_DEC_ROUTE_DUMP=<path> (Decode7 research): one record per ring: [layer, n rows, K] int32 + n*K router ids (before any miss tolerance); strata_route_mark writes [-1, tag, 0]
++                if (strata_route_dump_file() != nullptr) {
++                    const int32_t hdr[3] = {(int32_t) l, (int32_t) n, (int32_t) K_};
++                    std::fwrite(hdr, sizeof hdr, 1, strata_route_dump_file());
++                    std::fwrite(ids, 4, (size_t) (n * K_), strata_route_dump_file());
++                }
++            }
++            {   // Decode7: per (layer, expert) count of the rings that routed to it (resident or not), and the rings per layer: the usage prior of the prompt-guided refill (strata_dec_use_take)
++                const int64_t base_i = l * ne_;
++                if (l >= 0 && l < 64 && base_i + ne_ <= 65536) {
++                    const uint32_t rid = ++g_dec_ring_id;
++                    ++g_dec_rings[l];
++                    for (int64_t q = 0; q < n * K_; ++q) {
++                        const int32_t e = ids[q];
++                        if (e < 0 || e >= ne_) continue;
++                        if (g_dec_last[base_i + e] != rid) { g_dec_last[base_i + e] = rid; ++g_dec_use[base_i + e]; }
++                    }
++                }
++            }
+             int32_t ids_tol[kVerifyMaxT * 16]; float w_tol[kVerifyMaxT * 16];
+             {   // STRATA_MISS_TOL (LOSSY, default off): LRU-missing cold experts with a small routing weight are not read and not computed (their pairs get weight 0 and a resident expert id)
+                 static const MissTolCfg mtc = MissTolCfg::from_env();
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index ea26efe..bc1665a 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -107,6 +107,40 @@ extern "C" double strata_pf_mac_gpu_ms();
+ extern "C" int strata_pf_mac_submit_h(void*, int, int, const int32_t*, int, const uint16_t*, int, int64_t, const int32_t*, const int32_t*, const float*, uint16_t*, void**, double*);
+ extern "C" int strata_pf_mac_half_ok();
+ extern "C" int strata_pf_mac_nsets();
++// Decode7 (prompt-guided cache warm): the routing of every prompt token, per (layer, expert): [0] all tokens, [1] the last 1024 tokens of the read segment, [2] the last 256.
++// Accumulated per chunk-layer from the host copy of the router's ids (the Mac lane's grouping already downloads them); generate.cpp resets it per request and reads it at the refill.
++static std::atomic<uint32_t> g_pf_hist[3][65536];
++static std::atomic<int64_t> g_pf_hist_tok{0};
++static void pf_hist_add(int64_t l, const int32_t* ids, int64_t T, int64_t K, int64_t ne, int64_t after, bool count_tokens) {
++    if (ne <= 0 || ne > 1024 || (l + 1) * ne > 65536) return;
++    uint32_t acc[3][1024];
++    std::memset(acc, 0, sizeof(acc));
++    for (int64_t t = 0; t < T; ++t) {
++        const int64_t d = after + (T - 1 - t);   // tokens after this one in the read segment
++        const bool t1 = d < 1024, t2 = d < 256;
++        for (int64_t j = 0; j < K; ++j) {
++            const int32_t e = ids[(size_t) (t * K + j)];
++            if (e < 0 || e >= ne) continue;
++            ++acc[0][e];
++            if (t1) ++acc[1][e];
++            if (t2) ++acc[2][e];
++        }
++    }
++    for (int w = 0; w < 3; ++w)
++        for (int64_t e = 0; e < ne; ++e)
++            if (acc[w][e] != 0) g_pf_hist[w][(size_t) (l * ne + e)].fetch_add(acc[w][e], std::memory_order_relaxed);
++    if (count_tokens) g_pf_hist_tok.fetch_add(T, std::memory_order_relaxed);
++}
++extern "C" void strata_pf_hist_reset() {
++    for (auto& a : g_pf_hist) for (auto& v : a) v.store(0, std::memory_order_relaxed);
++    g_pf_hist_tok.store(0, std::memory_order_relaxed);
++}
++extern "C" int64_t strata_pf_hist_tokens() { return g_pf_hist_tok.load(std::memory_order_relaxed); }
++extern "C" int strata_pf_hist_get(int which, uint32_t* out, int n) {
++    if (which < 0 || which > 2 || n < 0 || n > 65536) return -1;
++    for (int i = 0; i < n; ++i) out[i] = g_pf_hist[which][i].load(std::memory_order_relaxed);
++    return n;
++}
+ namespace strata::prefill {
+ namespace {
+ 
+@@ -3471,6 +3505,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
+                             ++m.cnt[(size_t) e];
+                         }
++                        pf_hist_add(l, ids_h, T, K, m.g->n_expert, n - c0 - T, l == LB);   // Decode7: the prompt's routing histogram (prompt-guided cache warm)
+                         if (cpu_maybe) {
+                             std::vector<std::pair<int32_t, int32_t>> cand;   // (tokens, expert)
+                             int64_t nstream = 0;
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 092596f..c67adb3 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -114,6 +114,18 @@
+ #include <string>
+ #include <set>
+ #include <vector>
++// Decode7: prompt routing histogram (prefill.cpp), mini-LRU warm / drop, staged blob reads, cold-start curve (expert_source.cpp), decode routing marks (verify.cpp)
++extern "C" void strata_pf_hist_reset();
++extern "C" int64_t strata_pf_hist_tokens();
++extern "C" int strata_pf_hist_get(int which, uint32_t* out, int n);
++extern "C" int64_t strata_lru_warm(void* srcv, const int32_t* idx, int n, int extra, int nthr, double* ms_out);
++extern "C" int strata_lru_drop(const int32_t* idx, int n);
++extern "C" int strata_stage_begin(void* srcv, const int32_t* idx, const uint64_t* off, int n, uint8_t* base);
++extern "C" int strata_stage_finish();
++extern "C" void strata_curve_mark(int tag);
++extern "C" void strata_route_mark(int32_t tag);
++extern "C" int strata_dec_use_take(uint32_t* use, uint32_t* rings, int ni, int nl);
++extern "C" int strata_lru_resize_mib(int mib, double* ms_out);
+ 
+ namespace {
+ // Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
+@@ -8729,6 +8741,14 @@ int main(int argc, char** argv) {
+                 std::fflush(stdout);
+                 continue;
+             }
++            if (line.rfind("LRUMIB", 0) == 0) {   // Decode7 lever 4: give <mib> MiB of the mini LRU back (the vision encoder runs), 0 = all of it again; between requests
++                double lms = 0;
++                const int ln = batch_on() ? -9 : strata_lru_resize_mib(std::atoi(line.c_str() + 6), &lms);
++                if (ln < 0) std::printf("ERR LRUMIB failed (%d)\n", ln);
++                else std::printf("LRUMIB %d %.0f\n", ln, lms);
++                std::fflush(stdout);
++                continue;
++            }
+             admit_slot = -1;
+             if (line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0) {
+                 const bool bimg = line.rfind("BGENI ", 0) == 0;
+@@ -9637,6 +9657,236 @@ int main(int argc, char** argv) {
+                 std::fflush(stdout);
+                 return true;
+             };
++            // ---- Decode7: prompt-guided refill of the lent slots + warm of the mini LRU (both from the prompt's routing histogram, prefill.cpp) + staged copies (parallel blob gather, multi-blob H2D).
++            // Flags: STRATA_D7_MODE (default 0), or the integer in the file STRATA_D7_FLAG, read at every refill: bit 0 = the lent slots take the prompt's hottest non-resident experts instead of the profile's,
++            // bit 1 = the LRU's free slots are filled with the prompt's next hottest, bit 2 = staged copies.  0 with nothing changed before = the plain refill below, byte for byte.
++            struct D7State {
++                bool captured = false, ok = true, dirty = false;
++                int32_t r0 = -1;                   // the first slot of the loan region (PfPart::first at the first loan) and the profile's owner of each slot from there on
++                std::vector<int32_t> owner0;
++                std::vector<float> ema;            // the usage prior: per (layer, expert) probability that a decode ring routes to it, decayed over the requests (STRATA_D7_EMA)
++                int64_t req = 0, ema_updates = 0;
++                double w[4] = {0.075, 0.0, 0.0, 1.0};   // STRATA_D7_W: weights of sqrt(all-token rate), sqrt(last-1024 rate), sqrt(last-256 rate), sqrt(prior)
++                double beta = 0.15, init_scale = 0.05, shape_a = 1.0, shape_b = 2000.0;
++                int64_t min_tok = 512;             // STRATA_D7_MIN_TOK: fewer prompt tokens score by the prior alone
++                int piece = 8, warm_extra = 0, warm_threads = 6, warm_list = 4096;
++            };
++            static D7State d7;
++            auto d7_flags = [&]() -> int {
++                static const int env_mode = [] { const char* v = std::getenv("STRATA_D7_MODE"); return v != nullptr ? std::atoi(v) : 0; }();
++                static const char* ff = std::getenv("STRATA_D7_FLAG");
++                int f = env_mode;
++                if (ff != nullptr) {
++                    if (std::FILE* fp = std::fopen(ff, "r")) { int v = 0; if (std::fscanf(fp, "%d", &v) == 1) f = v; std::fclose(fp); }
++                }
++                return f;
++            };
++            auto d7_capture = [&]() {
++                if (d7.captured || pf_parts.size() != 1 || pf_parts[0].cache == nullptr || pf_parts[0].first < 0) return;
++                d7.captured = true;
++                PfPart& p = pf_parts[0];
++                strata::core::ExpertCache& xc = *p.cache;
++                const int32_t slots = (int32_t) xc.slots();
++                d7.r0 = p.first;
++                if (d7.r0 >= slots) { d7.ok = false; return; }
++                d7.owner0.assign((size_t) (slots - d7.r0), -1);
++                for (size_t i = 0; i < host_res.size(); ++i)
++                    if (host_res[i] >= d7.r0 && host_res[i] < slots) d7.owner0[(size_t) (host_res[i] - d7.r0)] = (int32_t) i;
++                for (const int32_t v : d7.owner0) if (v < 0) d7.ok = false;
++                const uint64_t nb0 = (uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(0);
++                for (int64_t l = 0; l < g.n_layers; ++l)
++                    if ((uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(l) != nb0) d7.ok = false;   // the guided refill needs one blob size
++                if (d7.ok && slots - d7.r0 >= 2) {
++                    const uint64_t cap0 = (uint64_t) (xc.device_slot(d7.r0 + 1) - xc.device_slot(d7.r0));
++                    for (int32_t s = d7.r0; s + 1 < slots; ++s)
++                        if ((uint64_t) (xc.device_slot(s + 1) - xc.device_slot(s)) != cap0) d7.ok = false;
++                    if (cap0 < nb0) d7.ok = false;
++                }
++                if (const char* v = std::getenv("STRATA_D7_W")) std::sscanf(v, "%lf,%lf,%lf,%lf", &d7.w[0], &d7.w[1], &d7.w[2], &d7.w[3]);
++                if (const char* v = std::getenv("STRATA_D7_EMA")) std::sscanf(v, "%lf,%lf,%lf,%lf", &d7.beta, &d7.init_scale, &d7.shape_a, &d7.shape_b);
++                if (const char* v = std::getenv("STRATA_D7_MIN_TOK")) d7.min_tok = std::atoll(v);
++                if (const char* v = std::getenv("STRATA_D7_PIECE")) d7.piece = std::max(1, std::atoi(v));
++                if (const char* v = std::getenv("STRATA_D7_WARM_EXTRA")) d7.warm_extra = std::max(0, std::atoi(v));
++                if (const char* v = std::getenv("STRATA_D7_WARM_THREADS")) d7.warm_threads = std::max(1, std::atoi(v));
++                if (const char* v = std::getenv("STRATA_D7_WARM_LIST")) d7.warm_list = std::max(1, std::atoi(v));
++                {   // the usage prior starts from the profile's rank: p(rank) = init_scale / (1 + rank / shape_b) ^ shape_a
++                    const size_t NIx = (size_t) (g.n_layers * g.n_expert);
++                    d7.ema.assign(NIx, (float) d7.init_scale / std::pow(1.0f + 24576.0f / (float) d7.shape_b, (float) d7.shape_a));
++                    for (size_t r = 0; r < profile.size(); ++r) {
++                        const size_t i = (size_t) profile[r].first * (size_t) g.n_expert + (size_t) profile[r].second;
++                        if (i < NIx) d7.ema[i] = (float) (d7.init_scale / std::pow(1.0 + (double) r / d7.shape_b, d7.shape_a));
++                    }
++                    uint32_t u0[65536], r0n[64];
++                    if (NIx <= 65536) (void) strata_dec_use_take(u0, r0n, (int) NIx, 64);   // whatever the decode did before the first loan is not traffic
++                }
++                std::fprintf(stderr, "strata d7: loan region slots %d..%d (%d), uniform blobs %s, weights prompt %.3f/%.3f/%.3f prior %.2f, ema beta %.2f init %.3f shape %.2f/%.0f, min tokens %lld, piece %d slots\n", (int) d7.r0, (int) slots - 1,
++                             (int) (slots - d7.r0), d7.ok ? "yes" : "NO (guided refill off)", d7.w[0], d7.w[1], d7.w[2], d7.w[3], d7.beta, d7.init_scale, d7.shape_a, d7.shape_b, (long long) d7.min_tok, d7.piece);
++            };
++            // between two requests: the decode's per-ring expert usage joins the prior (weighted by how many rings it saw)
++            auto d7_ema_update = [&]() {
++                if (!d7.captured || d7.ema.empty()) return;
++                const int64_t NIx = g.n_layers * g.n_expert;
++                if (NIx > 65536 || g.n_layers > 64) return;
++                std::vector<uint32_t> use((size_t) NIx);
++                uint32_t rings[64];
++                if (strata_dec_use_take(use.data(), rings, (int) NIx, 64) != 0) return;
++                for (int64_t l = 0; l < g.n_layers; ++l) {
++                    if (rings[l] == 0) continue;
++                    const double wt = d7.beta * std::min(1.0, (double) rings[l] / 60.0);
++                    for (int64_t e = 0; e < g.n_expert; ++e) {
++                        const size_t i = (size_t) (l * g.n_expert + e);
++                        d7.ema[i] = (float) ((1.0 - wt) * (double) d7.ema[i] + wt * (double) use[i] / (double) rings[l]);
++                    }
++                }
++                ++d7.ema_updates;
++            };
++            auto d7_refill = [&](PfPart& p, std::string& e) -> int {   // 1: done, 0: the plain refill does it, -1: failed (e set)
++                if (!d7.captured || !d7.ok || pf_parts.size() != 1) return 0;
++                const int flags = d7_flags();
++                if (flags == 0 && !d7.dirty) return 0;
++                strata::core::ExpertCache& xc = *p.cache;
++                const int32_t slots = (int32_t) xc.slots(), fn = p.first_now;
++                if (fn < d7.r0 || fn >= slots || p.lent.size() != (size_t) (slots - fn)) return 0;   // not the contiguous loan this expects
++                const bool g_on = (flags & 1) != 0, w_on = (flags & 2) != 0, s_on = (flags & 4) != 0;
++                const int64_t ne = g.n_expert, NI = g.n_layers * g.n_expert;
++                const int64_t ntok = strata_pf_hist_tokens();
++                const auto t0 = Clock::now();
++                const bool have_hist = ntok >= d7.min_tok && NI <= 65536;
++                const bool guide = g_on;
++                const bool restore = !g_on && d7.dirty;
++                const int32_t rb = restore ? d7.r0 : fn;
++                const size_t nsl = (size_t) (slots - rb);
++                const uint64_t nb = (uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(0);
++                auto soff = [&](int32_t s) -> uint64_t { return (uint64_t) (xc.device_slot(s) - xc.device_slot(0)); };
++                if (const char* dp = std::getenv("STRATA_D7_HIST_DUMP"); dp != nullptr && NI <= 65536 && ntok > 0) {   // research: the three histograms of this request, appended
++                    if (std::FILE* fp = std::fopen(dp, "ab")) {
++                        std::vector<uint32_t> hd((size_t) NI);
++                        const int32_t hdr[8] = {0x44374831, (int32_t) d7.req, (int32_t) ntok, (int32_t) g.n_layers, (int32_t) ne, (int32_t) p.lent.size(), fn, slots};
++                        std::fwrite(hdr, sizeof hdr, 1, fp);
++                        for (int w = 0; w < 3; ++w) { strata_pf_hist_get(w, hd.data(), (int) NI); std::fwrite(hd.data(), 4, (size_t) NI, fp); }
++                        std::fclose(fp);
++                    }
++                }
++                std::vector<float> score;
++                if ((guide || w_on) && !d7.ema.empty() && (int64_t) d7.ema.size() == NI) {
++                    // score = w3 * sqrt(usage prior) + w0 * sqrt(all-token rate) + w1 * sqrt(last-1024 rate) + w2 * sqrt(last-256 rate): the prior is the decayed per-ring usage of the experts in this server's own decode
++                    // traffic (shaped by the profile's rank until traffic arrives), the rates are this prompt's routing (only with >= min_tok prompt tokens)
++                    score.assign((size_t) NI, 0.0f);
++                    for (int64_t i = 0; i < NI; ++i) score[(size_t) i] = (float) (d7.w[3] * std::sqrt((double) d7.ema[(size_t) i]));
++                    if (have_hist) {
++                        std::vector<uint32_t> h((size_t) NI);
++                        const double nt[3] = {(double) std::max<int64_t>(1, ntok), (double) std::max<int64_t>(1, std::min<int64_t>(ntok, 1024)), (double) std::max<int64_t>(1, std::min<int64_t>(ntok, 256))};
++                        for (int w = 0; w < 3; ++w) {
++                            if (d7.w[w] == 0.0) continue;
++                            strata_pf_hist_get(w, h.data(), (int) NI);
++                            for (int64_t i = 0; i < NI; ++i) score[(size_t) i] += (float) (d7.w[w] * std::sqrt((double) h[(size_t) i] / nt[w]));
++                        }
++                    }
++                }
++                std::vector<int32_t> assign(nsl, -1);   // slot rb + k takes this residency index
++                int64_t changed = 0;
++                std::vector<std::pair<float, int32_t>> cand;
++                if (restore) {
++                    for (size_t k = 0; k < nsl; ++k) assign[k] = d7.owner0[k];
++                } else if (guide) {
++                    std::vector<char> was_lent((size_t) NI, 0);
++                    for (const auto& [i, slot] : p.lent) was_lent[(size_t) i] = 1;
++                    cand.reserve((size_t) NI);
++                    for (int64_t i = 0; i < NI; ++i) if (host_res[(size_t) i] < 0) cand.emplace_back(score[(size_t) i], (int32_t) i);
++                    const size_t nl = p.lent.size();
++                    auto better = [&](const std::pair<float, int32_t>& a, const std::pair<float, int32_t>& b) {
++                        if (a.first != b.first) return a.first > b.first;
++                        if (was_lent[(size_t) a.second] != was_lent[(size_t) b.second]) return was_lent[(size_t) a.second] > was_lent[(size_t) b.second];
++                        return a.second < b.second;
++                    };
++                    if (cand.size() < nl) return 0;
++                    std::nth_element(cand.begin(), cand.begin() + (std::ptrdiff_t) nl - 1, cand.end(), better);
++                    std::vector<int32_t> sel;
++                    sel.reserve(nl);
++                    for (size_t k = 0; k < nl; ++k) { sel.push_back(cand[k].second); changed += was_lent[(size_t) cand[k].second] ? 0 : 1; }
++                    std::sort(sel.begin(), sel.end());
++                    for (size_t k = 0; k < nl; ++k) assign[k] = sel[k];
++                } else {
++                    for (const auto& [i, slot] : p.lent) assign[(size_t) (slot - rb)] = i;
++                }
++                for (const int32_t a : assign) if (a < 0) return 0;
++                // the table: every slot of the region takes its new expert (nothing reads it until the refill has landed)
++                for (size_t i = 0; i < host_res.size(); ++i) if (host_res[i] >= rb) host_res[i] = strata::core::kNotResident;
++                for (size_t k = 0; k < nsl; ++k) host_res[(size_t) assign[k]] = rb + (int32_t) k;
++                if (guide) d7.dirty = true;
++                else if (restore) d7.dirty = false;
++                // the experts that are in VRAM now leave the mini LRU; its free slots (the prompt's scratch sets) take the prompt's next hottest
++                int64_t warm_loaded = -1, warm_n = 0;
++                double warm_ms = 0;
++                std::thread warm_thr;
++                std::vector<int32_t> warm_idx;
++                if (guide && !assign.empty()) (void) strata_lru_drop(assign.data(), (int) assign.size());
++                if (w_on && have_hist && !score.empty()) {
++                    std::vector<std::pair<float, int32_t>> wc;
++                    wc.reserve((size_t) NI);
++                    for (int64_t i = 0; i < NI; ++i) if (host_res[(size_t) i] < 0 && score[(size_t) i] > 0.0f) wc.emplace_back(score[(size_t) i], (int32_t) i);
++                    const size_t wl = std::min<size_t>(wc.size(), (size_t) d7.warm_list);
++                    std::partial_sort(wc.begin(), wc.begin() + (std::ptrdiff_t) wl, wc.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
++                    for (size_t k = 0; k < wl; ++k) warm_idx.push_back(wc[k].second);
++                    warm_n = (int64_t) warm_idx.size();
++                    warm_thr = std::thread([&] { warm_loaded = strata_lru_warm(srcp, warm_idx.data(), (int) warm_idx.size(), d7.warm_extra, d7.warm_threads, &warm_ms); });
++                }
++                // the copies: pieces of d7.piece slots, the next piece's blobs gathered on the mac-pull threads while this one goes over the link
++                const strata::core::OnDevice on(p.dev);
++                const int P = d7.piece;
++                const int np = (int) ((nsl + (size_t) P - 1) / (size_t) P);
++                std::vector<uint8_t> buf[2];
++                bool staged = s_on;
++                if (staged) {
++                    const uint64_t span_max = soff(rb + (int32_t) std::min<size_t>((size_t) P, nsl) - 1) - soff(rb) + nb;
++                    buf[0].assign((size_t) span_max, 0); buf[1].assign((size_t) span_max, 0);
++                }
++                auto piece_range = [&](int k, int32_t& a, int32_t& b) { a = rb + k * P; b = std::min<int32_t>(slots, a + P); };
++                auto begin_piece = [&](int k) -> bool {
++                    int32_t a, b;
++                    piece_range(k, a, b);
++                    std::vector<int32_t> idx((size_t) (b - a));
++                    std::vector<uint64_t> off((size_t) (b - a));
++                    for (int32_t s = a; s < b; ++s) { idx[(size_t) (s - a)] = assign[(size_t) (s - rb)]; off[(size_t) (s - a)] = soff(s) - soff(a); }
++                    return strata_stage_begin(srcp, idx.data(), off.data(), (int) idx.size(), buf[k & 1].data()) >= 0;
++                };
++                auto plain_piece = [&](int32_t a, int32_t b) -> bool {
++                    for (int32_t s = a; s < b; ++s) {
++                        const int32_t i = assign[(size_t) (s - rb)];
++                        const uint8_t* bl = srcp->blob_stable(i / ne, i % ne);
++                        if (bl == nullptr || !xc.fill_slot_queued(s, bl, e, (int64_t) nb)) { if (e.empty()) e = "d7 refill: no blob"; return false; }
++                    }
++                    return true;
++                };
++                if (staged) staged = begin_piece(0);
++                int64_t n_staged = 0, n_plain = 0;
++                for (int k = 0; k < np; ++k) {
++                    int32_t a, b;
++                    piece_range(k, a, b);
++                    bool ok_piece = false;
++                    if (staged) {
++                        const int sr = strata_stage_finish();
++                        if (k + 1 < np && !begin_piece(k + 1)) staged = false;
++                        if (sr == 0) {
++                            const uint64_t span = soff(b - 1) - soff(a) + nb;
++                            const cudaError_t ce = cudaMemcpyAsync(xc.device_slot(a), buf[k & 1].data(), (size_t) span, cudaMemcpyHostToDevice, (cudaStream_t) 0);
++                            if (ce != cudaSuccess) { e = std::string("d7 refill: ") + cudaGetErrorString(ce); if (warm_thr.joinable()) warm_thr.join(); return -1; }
++                            if (!xc.sync_queued(e)) { if (warm_thr.joinable()) warm_thr.join(); return -1; }
++                            ok_piece = true;
++                            n_staged += b - a;
++                        }
++                    }
++                    if (!ok_piece) {
++                        if (!plain_piece(a, b) || !xc.sync_queued(e)) { if (warm_thr.joinable()) warm_thr.join(); return -1; }
++                        n_plain += b - a;
++                    }
++                }
++                if (warm_thr.joinable()) warm_thr.join();
++                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++                std::fprintf(stderr, "strata d7: req %lld flags %d: %s %zu slots (%lld changed) from %lld prompt tokens; copies %lld staged + %lld plain; warm %lld of %lld candidates in %.0f ms; refill %.0f ms\n", (long long) d7.req, flags,
++                             restore ? "static restore of" : guide ? "guided refill of" : "refill of", nsl, (long long) changed, (long long) ntok, (long long) n_staged, (long long) n_plain, (long long) warm_loaded, (long long) warm_n, warm_ms, ms);
++                return 1;
++            };
+             // the batched path's slots are lent just before its first run and given back (refilled) before a window
+             // reads - so the windows always see the whole expert cache - or once the prompt is read
+             // Every participant gives its loan back here: the rows it lent are refilled into the SAME slots from
+@@ -9646,6 +9896,11 @@ int main(int argc, char** argv) {
+             // (split in two halves so a layer split can queue every stage's copies before it waits for any: #340)
+             auto refill_issue = [&](PfPart& p, std::string& e) -> bool {
+                 tr("refill start", (long long) p.lent.size());
++                if (pf_parts.size() == 1) {   // Decode7
++                    const int r7 = d7_refill(p, e);
++                    if (r7 < 0) return false;
++                    if (r7 > 0) return true;
++                }
+                 const strata::core::OnDevice on(p.dev);
+                 for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
+                     const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+@@ -9705,6 +9960,7 @@ int main(int argc, char** argv) {
+             // participant's own cache, and marking only that participant's own layers
+             auto lend = [&](int64_t tokens, std::string& e) -> bool {
+                 if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend
++                d7_capture();   // Decode7: the profile's owners of the loan region, before the first loan changes anything
+                 const auto t_ln = Clock::now();
+                 // what this segment needs, capped by the configured chunk: a request lends only what its own
+                 // prompt needs, so a large chunk costs a short prompt nothing
+@@ -9946,6 +10202,9 @@ int main(int argc, char** argv) {
+                 std::sort(cuts.begin(), cuts.end());   // the skipped -1s first, n - 1 still last
+             }
+             int64_t at = read_from;
++            ++d7.req;
++            strata_pf_hist_reset();   // Decode7: this request's prompt routing starts empty
++            d7_ema_update();          // the previous request's decode traffic joins the usage prior
+             for (const int64_t to : cuts) {
+                 if (to <= at) continue;
+                 err.clear();
+@@ -9999,6 +10258,8 @@ int main(int argc, char** argv) {
+                 return 1;
+             }
+             tr("prompt done (slots refilled)");
++            strata_curve_mark((int) d7.req);   // Decode7: the cold-start curve starts at this request's first decode ring
++            strata_route_mark((int32_t) d7.req);
+             if (il_parts > 0)
+                 std::fprintf(stderr, "strata batch: the prompt was read in %lld parts, the slots decoding %.0f ms between "
+                                      "them\n", (long long) il_parts + 1, il_ms);

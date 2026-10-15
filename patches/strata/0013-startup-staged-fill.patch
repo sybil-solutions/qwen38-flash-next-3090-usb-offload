@@ -1,0 +1,106 @@
+# Decode8 (2026-10-13): STRATA_D8_FILL=1: the startup profile fill of the VRAM expert cache goes through the staged
+# piece path of Decode7 (8-slot pieces, F_NOCACHE preads on the mac-pull threads, one H2D per piece): 76.6 s -> 53.9 s.
+# The whole-layer placement (4 resident layers = zero doorbell) comes from the profile exl3/placement/d8w4/profile.bin,
+# not from code.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0012, applied in order with `git apply -p1`.
+
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index c67adb3..918d4a4 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -4710,7 +4710,94 @@ int main(int argc, char** argv) {
+         }
+         const auto fill_t0 = std::chrono::steady_clock::now();
+         uint64_t fill_bytes = 0;
+-        for (int64_t i = 0; i < want; ++i) {
++        // Decode8 lever 5: STRATA_D8_FILL=1 stages the startup fill like the Decode7 loan refill: the pairs are admitted first (slot i = rank i), then P slots at a time are gathered by the mac-pull threads
++        // (F_NOCACHE preads of experts.bin straight into a host buffer laid out like the slots) and go over the link as ONE H2D message per piece while the next piece is being gathered.  Same bytes, same slots.
++        int64_t i0 = 0;
++        if (!per_layer && srcp != nullptr) {
++            const char* v8 = std::getenv("STRATA_D8_FILL");
++            if (v8 != nullptr && std::atoi(v8) != 0) {
++                const int64_t ne8 = g.n_expert;
++                const uint64_t nb8 = (uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(0);
++                bool uniform = true;
++                for (int64_t l = 0; l < g.n_layers; ++l)
++                    if ((uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(l) != nb8) uniform = false;
++                std::vector<int32_t> pidx, pslot;
++                if (uniform) {
++                    for (int64_t i = 0; i < want; ++i) {
++                        const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
++                        if (slot == strata::core::kNotResident) break;
++                        pidx.push_back((int32_t) (profile[(size_t) i].first * ne8 + profile[(size_t) i].second));
++                        pslot.push_back(slot);
++                    }
++                }
++                const int P8 = std::getenv("STRATA_D8_FILL_PIECE") ? std::max(1, std::atoi(std::getenv("STRATA_D8_FILL_PIECE"))) : 8;
++                // a piece = up to P8 consecutive pairs whose slots are evenly spaced (one H2D span); the bytes between two blobs of a span are the slot padding
++                auto piece_end = [&](size_t a) -> size_t {
++                    size_t b = a + 1;
++                    if (b >= pslot.size()) return b;
++                    const int64_t st = (int64_t) (xcache.device_slot(pslot[b]) - xcache.device_slot(pslot[a]));
++                    if (st < (int64_t) nb8) return b;
++                    while (b < pslot.size() && b < a + (size_t) P8 && (int64_t) (xcache.device_slot(pslot[b]) - xcache.device_slot(pslot[b - 1])) == st) ++b;
++                    return b;
++                };
++                std::vector<uint8_t> buf8[2];
++                std::vector<std::pair<size_t, size_t>> pieces;
++                for (size_t a = 0; a < pslot.size();) { const size_t b = piece_end(a); pieces.emplace_back(a, b); a = b; }
++                size_t span_max = 0;
++                for (const auto& pc : pieces) span_max = std::max<size_t>(span_max, (size_t) (xcache.device_slot(pslot[pc.second - 1]) - xcache.device_slot(pslot[pc.first])) + (size_t) nb8);
++                bool staged8 = !pieces.empty();
++                if (staged8) { buf8[0].assign(span_max, 0); buf8[1].assign(span_max, 0); }
++                auto begin8 = [&](size_t k) -> bool {
++                    const auto pc = pieces[k];
++                    std::vector<int32_t> idx(pc.second - pc.first);
++                    std::vector<uint64_t> off(pc.second - pc.first);
++                    for (size_t j = pc.first; j < pc.second; ++j) { idx[j - pc.first] = pidx[j]; off[j - pc.first] = (uint64_t) (xcache.device_slot(pslot[j]) - xcache.device_slot(pslot[pc.first])); }
++                    return strata_stage_begin(srcp, idx.data(), off.data(), (int) idx.size(), buf8[k & 1].data()) >= 0;
++                };
++                const auto t8 = std::chrono::steady_clock::now();
++                if (staged8) staged8 = begin8(0);
++                int64_t n_staged8 = 0, n_plain8 = 0;
++                for (size_t k = 0; k < pieces.size(); ++k) {
++                    const auto pc = pieces[k];
++                    bool ok_piece = false;
++                    if (staged8) {
++                        const int sr = strata_stage_finish();
++                        if (k + 1 < pieces.size() && !begin8(k + 1)) staged8 = false;
++                        if (sr == 0) {
++                            const size_t span = (size_t) (xcache.device_slot(pslot[pc.second - 1]) - xcache.device_slot(pslot[pc.first])) + (size_t) nb8;
++                            const cudaError_t ce = cudaMemcpyAsync(xcache.device_slot(pslot[pc.first]), buf8[k & 1].data(), span, cudaMemcpyHostToDevice, (cudaStream_t) 0);
++                            // the cache counts its fills per slot and pin_cache_complement refuses a cache whose fills differ from its residents (no RAM tier, no LRU preload): re-write the first byte of each slot (the same value)
++                            // through the counted path, queued behind the span copy
++                            bool counted = ce == cudaSuccess;
++                            for (size_t j = pc.first; counted && j < pc.second; ++j)
++                                counted = xcache.fill_slot_queued(pslot[j], buf8[k & 1].data() + (size_t) (xcache.device_slot(pslot[j]) - xcache.device_slot(pslot[pc.first])), err, 1);
++                            if (!counted || !xcache.sync_queued(err)) {
++                                std::fprintf(stderr, "strata generate: the staged profile fill failed at piece %zu: %s\n", k, ce != cudaSuccess ? cudaGetErrorString(ce) : err.c_str());
++                                return 1;
++                            }
++                            ok_piece = true;
++                            n_staged8 += (int64_t) (pc.second - pc.first);
++                        }
++                    }
++                    if (!ok_piece) {
++                        for (size_t j = pc.first; j < pc.second; ++j) {
++                            const uint8_t* b = srcp->blob_stable(profile[j].first, profile[j].second);
++                            if (b == nullptr || !xcache.fill_slot_blocking(pslot[j], b, err, (int64_t) nb8)) {
++                                std::fprintf(stderr, "strata generate: the profile fill failed at pair %zu: %s\n", j, err.c_str());
++                                return 1;
++                            }
++                        }
++                        n_plain8 += (int64_t) (pc.second - pc.first);
++                    }
++                }
++                i0 = (int64_t) pslot.size();
++                prefilled += i0;
++                fill_bytes += (uint64_t) i0 * nb8;
++                std::fprintf(stderr, "strata generate: staged profile fill (STRATA_D8_FILL): %lld slots staged + %lld plain in %.1f s (%zu pieces of <= %d)\n", (long long) n_staged8, (long long) n_plain8,
++                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t8).count(), pieces.size(), P8);
++            }
++        }
++        for (int64_t i = i0; i < want; ++i) {
+             if (!per_layer && srcp == &src && src.unbuffered() && i % 64 == 0) {
+                 if (ahead.valid()) ahead.get();
+                 else read_batch(i);

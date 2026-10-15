@@ -1,0 +1,414 @@
+# Decode11 (2026-10-14): STRATA_D11_ALIGN=1: every LRU-slot read (decode miss, preload, warm) reads the enclosing 4 KiB-
+# aligned range into the START of the slot and the blob sits d11_skew (<= 3,968 B) bytes into it (unaligned F_NOCACHE
+# preads are slow on this SSD; 3,968 + 1,862,400 <= the 1,867,776 B stride, no slot lost). +2.2 % realistic / +3.5 %
+# probes, exact. Also STRATA_D11_TRACE per-ring tracing.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0015, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index 2e56930..c240a7b 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -49,6 +49,9 @@
+ #include <fcntl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#if defined(__APPLE__)
++#include <pthread/qos.h>
++#endif
+ #include <unistd.h>
+ #if defined(__APPLE__)
+ #include <dlfcn.h>
+@@ -1327,6 +1330,70 @@ namespace {
+ // pread of the blob each, all of them in parallel on a few threads) so the kernels find them resident: the page faults of the
+ // mapped read are 16 KiB random requests (measured ~0.45 GB/s on the mini's SSD, 4 ms per cold expert); whole-blob preads run at
+ // the drive's sequential rate and keep many requests in flight.  The pages land in the same unified cache the mapping uses.
++// Decode11 STRATA_D11_TRACE=1: where the time of a ring's miss read goes (stderr line every 500 rings with reads): wake = begin -> first piece started, reads = begin -> last piece done,
++// host = begin -> the lane reaches finish(), join = finish() duration, join_after = last piece done -> finish() returned, B = finish() returned -> job B (and A) done
++static inline int64_t d11_ns() { return (int64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
++static bool d11_trace() { static const bool v = std::getenv("STRATA_D11_TRACE") != nullptr && std::atoi(std::getenv("STRATA_D11_TRACE")) != 0; return v; }
++static std::atomic<int64_t> g_d11_begin{0}, g_d11_first{0}, g_d11_done{0}, g_d11_piece_ns{0}, g_d11_pieces{0}, g_d11_piece_bytes{0}, g_d11_begin_call_ns{0}, g_d11_ps[4], g_d11_pe[4];
++static void d11_begin() { g_d11_first.store(0); g_d11_done.store(0); g_d11_piece_ns.store(0); g_d11_pieces.store(0); g_d11_piece_bytes.store(0); g_d11_begin.store(d11_ns()); }
++static void d11_job_start(int64_t t) { int64_t z = 0; g_d11_first.compare_exchange_strong(z, t); }
++static void d11_job_done(int64_t t) { int64_t c = g_d11_done.load(); while (t > c && !g_d11_done.compare_exchange_weak(c, t)) {} }
++static void d11_ring_note(bool early, int nb, int64_t f0, int64_t f1, int64_t a, int64_t end) {
++    static double s[12] = {}; static int64_t n = 0;
++    const int64_t b = g_d11_begin.load(), first = g_d11_first.load(), done = g_d11_done.load();
++    if (!early || b == 0 || done == 0 || first == 0) return;
++    s[0] += (double) (first - b) / 1e3; s[1] += (double) (done - b) / 1e3; s[2] += (double) (f0 - b) / 1e3; s[3] += (double) (f1 - f0) / 1e3;
++    s[4] += (double) (f1 - done) / 1e3; s[5] += (double) (end - f1) / 1e3; s[6] += (double) (a - f1) / 1e3; s[7] += nb; ++n;
++    s[8] += (double) g_d11_piece_ns.exchange(0) / 1e3; s[9] += (double) g_d11_pieces.exchange(0); s[10] += (double) g_d11_piece_bytes.exchange(0); s[11] += (double) g_d11_begin_call_ns.load() / 1e3;
++    {   // rings with exactly 2 or 3 blobs: when did each blob's read start / end (us after the reads began), in claim order
++        static double ps2[2] = {}, pe2[2] = {}, ps3[3] = {}, pe3[3] = {}; static int64_t n2 = 0, n3 = 0;
++        if (nb == 2 && s[9] > 0) { ++n2; for (int i = 0; i < 2; ++i) { ps2[i] += (double) (g_d11_ps[i].load() - b) / 1e3; pe2[i] += (double) (g_d11_pe[i].load() - b) / 1e3; } }
++        if (nb == 3) { ++n3; for (int i = 0; i < 3; ++i) { ps3[i] += (double) (g_d11_ps[i].load() - b) / 1e3; pe3[i] += (double) (g_d11_pe[i].load() - b) / 1e3; } }
++        if (n % 2000 == 0 && n2 > 0 && n3 > 0)
++            std::fprintf(stderr, "strata d11 trace pieces (us after begin; start-end): 2-blob rings n=%lld [%.0f-%.0f] [%.0f-%.0f] | 3-blob rings n=%lld [%.0f-%.0f] [%.0f-%.0f] [%.0f-%.0f]\n", (long long) n2,
++                         ps2[0] / n2, pe2[0] / n2, ps2[1] / n2, pe2[1] / n2, (long long) n3, ps3[0] / n3, pe3[0] / n3, ps3[1] / n3, pe3[1] / n3, ps3[2] / n3, pe3[2] / n3);
++    }
++    {
++        static double hr[8] = {}, hb[8] = {}, hj[8] = {}; static int64_t hn[8] = {};
++        const int q = std::min(std::max(nb, 0), 7);
++        ++hn[q]; hr[q] += (double) (done - b) / 1e3; hb[q] += (double) (end - f1) / 1e3; hj[q] += (double) (f0 - b) / 1e3;
++        if (n % 2000 == 0) {
++            std::fprintf(stderr, "strata d11 trace by misses/ring (n, reads us, host us, B us):");
++            for (int i = 0; i < 8; ++i) if (hn[i] > 0) std::fprintf(stderr, " [%d: %lld, %.0f, %.0f, %.0f]", i, (long long) hn[i], hr[i] / (double) hn[i], hj[i] / (double) hn[i], hb[i] / (double) hn[i]);
++            std::fprintf(stderr, "\n");
++        }
++    }
++    if (n % 500 == 0)
++        std::fprintf(stderr, "strata d11 trace: %lld miss rings: %.2f experts/ring | us: wake %.0f reads %.0f host %.0f join %.0f join_after %.0f B %.0f (A done at +%.0f) begin_call %.0f | %.2f pieces/ring of %.0f us avg (%.0f KB)\n", (long long) n, s[7] / n,
++                     s[0] / n, s[1] / n, s[2] / n, s[3] / n, s[4] / n, s[5] / n, s[6] / n, s[11] / n, s[9] / n, s[8] / std::max(1.0, s[9]), s[10] / std::max(1.0, s[9]) / 1024.0);
++}
++static std::atomic<int64_t> g_d11_ring_t0{0};
++// all-in-place rings (no miss read): begin() -> the lane's entry (host work: the y-push queueing), the wait for the one Metal job, begin() -> end
++static void d11_a_note(int64_t e0, int64_t e1, int n_tok, int nd) {
++    static double s[6] = {}; static int64_t n = 0;
++    const int64_t t0 = g_d11_ring_t0.load();
++    if (t0 == 0) return;
++    s[0] += (double) (e0 - t0) / 1e3; s[1] += (double) (e1 - e0) / 1e3; s[2] += (double) (e1 - t0) / 1e3; s[3] += nd; s[4] += n_tok; s[5] += (double) g_d11_begin_call_ns.load() / 1e3; ++n;
++    if (n % 2000 == 0)
++        std::fprintf(stderr, "strata d11 trace all-in-place rings: %lld | us: host %.0f A_wait %.0f begin->end %.0f begin_call %.0f | %.1f experts %.2f rows\n", (long long) n, s[0] / n, s[1] / n, s[2] / n, s[5] / n, s[3] / n, s[4] / n);
++}
++#if defined(__APPLE__)
++// Decode11 STRATA_MAC_PULL_OWNFD=1: every worker (and the thread that joins) reads the experts file through its own open file description (the default shares one fd)
++static std::string g_pull_path;
++static std::atomic<int> g_pull_fd_main{-1};
++static bool own_fd_on() { static const bool v = std::getenv("STRATA_MAC_PULL_OWNFD") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL_OWNFD")) != 0; return v; }
++static int use_fd(int f) {
++    static thread_local int tl_fd = -1;
++    if (!own_fd_on() || f < 0 || f != g_pull_fd_main.load()) return f;
++    if (tl_fd < 0) {
++        tl_fd = ::open(g_pull_path.c_str(), O_RDONLY | O_CLOEXEC);
++        if (tl_fd < 0) return f;
++        if (std::getenv("STRATA_MAC_PULL_NOCACHE") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL_NOCACHE")) != 0) (void) fcntl(tl_fd, F_NOCACHE, 1);
++    }
++    return tl_fd;
++}
++static bool qos_ia() { static const bool v = std::getenv("STRATA_MAC_PULL_QOS") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL_QOS")) != 0; return v; }
++#endif
+ struct MacPull {
+     std::mutex mu;
+     std::condition_variable cv, done_cv;
+@@ -1338,30 +1405,58 @@ struct MacPull {
+     size_t n = 0;
+     uint64_t gen = 0;
+     bool quit = false;
++    // Decode11: STRATA_MAC_PULL_SPIN_US=N (default 0 = the condition-variable wakeups of Decode10) makes the first STRATA_MAC_PULL_SPIN_N (default 3) workers poll for the next
++    // generation for N us after their last job, and finish() poll for the last piece; a start with at most that many pieces in flight skips the notify when that many spinners are up
++    std::atomic<uint64_t> gen_a{0};
++    std::atomic<int> spinning{0};
++    static int spin_us() { static const int v = [] { const char* e = std::getenv("STRATA_MAC_PULL_SPIN_US"); return e ? std::max(0, std::atoi(e)) : 0; }(); return v; }
++    static int spin_n() { static const int v = [] { const char* e = std::getenv("STRATA_MAC_PULL_SPIN_N"); return e ? std::max(1, std::atoi(e)) : 3; }(); return v; }
++    static inline void spin_pause() { __asm__ volatile("yield" ::: "memory"); }
++    void wake() {
++        if (spin_us() > 0 && (size_t) spinning.load(std::memory_order_acquire) >= n) return;   // every piece has a spinning worker: nobody needs the syscall
++        cv.notify_all();
++    }
+     void drain() {
+         static thread_local std::vector<uint8_t> scratch;
+         for (;;) {
+             const size_t i = next.fetch_add(1);
++            if (i < n && d11_trace()) d11_job_start(d11_ns());
+             if (i >= n) return;
+             const auto& j = (*jobs)[i];
+             uint8_t* buf;
+             if (has_dst) buf = own_dst[i];   // STRATA_EXL3_METAL: straight into the Metal lane's registered slot
+             else { if (scratch.size() < j.second) scratch.resize((size_t) j.second); buf = scratch.data(); }
+             uint64_t got = 0;
++            const int64_t tj0 = d11_trace() ? d11_ns() : 0;
++            const int ufd = use_fd(fd);
+             while (got < j.second) {
+-                const ssize_t r = ::pread(fd, buf + got, (size_t) (j.second - got), (off_t) (j.first + got));
++                const ssize_t r = ::pread(ufd, buf + got, (size_t) (j.second - got), (off_t) (j.first + got));
+                 if (r <= 0) break;
+                 got += (uint64_t) r;
+             }
+             if (got < j.second) short_reads.fetch_add(1);   // Decode7: the staged refill must not copy a short read into VRAM
++            if (d11_trace()) { const int64_t te = d11_ns(); d11_job_done(te); g_d11_piece_ns.fetch_add(te - tj0); g_d11_pieces.fetch_add(1); g_d11_piece_bytes.fetch_add((int64_t) j.second); if (i < 4) { g_d11_ps[i].store(tj0); g_d11_pe[i].store(te); } }
+             if (completed.fetch_add(1) + 1 == n) { std::lock_guard<std::mutex> lk(mu); done_cv.notify_all(); }
+         }
+     }
+     void start(int nt) {
+         for (int t = 0; t < nt; ++t)
+-            th.emplace_back([this] {
++            th.emplace_back([this, t] {
+                 uint64_t seen = 0;
++#if defined(__APPLE__)
++                if (qos_ia()) (void) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);   // Decode11 STRATA_MAC_PULL_QOS=1: the read workers on the performance cores
++#endif
++                const bool spinner = spin_us() > 0 && t < spin_n();
+                 for (;;) {
++                    if (spinner) {   // Decode11 STRATA_MAC_PULL_SPIN_US: poll for the next generation for a while after the last one (a cv wakeup costs 50-200 us), then sleep
++                        spinning.fetch_add(1, std::memory_order_acq_rel);
++                        const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us());
++                        for (unsigned c = 0; gen_a.load(std::memory_order_acquire) == seen; ++c) {
++                            spin_pause();
++                            if ((c & 63) == 63 && std::chrono::steady_clock::now() >= end) break;
++                        }
++                        spinning.fetch_sub(1, std::memory_order_acq_rel);
++                    }
+                     {
+                         std::unique_lock<std::mutex> lk(mu);
+                         cv.wait(lk, [&] { return quit || gen != seen; });
+@@ -1395,13 +1490,20 @@ struct MacPull {
+         if (j.empty()) return;
+         {
+             std::lock_guard<std::mutex> lk(mu);
+-            own = j; has_dst = false; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
++            own = j; has_dst = false; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; gen_a.store(gen, std::memory_order_release); active = true;
+         }
+-        cv.notify_all();
++        wake();
+     }
+     void finish() {
+         if (!active) return;
+         drain();
++        if (spin_us() > 0) {   // Decode11: the last pieces are in flight on spinning workers: poll for them instead of sleeping on the condition variable
++            const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us());
++            for (unsigned c = 0; completed.load(std::memory_order_acquire) < n; ++c) {
++                spin_pause();
++                if ((c & 63) == 63 && std::chrono::steady_clock::now() >= end) break;
++            }
++        }
+         std::unique_lock<std::mutex> lk(mu);
+         done_cv.wait(lk, [&] { return completed.load() >= n; });
+         active = false;
+@@ -1410,27 +1512,66 @@ struct MacPull {
+     void run_to(int fd_, const std::vector<std::pair<uint64_t, uint64_t>>& j, const std::vector<uint8_t*>& dst) {   // each job into its own buffer
+         finish();
+         if (j.empty()) return;
++        if (d11_trace()) d11_begin();
+         {
+             std::lock_guard<std::mutex> lk(mu);
+-            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
++            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; gen_a.store(gen, std::memory_order_release); active = true;
+         }
+-        cv.notify_all();
++        wake();
+         finish();
+     }
+     void begin_to(int fd_, const std::vector<std::pair<uint64_t, uint64_t>>& j, const std::vector<uint8_t*>& dst) {   // run_to without the join (finish() joins)
+         finish();
+         if (j.empty()) return;
++        if (d11_trace()) d11_begin();
+         {
+             std::lock_guard<std::mutex> lk(mu);
+-            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
++            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; gen_a.store(gen, std::memory_order_release); active = true;
+         }
+-        cv.notify_all();
++        wake();
+     }
+ };
+ MacPull& mac_pull() {
+     static MacPull* p = [] { auto* q = new MacPull; int nt = 7; if (const char* e = std::getenv("STRATA_MAC_PULL_THREADS")) nt = std::max(1, std::atoi(e)); q->start(nt); return q; }();
+     return *p;
+ }
++// Decode11 STRATA_D11_SELFTEST=<experts.bin>: touching /tmp/d11_selftest makes the engine (idle) time its own MacPull read path on random blobs: unaligned vs 4 KiB-aligned, 1-3 blobs, 0.3 ms and 2 ms apart (stderr)
++static void d11_selftest(const std::string& path) {
++    for (;;) {
++        if (::access("/tmp/d11_selftest", F_OK) != 0) { usleep(500000); continue; }
++        ::unlink("/tmp/d11_selftest");
++        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++        if (fd < 0) { std::fprintf(stderr, "strata d11 selftest: open failed\n"); continue; }
++        (void) fcntl(fd, F_NOCACHE, 1);
++        const off_t sz = ::lseek(fd, 0, SEEK_END);
++        const uint64_t BL = 1862400; const long nblobs = (long) (sz / (off_t) BL);
++        const size_t SL = 1867776;
++        uint8_t* buf = (uint8_t*) mmap(nullptr, SL * 8, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
++        std::memset(buf, 3, SL * 8); (void) mlock(buf, SL * 8);
++        srand(777);
++        for (int mode = 0; mode < 4; ++mode) {
++            for (int nb = 1; nb <= 3; ++nb) {
++                std::vector<double> lat;
++                for (int t = 0; t < 280; ++t) {
++                    std::vector<std::pair<uint64_t, uint64_t>> jobs; std::vector<uint8_t*> dsts;
++                    for (int b = 0; b < nb; ++b) {
++                        const uint64_t off = (uint64_t) ((((long) rand() << 15) ^ rand()) % nblobs) * BL;
++                        if (mode & 1) { const uint64_t a0 = off & ~(uint64_t) 4095, end = (off + BL + 4095) & ~(uint64_t) 4095; jobs.emplace_back(a0, end - a0); }
++                        else jobs.emplace_back(off, BL);
++                        dsts.push_back(buf + (size_t) b * SL);
++                    }
++                    const auto t0 = std::chrono::steady_clock::now();
++                    mac_pull().run_to(fd, jobs, dsts);
++                    if (t >= 30) lat.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
++                    usleep(mode >= 2 ? 2000 : 300);
++                }
++                std::sort(lat.begin(), lat.end());
++                std::fprintf(stderr, "strata d11 selftest: %s gap %s nb=%d: median %.0f us p10 %.0f p90 %.0f\n", (mode & 1) ? "aligned  " : "unaligned", mode >= 2 ? "2000" : " 300", nb, lat[lat.size() / 2], lat[lat.size() / 10], lat[lat.size() * 9 / 10]);
++            }
++        }
++        ::close(fd); munmap(buf, SL * 8);
++    }
++}
+ bool mac_pull_on() {
+     static const bool on = std::getenv("STRATA_MAC_PULL") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL")) != 0;
+     return on;
+@@ -1443,6 +1584,8 @@ int mac_pull_fd(const std::string& path) {
+         fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+         if (fd >= 0 && std::getenv("STRATA_MAC_PULL_NOCACHE") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL_NOCACHE")) != 0) (void) fcntl(fd, F_NOCACHE, 1);   // misses go straight into the registered slots: no file-cache copy
+     }
++    if (g_pull_path.empty()) g_pull_path = path;
++    g_pull_fd_main.store(fd);
+     return fd;
+ }
+ // the router look-ahead's predicted blobs: read in the background (newest prediction first, the oldest dropped past 96) while the
+@@ -1631,6 +1774,7 @@ bool ml_init(MetalLane& M) {
+     if (M.reg(M.ctx, M.slots, M.stride * (size_t) M.nslots) <= 0) { std::fprintf(stderr, "strata exl3-metal: slot registration failed: %s\n", M.lasterr()); return false; }
+     std::fprintf(stderr, "strata exl3-metal: lane ready (%s; %d slots of %zu B registered)\n", path.c_str(), M.nslots, M.stride);
+     M.ok = true;
++    if (const char* stf = std::getenv("STRATA_D11_SELFTEST")) { const std::string stp = stf; std::thread([stp] { d11_selftest(stp); }).detach(); }
+     static const bool ka_on = [] { const char* v = std::getenv("STRATA_EXL3_METAL_KEEPALIVE"); return v == nullptr || std::atoi(v) != 0; }();
+     if (ka_on) {   // an idle Apple GPU clocks down between the 48 layer calls of a window (measured: 3 ms gaps turn a 0.75 ms call into 1.9 ms); one-expert calls back to back while requests run keep it up
+         std::thread([&M] {
+@@ -2122,12 +2266,16 @@ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* i
+         void* ja = nullptr; void* jb = nullptr;
+         if (a_pre) { ja = M.ja; M.early_a = false; }
+         else rc = M.rows_submit(M.ctx, x_f, (int) n_tok, npa, ea, ra, wa, pa, M.ya, &ja);   // the in-place experts run on the GPU while the misses are read
++        const int64_t d11_f0 = d11_ns();
+         if (early) mac_pull().finish(); else gather_phase(2);
++        const int64_t d11_f1 = d11_ns();
+         t1 = std::chrono::steady_clock::now();
+         if (b_pre) { jb = M.jb; M.early_b = false; M.gate_signal(M.ctx, M.b_gate); ++M.bpre_calls; }   // Decode10: committed at the ring's start, released now that the reads have landed
+         else if (rc == 0) rc = M.rows_submit(M.ctx, x_f, (int) n_tok, npb, eb, rb, wb, pb, M.y, &jb);
+         if (ja != nullptr) { const int r2 = M.waitj(M.ctx, ja); if (rc == 0) rc = r2; }
++        const int64_t d11_a = d11_ns();
+         if (jb != nullptr) { const int r2 = M.waitj(M.ctx, jb); if (rc == 0) rc = r2; }
++        if (d11_trace()) d11_ring_note(early, nb, d11_f0, d11_f1, d11_a, d11_ns());
+         {   // STRATA_D10_BGATE_CHECK=1: recompute the misses' job the plain way (after the reads, ungated) and compare it bit for bit with the gated job's rows
+             static const bool chk = std::getenv("STRATA_D10_BGATE_CHECK") != nullptr && std::atoi(std::getenv("STRATA_D10_BGATE_CHECK")) != 0;
+             if (chk && b_pre && rc == 0) {
+@@ -2151,11 +2299,13 @@ static int exl3_metal_lane(ExpertDispatch& d, const float* x_f, const int32_t* i
+         rc = M.waitj(M.ctx, M.jb);
+         t2 = std::chrono::steady_clock::now();
+     } else if (a_pre && M.early_all) {   // every expert was in place: strata_exl3_metal_begin submitted the one job (into M.y)
++        const int64_t d11_e0 = d11_trace() ? d11_ns() : 0;
+         mac_pull().finish();
+         t1 = std::chrono::steady_clock::now();
+         rc = M.waitj(M.ctx, M.ja);
+         M.early_a = false;
+         t2 = std::chrono::steady_clock::now();
++        if (d11_trace()) d11_a_note(d11_e0, d11_ns(), n_tok, nd);
+     } else {
+         t1 = std::chrono::steady_clock::now();
+         rc = M.rows(M.ctx, x_f, (int) n_tok, np, eidx, ridx, wt, (const void* const*) M.ptrs, M.y);
+@@ -2231,7 +2381,7 @@ extern "C" void strata_mac_pull_begin(int64_t layer, const int64_t* experts, int
+ }
+ // verify.cpp, once a ring's x / ids / w are on the host (before the CE push is queued): like strata_mac_pull_begin, plus the experts that are already in place (tier + LRU hits)
+ // go to the Metal GPU right now (STRATA_EXL3_METAL_SPLIT), so they run while the push is queued and the misses are read.  1: taken (the lane finishes the job)
+-extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64_t nc, const float* x, const int32_t* ids, const float* w, float* y, int n_tok, int64_t k) {
++static int ml_begin_impl(int64_t layer, const int64_t* cold, int64_t nc, const float* x, const int32_t* ids, const float* w, float* y, int n_tok, int64_t k) {
+     if (!ml_early_enabled()) return 0;
+     MetalLane& M = ml();
+     if (M.early_b) { mac_pull().finish(); M.gate_signal(M.ctx, M.b_gate); (void) M.waitj(M.ctx, M.jb); M.early_b = false; }   // Decode10: the previous ring's gated job was never claimed
+@@ -2291,11 +2441,33 @@ extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64
+     if (bgate && nready < nc) submit_b();   // Decode10: B follows A on the queue; it starts once the lane has signalled its gate
+     return 1;
+ }
++extern "C" int strata_exl3_metal_begin(int64_t layer, const int64_t* cold, int64_t nc, const float* x, const int32_t* ids, const float* w, float* y, int n_tok, int64_t k) {
++    if (!d11_trace()) return ml_begin_impl(layer, cold, nc, x, ids, w, y, n_tok, k);
++    const int64_t t0 = d11_ns();
++    g_d11_ring_t0.store(t0);
++    const int r = ml_begin_impl(layer, cold, nc, x, ids, w, y, n_tok, k);
++    g_d11_begin_call_ns.store(d11_ns() - t0);
++    return r;
++}
+ #else
+ extern "C" void strata_mac_pull_begin(int64_t, const int64_t*, int64_t) {}
+ extern "C" int strata_exl3_metal_begin(int64_t, const int64_t*, int64_t, const float*, const int32_t*, const float*, float*, int, int64_t) { return 0; }
+ #endif
+ 
++// Decode11 STRATA_D11_ALIGN=1: direct (F_NOCACHE) reads at a file offset that is not a multiple of the 4 KiB device block take a slow path in the kernel (measured on the mini's SSD with ssdbench2:
++// 1 blob 0.9-1.4 ms unaligned vs 0.68 aligned, 2 blobs 1.2-1.9 vs 1.13, and the unaligned reads of concurrent threads do not overlap in the live engine).  An expert blob (1,862,400 B, at a 128 B-aligned
++// file offset) is therefore read as the enclosing 4 KiB-aligned range into the START of its LRU slot, and the blob sits d11_skew bytes into the slot (the slot stride has room: 3,968 + 1,862,400 <= 1,867,776).
++static bool d11_align_on() { static const bool v = std::getenv("STRATA_D11_ALIGN") != nullptr && std::atoi(std::getenv("STRATA_D11_ALIGN")) != 0; return v; }
++static inline bool d11_ok(uint64_t off0, uint64_t bytes, size_t stride) {
++    return d11_align_on() && (off0 & 127u) == 0 && ((off0 & 4095u) + bytes + 4095u) / 4096u * 4096u <= (uint64_t) stride;
++}
++static inline uint32_t d11_skew(uint64_t off0, uint64_t bytes, size_t stride) { return d11_ok(off0, bytes, stride) ? (uint32_t) (off0 & 4095u) : 0u; }
++static inline void d11_job(uint64_t off0, uint64_t bytes, size_t stride, uint8_t* slot, std::vector<std::pair<uint64_t, uint64_t>>& jobs, std::vector<uint8_t*>& dsts) {
++    if (!d11_ok(off0, bytes, stride)) { jobs.emplace_back(off0, bytes); dsts.push_back(slot); return; }
++    const uint64_t a0 = off0 & ~(uint64_t) 4095u, end = (off0 + bytes + 4095u) & ~(uint64_t) 4095u;
++    jobs.emplace_back(a0, end - a0);
++    dsts.push_back(slot);
++}
+ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n) {
+ #if defined(__APPLE__)
+     if (tl_d7_mode == 5) {   // Decode7: strata_lru_warm (this thread owns the LRU: no decode ring is in flight)
+@@ -2328,8 +2500,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+             if (M.key[(size_t) vs] >= 0) M.where.erase(M.key[(size_t) vs]);
+             M.key[(size_t) vs] = (int64_t) idx; M.where[(int64_t) idx] = vs; M.stamp[(size_t) vs] = 0;
+             M.lru_touch(vs);
+-            jobs.emplace_back((uint64_t) (mapped_blob(l, e) - base_), layer_blob_bytes_[(size_t) l]);
+-            dsts.push_back(M.slots + (size_t) vs * M.stride);
++            d11_job((uint64_t) (mapped_blob(l, e) - base_), layer_blob_bytes_[(size_t) l], M.stride, M.slots + (size_t) vs * M.stride, jobs, dsts);
+             vss.push_back(vs);
+         }
+         const int fd = ::open(paths_.front().c_str(), O_RDONLY | O_CLOEXEC);
+@@ -2395,6 +2566,10 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+             const auto h = M.where.find((int64_t) index);
+             return h == M.where.end() ? -1 : h->second;
+         };
++        auto d11_skew_lam = [&](int64_t l, int64_t e) -> uint32_t {   // Decode11 STRATA_D11_ALIGN: how far into its LRU slot the blob (l, e) sits
++            const uint8_t* q = mapped_blob(l, e);
++            return q != nullptr ? d11_skew((uint64_t) (q - base_), layer_blob_bytes_[(size_t) l], M.stride) : 0u;
++        };
+         if (P.mode == 4) {   // STRATA_EXL3_METAL_PRELOAD (default on): fill the decode LRU with the hottest cold experts by profile rank (not in the tier, not in VRAM), hottest = most recent
+             if (M.slots == nullptr || M.nslots <= 0 || g_cold_rank.empty() || base_ == nullptr || paths_.empty() || !M.where.empty()) return;
+             if (const char* pe = std::getenv("STRATA_EXL3_METAL_PRELOAD"); pe != nullptr && std::atoi(pe) == 0) return;
+@@ -2423,8 +2598,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+                 if (M.key[(size_t) vs] >= 0) M.where.erase(M.key[(size_t) vs]);
+                 M.key[(size_t) vs] = (int64_t) idx; M.where[(int64_t) idx] = vs; M.stamp[(size_t) vs] = 0;
+                 M.lru_touch(vs);
+-                jobs.emplace_back((uint64_t) (p - base_), layer_blob_bytes_[(size_t) l]);
+-                dsts.push_back(M.slots + (size_t) vs * M.stride);
++                d11_job((uint64_t) (p - base_), layer_blob_bytes_[(size_t) l], M.stride, M.slots + (size_t) vs * M.stride, jobs, dsts);
+                 ++s_next;
+                 if (jobs.size() >= 128) { mac_pull().run_to(fd, jobs, dsts); jobs.clear(); dsts.clear(); }
+             }
+@@ -2544,7 +2718,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+             const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) e;
+             P.ptrs[i] = nullptr;
+             if (in_tier(index)) { P.ptrs[i] = resident_blob(index); ++P.tier_hits; }
+-            else if (const int ls = in_lru(index); ls >= 0) { P.ptrs[i] = M.slots + (size_t) ls * M.stride; ++P.lru_hits; }
++            else if (const int ls = in_lru(index); ls >= 0) { P.ptrs[i] = M.slots + (size_t) ls * M.stride + d11_skew_lam(layer, e); ++P.lru_hits; }
+             else if (P.slot_of[s][(size_t) e] >= 0) P.ptrs[i] = P.sptr[(size_t) s * (size_t) P.per_set + (size_t) P.slot_of[s][(size_t) e]];
+             if (P.ptrs[i] == nullptr) P.bad = true;
+         }
+@@ -2590,13 +2764,15 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+             const uint64_t bytes = layer_blob_bytes_[(size_t) layer];
+             if (bytes > M.stride) continue;
+             uint8_t* dst = nullptr;
++            const uint64_t off0 = (uint64_t) (p - base_);
++            const uint32_t sk = d11_skew(off0, bytes, M.stride);   // Decode11 STRATA_D11_ALIGN=1: the blob sits sk bytes into its slot (the SSD read starts on a 4 KiB boundary)
+             {   // the slot region is an LRU cache of (layer, expert) -> registered slot: a hit is read in place by the GPU with no copy at all
+                 const auto hit = M.where.find((int64_t) index);
+                 if (hit != M.where.end()) {
+                     const int s = hit->second;
+                     M.stamp[(size_t) s] = M.seq;
+                     M.lru_touch(s);
+-                    M.ptrs[i] = M.slots + (size_t) s * M.stride;
++                    M.ptrs[i] = M.slots + (size_t) s * M.stride + sk;
+                     ++M.lru_hits;
+                     M.status[i] = 1;
+                     continue;
+@@ -2620,16 +2796,12 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
+                 bool cached = npg <= sizeof vec && mincore((void*) a, len, vec) == 0;
+                 for (size_t q = 0; cached && q < npg; ++q) if (!(vec[q] & 1)) cached = false;
+                 M.status[i] = cached ? 2 : 3;
+-                const uint64_t off0 = (uint64_t) (p - base_);
+                 if (cached && nchunk > 1) {
+                     const uint64_t cb = ((bytes / (uint64_t) nchunk) + 4095) & ~(uint64_t) 4095;
+-                    for (uint64_t o = 0; o < bytes; o += cb) { gjobs.emplace_back(off0 + o, std::min<uint64_t>(cb, bytes - o)); gdst.push_back(dst + o); }
+-                } else {
+-                    gjobs.emplace_back(off0, bytes);
+-                    gdst.push_back(dst);
+-                }
++                    for (uint64_t o = 0; o < bytes; o += cb) { gjobs.emplace_back(off0 + o, std::min<uint64_t>(cb, bytes - o)); gdst.push_back(dst + sk + o); }
++                } else d11_job(off0, bytes, M.stride, dst, gjobs, gdst);
+             }
+-            M.ptrs[i] = dst;
++            M.ptrs[i] = dst + sk;
+         }
+         if (M.phase == 1) { M.sj = gjobs; M.sd = gdst; M.spfd = pfd; return; }   // the lane runs the reads itself (phase 2) after it has submitted the in-place experts
+         if (!gjobs.empty()) mac_pull().run_to(pfd, gjobs, gdst);

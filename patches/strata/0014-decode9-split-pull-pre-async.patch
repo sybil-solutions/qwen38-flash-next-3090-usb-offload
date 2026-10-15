@@ -1,0 +1,83 @@
+# Decode9 (2026-10-13): STRATA_MAC_PULL_SPLIT=S (a whole-blob read cut into S page-aligned pieces) and
+# STRATA_D9_PRE_ASYNC=1 (a helper thread queues the gated y-push job while the Metal lane runs). Both measured no gain,
+# default OFF; the code is part of the shipped engine source.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0013, applied in order with `git apply -p1`.
+
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index 95315d2..eef8906 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -1374,6 +1374,20 @@ struct MacPull {
+     }
+     std::vector<std::pair<uint64_t, uint64_t>> own;
+     std::vector<uint8_t*> own_dst;
++    // Decode9 STRATA_MAC_PULL_SPLIT=S (default 1 = off): a whole-blob read is cut into S page-aligned pieces (at most 8 pieces in all) that the pool threads read in parallel:
++    // a decode miss is usually ONE blob and a single pread of 1.86 MB runs at ~1.6 GB/s while 2-4 concurrent pieces reach the drive's ~2.2+ GB/s
++    static int split_s() { static const int v = [] { const char* e = std::getenv("STRATA_MAC_PULL_SPLIT"); return e ? std::max(1, std::min(8, std::atoi(e))) : 1; }(); return v; }
++    void set_own_split(const std::vector<std::pair<uint64_t, uint64_t>>& j, const std::vector<uint8_t*>& dst) {
++        own.clear(); own_dst.clear();
++        const size_t nj = j.size();
++        size_t S = (size_t) split_s();
++        if (S > 1 && nj * S > 8) S = std::max<size_t>(1, 8 / nj);
++        for (size_t i = 0; i < nj; ++i) {
++            if (S <= 1 || j[i].second < 262144) { own.push_back(j[i]); own_dst.push_back(dst[i]); continue; }
++            const uint64_t per = ((j[i].second + S - 1) / S + 16383) / 16384 * 16384;
++            for (uint64_t o = 0; o < j[i].second; o += per) { own.emplace_back(j[i].first + o, std::min<uint64_t>(per, j[i].second - o)); own_dst.push_back(dst[i] + o); }
++        }
++    }
+     bool has_dst = false;
+     bool active = false;
+     void begin(int fd_, const std::vector<std::pair<uint64_t, uint64_t>>& j) {   // start, do not wait (finish() joins)
+@@ -1398,7 +1412,7 @@ struct MacPull {
+         if (j.empty()) return;
+         {
+             std::lock_guard<std::mutex> lk(mu);
+-            own = j; own_dst = dst; has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
++            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
+         }
+         cv.notify_all();
+         finish();
+@@ -1408,7 +1422,7 @@ struct MacPull {
+         if (j.empty()) return;
+         {
+             std::lock_guard<std::mutex> lk(mu);
+-            own = j; own_dst = dst; has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
++            set_own_split(j, dst); has_dst = true; jobs = &own; fd = fd_; n = own.size(); next.store(0); completed.store(0); ++gen; active = true;
+         }
+         cv.notify_all();
+     }
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index b3e8f4c..4c9de8e 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -2329,13 +2329,18 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+             if (r0 >= 0) {
+                 if (!hs_got) strata::tgcu::pull(h_x_ + (size_t) (tb + r0) * N_, (size_t) (r1 - r0 + 1) * N_ * sizeof(float));
+                 hs2 = hs_now();
++                // Decode9 STRATA_D9_PRE_ASYNC=1: the gated rows + flag job (and the next pull) is queued by a helper thread while this thread runs the Metal lane
++                // (reads, job B, waits): the ~0.58 ms of Python / USB submit overlaps the lane instead of preceding it.  Joined right after the pool call.
++                static const bool d9_pre_async = std::getenv("STRATA_D9_PRE_ASYNC") != nullptr && std::atoi(std::getenv("STRATA_D9_PRE_ASYNC")) != 0;
++                std::thread d9_pre_th;
++                void* ps[2] = {h_yred_ + (size_t) (tb + r0) * N_, (void*) h_flag_};
++                const size_t ns[2] = {(size_t) (r1 - r0 + 1) * N_ * sizeof(float), 4};
++                void* nps[3]; size_t nns[3];
+                 if (hs_pre && !(k == 0 && do_ple && !mxon)) {   // the rows + the flag: one gated copy-engine job, queued now
+-                    void* ps[2] = {h_yred_ + (size_t) (tb + r0) * N_, (void*) h_flag_};
+-                    const size_t ns[2] = {(size_t) (r1 - r0 + 1) * N_ * sizeof(float), 4};
+                     if (hs_defer && k + 1 < steps) {   // + the next ring's pull, queued now and held until the arm after the push
+-                        void* nps[3]; size_t nns[3];
+                         hs_ring_segs(k + 1, nps, nns);
+-                        hs_merged = hs_next_q = strata::tgcu::hs_push_pre_next(ps, ns, 2, nps, nns, 3, (const void*) h_seq_, (unsigned) (k + 2)) == 0;
++                        auto d9_call = [&] { hs_merged = hs_next_q = strata::tgcu::hs_push_pre_next(ps, ns, 2, nps, nns, 3, (const void*) h_seq_, (unsigned) (k + 2)) == 0; };
++                        if (d9_pre_async && pool != nullptr) d9_pre_th = std::thread(d9_call); else d9_call();
+                     } else
+                     hs_merged = strata::tgcu::hs_push_pre(ps, ns, 2) == 0;
+                 }
+@@ -2343,6 +2348,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+                 strata_exl3_metal_arm(wsrc, h_yred_ + (size_t) tb * N_);
+                 if (pool != nullptr)
+                     pool(user, h_x_ + (size_t) tb * N_, ids, n, ss.k, h_ymiss_ + (size_t) tb * K_ * N_, l);
++                if (d9_pre_th.joinable()) d9_pre_th.join();
+                 progress_tick();
+                 hs3 = hs_now();
+                 std::atomic_thread_fence(std::memory_order_seq_cst);

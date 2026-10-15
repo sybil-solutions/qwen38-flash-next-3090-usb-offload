@@ -1,0 +1,101 @@
+# Decode15 (2026-10-15): the indexer's pooled keys (one fp32 row per idx_block cells, 25 MiB per layer at 204,800 cells)
+# grow with the context like the K/V pages (kill switch STRATA_KV_GROW_POOLED=0): the session buffers drop from 474 to
+# ~198 MiB at 16K cells. Together with the Decode15 shim knobs (TGCU_CODE_MIB, TGCU_MAPPED_MIB,
+# TGCU_NO_MIRROR_HOSTALLOC_MIB, TGCU_LMEM_STACK, TGCU_MEMINFO_FIXED_MIB) config C reaches 9,958 expert slots.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0018, applied in order with `git apply -p1`.
+
+diff --git a/src/core/layer.cpp b/src/core/layer.cpp
+index 3132871..e5b701c 100644
+--- a/src/core/layer.cpp
++++ b/src/core/layer.cpp
+@@ -523,13 +523,15 @@ int64_t g_kv_elastic_init = 16384;
+ struct ElasticPool {
+     strata::core::VmmRange range;
+     std::vector<uint64_t> off, per_slot;   // each array's offset in the range (whole chunks) and bytes per page slot
++    std::vector<uint64_t> pad;             // Decode15: bytes mapped beyond the slots' own once ALL slots are (the indexer writes the spare row past the last block)
+     int64_t n_slots = 0, page_size = 0;
+ };
+ std::vector<std::unique_ptr<ElasticPool>> g_pools;
+ 
+ int64_t pool_chunks(const ElasticPool& p, size_t a, int64_t slots) {
+     const uint64_t G = strata::core::vmm_granularity();
+-    return (int64_t) (((uint64_t) slots * p.per_slot[a] + G - 1) / G);
++    // (the pad is only needed when every slot is mapped: a context below the maximum is mapped with at least 64 cells to spare, kvg_ensure's margin, and the rows past a block are read within them)
++    return (int64_t) (((uint64_t) slots * p.per_slot[a] + (slots >= p.n_slots ? p.pad[a] : 0) + G - 1) / G);
+ }
+ int64_t pool_slots(const ElasticPool& p, int64_t cells) {
+     return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size, 1));
+@@ -660,6 +662,11 @@ uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8
+     return int8 ? (uint64_t) pages * s.page_size * strata::kernels::kv_q8_bytes_per_cell(s) + 64
+                 : (uint64_t) pages * s.n_head_kv * s.page_size * s.head_dim * 2 * 2;
+ }
++// Decode15: the indexer's pooled keys (one fp32 row of idx_dim per idx_block cells: 25 MiB per layer at 204,800 cells) grow with the context like the K/V pages (kill switch STRATA_KV_GROW_POOLED=0)
++bool elastic_pooled_ok(const QsaShapes& s) {
++    static const bool on = [] { const char* e = std::getenv("STRATA_KV_GROW_POOLED"); return e == nullptr || e[0] != '0'; }();
++    return on && s.idx_block > 0 && s.page_size % s.idx_block == 0;
++}
+ }  // namespace
+ 
+ void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
+@@ -678,7 +685,8 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
+     if (p.mode == 1) n += strata::kernels::kv_stream_map_bytes(p.slots) + 6 * 16;   // the residency map
+     n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;                         // tail
+     n += (uint64_t) s.idx_dim * 4;                                             // dead
+-    n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                             // pooled
++    if (!(g_kv_elastic && p.mode == 0 && elastic_pooled_ok(s)))                 // Decode15: the elastic state's pooled indexer keys are in its pool too
++        n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                         // pooled
+     n += 16;                                                                   // block_pos
+     if (with_rope) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;          // cos + sin tables
+     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
+@@ -716,13 +724,21 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
+         else if (st.kv_q4) per = {slot_rows * q4_row, slot_rows * q4_row};
+         else if (st.kv_int8) per = {slot_rows * s.head_dim, slot_rows * s.head_dim, slot_rows * scale_row, slot_rows * scale_row};
+         else per = {slot_rows * s.head_dim * 2, slot_rows * s.head_dim * 2};
++        const size_t n_kv = per.size();
++        std::vector<uint64_t> pad(n_kv, 0);
++        const bool pooled_in_pool = elastic_pooled_ok(s);
++        if (pooled_in_pool) {   // Decode15: the pooled indexer keys, one row (idx_dim floats) per idx_block cells, 16 rows of slack past the last mapped block
++            per.push_back((uint64_t) (s.page_size / s.idx_block) * s.idx_dim * 4);
++            pad.push_back((uint64_t) 16 * s.idx_dim * 4);
++        }
+         auto pool = std::make_unique<ElasticPool>();
+         const uint64_t G = strata::core::vmm_granularity();
+         uint64_t at = 0;
+-        for (const uint64_t b : per) {
++        for (size_t a = 0; a < per.size(); ++a) {
+             pool->off.push_back(at);
+-            at += ((uint64_t) p.slots * b + G - 1) / G * G;
++            at += ((uint64_t) p.slots * per[a] + pad[a] + G - 1) / G * G;
+         }
++        pool->pad = pad;
+         pool->per_slot = per;
+         pool->n_slots = p.slots;
+         pool->page_size = s.page_size;
+@@ -740,6 +756,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
+             st.k_scale = (uint16_t*) (b + o[2]);
+             st.v_scale = (uint16_t*) (b + o[3]);
+         } else { st.k_pool = (uint16_t*) (b + o[0]); st.v_pool = (uint16_t*) (b + o[1]); }
++        if (pooled_in_pool) st.idx_pooled = (float*) (b + o[n_kv]);
+         st.kv_elastic = (int32_t) g_pools.size();
+         g_pools.push_back(std::move(pool));
+     } else if (st.kv_hybrid) {
+@@ -776,7 +793,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
+     st.idx_tail = c.take<float>((uint64_t) (s.idx_block - 1) * s.idx_dim);
+     st.idx_dead = c.take<float>((uint64_t) s.idx_dim);
+     st.idx_pooled_rows = p.pooled_rows;
+-    st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
++    if (st.idx_pooled == nullptr) st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);   // (an elastic state's is in its pool)
+     st.idx_block_pos = c.take<int32_t>(1);
+     if (share_rope != nullptr) {
+         st.cos_tab = share_rope->cos_tab;
+@@ -888,7 +905,9 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
+     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
+     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
+     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
+-    cudaMemsetAsync(st.idx_pooled, 0, (size_t) st.idx_pooled_rows * s.idx_dim * 4, cs);
++    // (an elastic state's pooled rows are mapped with its K/V pages: only those are cleared, the rest is cleared when it is mapped)
++    const int64_t pooled_rows = st.kv_elastic >= 0 && elastic_pooled_ok(s) ? std::min<int64_t>(st.idx_pooled_rows, live_slots * (s.page_size / s.idx_block)) : st.idx_pooled_rows;
++    cudaMemsetAsync(st.idx_pooled, 0, (size_t) pooled_rows * s.idx_dim * 4, cs);
+ }
+ 
+ strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {

@@ -1,0 +1,645 @@
+# Prefix replay (2026-10-12): serve/prefix_replay.py (new) + serve/server.py: the model's own reply tokens go back into
+# the next turn's prompt when the client sent the reply back unchanged, and a new chat that shares a long prefix with a
+# recent one gets a checkpoint pin (config keys prefix_replay, prefix_pin_min). Unit test serve/test_prefix_replay.py.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0006, applied in order with `git apply -p1`.
+
+diff --git a/serve/prefix_replay.py b/serve/prefix_replay.py
+new file mode 100644
+index 0000000..8ce3f0d
+--- /dev/null
++++ b/serve/prefix_replay.py
+@@ -0,0 +1,182 @@
++"""serve/prefix_replay.py - keep the engine's conversation cache hitting across agent turns (no GPU, no engine).
++
++Why this exists.  The engine reuses the session it holds only when ALL of its tokens (the last prompt + what it
++generated) are an exact prefix of the next prompt; otherwise it falls back to the checkpoint at the end of the last
++prompt, so the whole previous reply is read again (a 7,952-token tool call = 19 s of prefill on the Mac mini).  A
++client does not send back the model's tokens, it sends back a parsed message, and the chat template renders that
++message again: trimmed reasoning and content, JSON arguments re-serialised (1.50 -> 1.5, ["a","b"] -> ["a", "b"]).
++The text the model sees differs from what it wrote by a token or two, and the cache misses at that point.
++
++What it does.
++  * PrefixReplay.record(): after a clean request, remember the prompt ids, the ids the model generated and a
++    fingerprint of the message the client received (reasoning, content, tool calls with their parsed arguments).
++  * PrefixReplay.apply(): on the next request, when its ids start with a remembered prompt and the assistant message
++    that follows in the history has the SAME fingerprint (the client sent back exactly what it was given), the
++    template's re-rendering of that message in the ids is replaced by the ids the model really generated.  The model's
++    own tokens are the faithful rendering of its message, and they are what the engine holds, so the session matches
++    and only the new turn (the tool result) is read.  A message the client changed is never touched.
++  * PrefixReplay.sibling_pin(): a request that continues no remembered prompt (a new chat) but shares a long prefix
++    with a recent one (the same agent harness in another directory: Pi puts <project_context> and <cwd> after
++    thousands of tokens of identical text) asks the engine to checkpoint and pin that shared prefix (`pin=N`, the
++    existing strata_prefix mechanism), so the next new chat reads only what differs.
++"""
++from __future__ import annotations
++
++import json
++import threading
++from dataclasses import dataclass
++
++
++class PromptIds(list):
++    """The prompt ids Service.prepare() returns: a list that also knows how many messages rendered them, so that
++    Service.run() can record the request.  Any arithmetic on it (ids + more) gives a plain list: not recorded."""
++    n_messages: int | None = None
++
++
++def text_of(content) -> str:
++    """The text of a template message's content (a string, a list of text parts, None)."""
++    if content is None:
++        return ""
++    if isinstance(content, str):
++        return content
++    if isinstance(content, list):
++        return "".join(p if isinstance(p, str) else (p.get("text") or "") for p in content
++                       if isinstance(p, str) or (isinstance(p, dict) and "text" in p))
++    return ""
++
++
++def canon(args) -> str:
++    return json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def fingerprint(reasoning: str | None, content: str | None, calls) -> tuple:
++    """(reasoning, content, ((name, arguments), ...)): what an assistant message says, without the whitespace the
++    chat template trims around the reasoning and the content."""
++    return ((reasoning or "").strip(), (content or "").strip(),
++            tuple((name, canon(args)) for name, args in calls))
++
++
++def message_fingerprint(message: dict) -> tuple:
++    """The fingerprint of an assistant message of the template's messages (the client's history)."""
++    calls = []
++    for c in message.get("tool_calls") or []:
++        fn = c.get("function", c)
++        calls.append((fn.get("name"), fn.get("arguments") if fn.get("arguments") is not None else {}))
++    return fingerprint(message.get("reasoning_content"), text_of(message.get("content")), calls)
++
++
++def common_prefix(a, b, block: int = 512) -> int:
++    """How many leading elements two sequences share (blocks of equal ids are skipped in C)."""
++    n = min(len(a), len(b))
++    i = 0
++    while i + block <= n and a[i:i + block] == b[i:i + block]:
++        i += block
++    while i < n and a[i] == b[i]:
++        i += 1
++    return i
++
++
++@dataclass
++class Record:
++    ids: list            # the prompt as sent to the engine
++    out: list            # the ids the model generated, without the stop token
++    n_messages: int      # how many template messages rendered `ids`
++    fp: tuple            # fingerprint of the assistant message the client received
++
++
++class PrefixReplay:
++    def __init__(self, stop_ids, max_records: int = 6, pin_min: int = 2048, decode=None):
++        self.stop_ids = frozenset(int(t) for t in stop_ids)
++        self.max_records = max(1, int(max_records))
++        self.pin_min = int(pin_min)            # 0: no sibling pin
++        self.decode = decode                   # ids -> text, for the log's diagnostics (optional)
++        self.records: list[Record] = []        # newest last
++        self.lock = threading.Lock()
++        self.stats = {"replayed": 0, "exact": 0, "changed": 0, "new_chat": 0}
++
++    # -------------------------------------------------------------------------------------------- recording
++    def record(self, ids, out, n_messages, fp) -> None:
++        out = list(out)
++        while out and out[-1] in self.stop_ids:
++            out.pop()
++        if not out or n_messages is None:
++            return
++        rec = Record(list(ids), out, int(n_messages), fp)
++        with self.lock:
++            # the chat moved on: the older prompt of the same conversation is a prefix of this one
++            self.records = [r for r in self.records
++                            if not (len(r.ids) <= len(rec.ids) and rec.ids[:len(r.ids)] == r.ids)]
++            self.records.append(rec)
++            del self.records[:-self.max_records]
++
++    # -------------------------------------------------------------------------------------------- applying
++    def apply(self, ids, messages) -> tuple[PromptIds, str | None]:
++        """-> (ids for the engine, a log line or None).  The ids are the request's own unless the last reply of a
++        remembered conversation is in them and the client sent it back unchanged."""
++        out = PromptIds(ids)
++        out.n_messages = len(messages)
++        with self.lock:
++            records = list(reversed(self.records))
++        note = None
++        for rec in records:
++            p = len(rec.ids)
++            if len(ids) <= p or ids[:p] != rec.ids:
++                continue
++            at = rec.n_messages
++            msg = messages[at] if at < len(messages) else None
++            if not isinstance(msg, dict) or msg.get("role") != "assistant":
++                return out, None
++            j = next((k for k in range(p, len(ids)) if ids[k] in self.stop_ids), None)
++            if j is None:
++                return out, None
++            span = list(ids[p:j])
++            if span == rec.out:
++                self.stats["exact"] += 1
++                return out, None
++            if message_fingerprint(msg) != rec.fp:
++                self.stats["changed"] += 1
++                return out, ("prefix: the client changed the last reply (it is not what was sent), so it is read "
++                             f"again: {len(span)} tokens re-rendered from {p}")
++            first = common_prefix(span, rec.out)
++            new = PromptIds(list(ids[:p]) + rec.out + list(ids[j:]))
++            new.n_messages = out.n_messages
++            self.stats["replayed"] += 1
++            return new, (f"prefix replay: the model's own {len(rec.out)} reply tokens go back into the prompt "
++                         f"(the template re-rendered {len(span)}; they differ from token {first} of the reply"
++                         + (f": {self._show(rec.out, first)!r} vs {self._show(span, first)!r}" if self.decode else "")
++                         + ")")
++        return out, note
++
++    def _show(self, ids, at, width=6):
++        try:
++            return self.decode(list(ids[max(0, at - 2):at + width]))
++        except Exception:  # noqa: BLE001 - a log line only
++            return "?"
++
++    # -------------------------------------------------------------------------------------------- sibling pin
++    def overlap(self, ids) -> tuple[bool, int] | None:
++        """How this request relates to the remembered prompts: (continues one of them, the most leading ids it shares
++        with any); None when nothing is remembered."""
++        with self.lock:
++            records = list(self.records)
++        if not records:
++            return None
++        best = 0
++        for rec in records:
++            if len(ids) > len(rec.ids) and ids[:len(rec.ids)] == rec.ids:
++                return True, len(rec.ids)
++            best = max(best, common_prefix(ids, rec.ids))
++        return False, best
++
++    def pin_for(self, ids, shared: int) -> int | None:
++        """The engine's `pin=N` for a NEW chat that shares `shared` leading ids with a recent prompt of another chat:
++        a checkpoint there lets the chat after this one read only what differs.  None when the overlap is short (a
++        checkpoint costs ~0.3 s and a slot) or leaves no tail to read."""
++        if self.pin_min <= 0 or shared < self.pin_min or shared >= len(ids) - 1:
++            return None
++        self.stats["new_chat"] += 1
++        return shared
++
++    def sibling_pin(self, ids) -> int | None:
++        o = self.overlap(ids)
++        return None if o is None or o[0] else self.pin_for(ids, o[1])
+diff --git a/serve/server.py b/serve/server.py
+index 3cb2409..2567b93 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -63,6 +63,7 @@ from serve.winjob import contain  # noqa: E402
+ from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
+ from serve import responses as responses_api  # noqa: E402
+ from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
++from serve.prefix_replay import PrefixReplay, fingerprint  # noqa: E402
+ 
+ IM_END = "<|im_end|>"
+ IMAGE_PAD = "<|image_pad|>"
+@@ -2686,6 +2687,9 @@ class Service:
+         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
+         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
+                             tokenizer.encode("<|endoftext|>", parse_special=True))
++        # prefix_replay.PrefixReplay (the config's "prefix_replay"): the model's own tokens go back into the next
++        # turn's prompt when the client sent its reply back unchanged; off when None (see serve/prefix_replay.py)
++        self.replay = None
+ 
+     def loaded(self) -> bool:
+         return not hasattr(self.engine, "alive") or self.engine.alive()
+@@ -3281,6 +3285,8 @@ class Service:
+             if k != len(encoded):
+                 raise ValueError("the prompt and its images do not match")
+             ids = out
++        if self.replay is not None and not images:      # the pictures' positions are the embeddings file's: untouched
++            ids = self.replay_prompt(ids, messages, req)
+         ctx = self.engine.max_context
+         if ctx <= 0:
+             if getattr(self.engine, "starting", False):   # #344: (re)starting, not a prompt that is too long
+@@ -3314,6 +3320,49 @@ class Service:
+             req["strata_prefix"] = self.resolve_prefix(req["strata_prefix"], messages, tools, kwargs, ids, bool(images))
+         return ids, kwargs.get("enable_thinking", True) is not False, max_new
+ 
++    def replay_prompt(self, ids, messages, req):
++        """prefix_replay: the prompt with the model's own tokens for a reply the client sent back unchanged (the
++        engine holds them, so only the new turn is read), and `pin=N` for a new chat that shares a long prefix with
++        a recent one.  The ids are a PromptIds: run() records the request from them."""
++        ids, note = self.replay.apply(ids, messages)
++        if note:
++            print(f"[strata] {note}", flush=True)
++        seen = self.replay.overlap(ids)
++        if seen is not None and not seen[0]:
++            print(f"[strata] prefix: a new chat; it shares its first {seen[1]} of {len(ids)} tokens with the closest "
++                  "recent prompt", flush=True)
++        if seen is not None and not seen[0] and req is not None and req.get("strata_prefix") is None \
++                and req.get("strata_checkpoint") is not False:
++            pin = self.replay.pin_for(ids, seen[1])
++            if pin:
++                req["strata_prefix"] = {"tokens": pin}     # resolve_prefix() below checks it like a client's
++                print(f"[strata] prefix: the engine keeps a checkpoint at token {pin} for the next new chat",
++                      flush=True)
++        return ids
++
++    def remember_reply(self, ids, prompt, raw_ids, finish, thinking, tools, stops, cancel) -> None:
++        """prefix_replay: keep a clean single-pass reply (prompt ids, generated ids, the message the client got)."""
++        rp = self.replay
++        n_messages = getattr(ids, "n_messages", None)
++        if (rp is None or n_messages is None or prompt is not ids or stops is not None or cancel.is_set()
++                or finish not in ("stop", "length") or not raw_ids):
++            return
++        out = list(raw_ids)
++        while out and out[-1] in rp.stop_ids:
++            out.pop()
++        if not out:
++            return
++        try:                                            # the message the client received: this text, parsed again
++            parser = OutputParser(thinking=thinking, tools=tools, stream_tools=False, recover=self.tool_call_recovery)
++            evs = parser.feed(self.tok.decode(out)) + parser.finish(finish)
++        except Exception as e:  # noqa: BLE001 - the cache is an optimisation: never fail a finished request for it
++            print(f"[strata] prefix replay: reply not recorded ({e})", flush=True)
++            return
++        reasoning = "".join(e.text or "" for e in evs if e.kind == "reasoning")
++        content = "".join(e.text or "" for e in evs if e.kind == "content")
++        calls = [(e.call.name, e.call.arguments) for e in evs if e.kind == "tool_call" and e.call is not None]
++        rp.record(ids, out, n_messages, fingerprint(reasoning, content, calls))
++
+     PREFIX_END = "\u0001strata-prefix-end\u0001"          # marks where a message's shared part ends in the rendered prompt
+ 
+     def resolve_prefix(self, spec, messages, tools, kwargs, ids, has_images=False) -> dict:
+@@ -3783,6 +3832,7 @@ class Service:
+                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
+         if stops is not None and stops.hit is None and stops.held:
+             yield "event", Event("content", stops.flush())     # the held tail was not a stop string after all
++        self.remember_reply(ids, prompt, raw_ids, finish, thinking, tools, stops, cancel)
+         done = {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
+                 "timings": timings, "reasoning_tokens": thinking_n,
+                 "reasoning_recoveries": recovery_count}
+@@ -5832,6 +5882,11 @@ def main() -> int:
+         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
+     svc.repeat_stop_tokens = rs
+     svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
++    if cfg.get("prefix_replay", True) is not False:     # the model's own tokens in the next prompt; false = off
++        pin_min = cfg.get("prefix_pin_min", 2048)       # a new chat sharing this many tokens with a recent one: pin=N
++        if isinstance(pin_min, bool) or not isinstance(pin_min, int) or pin_min < 0:
++            raise SystemExit(f"[strata] config \"prefix_pin_min\" must be a whole number >= 0 (0 = off), not {pin_min!r}")
++        svc.replay = PrefixReplay(svc.stop_ids, pin_min=pin_min, decode=tok.decode)
+     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
+         try:
+             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]
+diff --git a/serve/test_prefix_replay.py b/serve/test_prefix_replay.py
+new file mode 100644
+index 0000000..8786ace
+--- /dev/null
++++ b/serve/test_prefix_replay.py
+@@ -0,0 +1,345 @@
++"""serve/test_prefix_replay.py - the prefix cache's matching logic, no GPU, no engine, no pack.
++
++    cd ~/strata && python -m unittest serve.test_prefix_replay -v
++
++The tests with the real Qwen tokenizer need its files (the model's `tokenizer` directory: vocab.json, merges.txt,
++token_type.json); set STRATA_TEST_TOKENIZER to it (default ~/models/qwen38fn/packs/iq3_s/tokenizer), else they skip.
++"""
++from __future__ import annotations
++
++import json
++import os
++import sys
++import threading
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, str(ROOT / "tools"))
++from serve.frontend import ChatTemplate, OutputParser, openai_to_messages  # noqa: E402
++from serve.prefix_replay import (PrefixReplay, PromptIds, common_prefix, fingerprint,  # noqa: E402
++                                 message_fingerprint)
++from serve.server import ByteTokenizer, MockEngine, Service  # noqa: E402
++
++STOP = 9999
++TOOLS = [{"name": "bash", "description": "run a command",
++          "parameters": {"type": "object", "required": ["command"],
++                         "properties": {"command": {"type": "string"}, "timeout": {"type": "number"},
++                                        "flags": {"type": "array"}}}}]
++
++
++def asst(reasoning="r", content="c", calls=()):
++    m = {"role": "assistant", "content": content, "reasoning_content": reasoning}
++    if calls:
++        m["tool_calls"] = [{"function": {"name": n, "arguments": a}} for n, a in calls]
++    return m
++
++
++def engine_resume(live, checkpoints, ids):
++    """Where the engine starts reading `ids` (generate.cpp, 'where this request starts reading'): the session it holds
++    if ALL of it is a prefix of the prompt, or the longest checkpoint that is - at most n - 1 tokens."""
++    def starts(pre):
++        return 1 <= len(pre) <= len(ids) - 1 and list(ids[:len(pre)]) == list(pre)
++    resume = len(live) if starts(live) else 0
++    for c in checkpoints:
++        if len(c) > resume and starts(c):
++            resume = len(c)
++    return resume
++
++
++class Logic(unittest.TestCase):
++    """PrefixReplay on bare ids: the engine's rule is 'the session is an exact prefix of the prompt'."""
++
++    def setUp(self):
++        self.rp = PrefixReplay([STOP], pin_min=4)
++        self.prompt = list(range(100, 130))                       # the first request's prompt (ends in the header)
++        self.out = [1, 2, 3, 4]                                   # what the model generated
++        self.fp = fingerprint("think", "ok", [])
++        self.rp.record(self.prompt, self.out + [STOP], 1, self.fp)
++
++    def next_prompt(self, body, tail=(7, 8)):
++        return self.prompt + body + [STOP, 10] + list(tail)
++
++    def msgs(self, reply):
++        return [{"role": "user", "content": "q"}, reply, {"role": "user", "content": "next"}]
++
++    def test_exact_reply_is_left_alone(self):
++        ids, note = self.rp.apply(self.next_prompt(self.out), self.msgs(asst("think", "ok")))
++        self.assertEqual(ids, self.next_prompt(self.out))
++        self.assertIsNone(note)
++        self.assertEqual(self.rp.stats["exact"], 1)
++        self.assertEqual(ids.n_messages, 3)
++
++    def test_rerendered_reply_gets_the_models_tokens_back(self):
++        rendered = [1, 5, 4]                                       # the template's tokens for the same message
++        ids, note = self.rp.apply(self.next_prompt(rendered), self.msgs(asst("think", "ok")))
++        self.assertEqual(list(ids), self.next_prompt(self.out))
++        self.assertIn("prefix replay", note)
++        self.assertEqual(self.rp.stats["replayed"], 1)
++        self.assertEqual(ids.n_messages, 3)
++
++    def test_whitespace_the_template_trims_does_not_change_the_message(self):
++        ids, _ = self.rp.apply(self.next_prompt([1, 5]), self.msgs(asst("think \n", "\nok  ")))
++        self.assertEqual(list(ids), self.next_prompt(self.out))
++
++    def test_a_message_the_client_changed_is_never_replaced(self):
++        for reply in (asst("think", "ok!"), asst("other", "ok"), asst("think", "ok", [("bash", {"command": "ls"})])):
++            rendered = [1, 5, 4]
++            ids, note = self.rp.apply(self.next_prompt(rendered), self.msgs(reply))
++            self.assertEqual(list(ids), self.next_prompt(rendered), reply)
++            self.assertIn("client changed", note)
++        self.assertEqual(self.rp.stats["changed"], 3)
++
++    def test_nothing_to_do_without_the_assistant_turn_or_the_stop_token(self):
++        ids, note = self.rp.apply(self.next_prompt([1, 5]), [{"role": "user", "content": "q"}] * 3)
++        self.assertEqual(list(ids), self.next_prompt([1, 5]))
++        ids, _ = self.rp.apply(self.prompt + [1, 5, 4], self.msgs(asst("think", "ok")))     # no stop token after it
++        self.assertEqual(list(ids), self.prompt + [1, 5, 4])
++
++    def test_a_prompt_that_does_not_start_with_the_remembered_one_is_untouched(self):
++        other = [99] + self.prompt[1:] + [1, 5, STOP, 10]
++        ids, note = self.rp.apply(other, self.msgs(asst("think", "ok")))
++        self.assertEqual(list(ids), other)
++        self.assertIsNone(note)
++
++    def test_record_drops_the_stop_tokens_and_the_older_turn_of_the_same_chat(self):
++        self.assertEqual(self.rp.records[0].out, self.out)
++        longer = self.prompt + self.out + [STOP, 10, 7, 8, 11]
++        self.rp.record(longer, [20, 21, STOP, STOP], 4, fingerprint("", "x", []))
++        self.assertEqual([r.ids for r in self.rp.records], [longer])
++        self.rp.record([5, 6, 7], [STOP], 1, self.fp)             # an empty reply is not kept
++        self.assertEqual(len(self.rp.records), 1)
++
++    def test_at_most_max_records_are_kept(self):
++        rp = PrefixReplay([STOP], max_records=3)
++        for k in range(6):
++            rp.record([k, 0, 0], [1], 1, self.fp)
++        self.assertEqual([r.ids[0] for r in rp.records], [3, 4, 5])
++
++    def test_tool_calls_compare_by_parsed_arguments(self):
++        a = fingerprint("", "", [("bash", {"command": "ls", "timeout": 1.5})])
++        b = message_fingerprint(asst("", "", [("bash", {"timeout": 1.5, "command": "ls"})]))
++        self.assertEqual(a, b)
++        self.assertNotEqual(a, message_fingerprint(asst("", "", [("bash", {"command": "ls", "timeout": 2})])))
++
++    def test_sibling_pin(self):
++        rp = PrefixReplay([STOP], pin_min=8)
++        head = list(range(50))
++        rp.record(head + [900, 901, 902], [1], 1, self.fp)
++        self.assertEqual(rp.sibling_pin(head + [800, 801, 802, 803]), 50)            # a new chat, 50 shared tokens
++        self.assertIsNone(rp.sibling_pin(head + [900, 901, 902, 5, 6]))              # it continues the remembered one
++        self.assertIsNone(rp.sibling_pin(head[:6] + [800, 801, 802, 803]))           # shares too little
++        self.assertIsNone(rp.sibling_pin(head + [900, 901, 777]))                    # would leave no tail to read
++        self.assertIsNone(PrefixReplay([STOP], pin_min=0).sibling_pin(head))
++        self.assertIsNone(PrefixReplay([STOP], pin_min=8).sibling_pin(head))         # nothing remembered yet
++
++    def test_overlap_tells_a_continuation_from_a_new_chat(self):
++        rp = PrefixReplay([STOP], pin_min=8)
++        self.assertIsNone(rp.overlap([1, 2, 3]))                                       # nothing remembered
++        rp.record(list(range(40)), [1], 1, self.fp)
++        self.assertEqual(rp.overlap(list(range(40)) + [5, 6]), (True, 40))
++        self.assertEqual(rp.overlap(list(range(20)) + [-1, -2, -3]), (False, 20))
++        self.assertEqual(rp.pin_for(list(range(20)) + [-1, -2, -3], 20), 20)
++        self.assertEqual(rp.stats["new_chat"], 1)
++
++    def test_common_prefix_across_block_boundaries(self):
++        a = list(range(5000))
++        for cut in (0, 1, 511, 512, 513, 1024, 4999, 5000):
++            b = a[:cut] + [-1] + a[cut + 1:] if cut < 5000 else list(a)
++            self.assertEqual(common_prefix(a, b), cut)
++        self.assertEqual(common_prefix(a, a[:700]), 700)
++
++
++class ServiceFlow(unittest.TestCase):
++    """The same through Service.prepare()/run() with the byte tokenizer and the scripted engine."""
++
++    def make(self, script, replay=True):
++        tok = ByteTokenizer()
++        svc = Service(MockEngine(tok, script, max_context=8192), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
++        if replay:
++            svc.replay = PrefixReplay(svc.stop_ids, pin_min=16, decode=tok.decode)
++        return tok, svc
++
++    def turn(self, svc, messages, tools=TOOLS):
++        ids, thinking, max_new = svc.prepare(messages, tools, {}, 512, req={})
++        reasoning, content, calls = [], [], []
++        for kind, x in svc.run(ids, thinking, tools, max_new, {}, threading.Event()):
++            if kind == "event":
++                if x.kind == "reasoning":
++                    reasoning.append(x.text)
++                elif x.kind == "content":
++                    content.append(x.text)
++                elif x.kind == "tool_call":
++                    calls.append(x.call)
++        return ids, svc.engine.last_prompt, "".join(reasoning), "".join(content), calls
++
++    def echo(self, reasoning, content, calls):
++        """What a client sends back for the reply it got (OpenAI Chat Completions, parsed again by the server)."""
++        m = {"role": "assistant", "content": content or None, "reasoning_content": reasoning}
++        if calls:
++            m["tool_calls"] = [{"id": c.id, "type": "function",
++                                "function": {"name": c.name, "arguments": json.dumps(c.arguments)}} for c in calls]
++        return m
++
++    def second_prompt(self, svc, first_messages, reply, follow_up):
++        req = {"messages": first_messages + [reply] + follow_up,
++               "tools": [{"type": "function", "function": TOOLS[0]}]}
++        messages, tools, kw = openai_to_messages(req)
++        ids, _, _ = svc.prepare(messages, tools, kw, 512, req={})
++        return ids
++
++    CALL = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n<parameter=timeout>\n1.50\n</parameter>\n" \
++           "<parameter=flags>\n[\"a\",\"b\"]\n</parameter>\n</function>\n</tool_call>"
++
++    def test_the_templates_rerendering_misses_the_cache_and_replay_fixes_it(self):
++        script = "I will look.  \n\n</think>\n\nSure.\n\n" + self.CALL      # the template trims the reasoning, 1.50 -> 1.5
++        first = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}]
++        resumed = {}
++        for replay in (False, True):
++            _, svc = self.make(script, replay)
++            ids, sent, reasoning, content, calls = self.turn(svc, first)
++            self.assertEqual(list(ids), sent)
++            out = svc.tok.encode(script, parse_special=True)
++            live = list(ids) + out                                   # what the engine holds after the reply
++            turn_at = max(i for i, t in enumerate(ids) if t == 256)  # its checkpoint: the last <|im_start|> of the prompt
++            tool = {"role": "tool", "tool_call_id": calls[0].id, "content": "file.txt"}
++            second = list(self.second_prompt(svc, first, self.echo(reasoning, content, calls), [tool]))
++            resumed[replay] = (engine_resume(live, [list(ids[:turn_at])], second), len(second), len(live), turn_at)
++        # without the replay the session is no prefix of the prompt: the engine goes back to the checkpoint and reads
++        # the whole reply again; with it the session matches and only the tool result (and the header) is read
++        miss_from, miss_n, live_n, turn_at = resumed[False]
++        hit_from, hit_n, _, _ = resumed[True]
++        self.assertEqual(miss_from, turn_at)
++        self.assertEqual(hit_from, live_n)
++        self.assertGreater(miss_n - miss_from, 3 * (hit_n - hit_from))
++        self.assertLess(hit_n - hit_from, 80)
++
++    def test_a_reply_the_client_edited_is_read_as_sent(self):
++        script = "think\n</think>\n\nok"
++        first = [{"role": "user", "content": "go"}]
++        _, svc = self.make(script)
++        ids, _, reasoning, content, calls = self.turn(svc, first)
++        edited = self.echo(reasoning, content + " (edited)", calls)
++        second = self.second_prompt(svc, first, edited, [{"role": "user", "content": "more"}])
++        self.assertIn("(edited)", svc.tok.decode(list(second)))
++        self.assertEqual(svc.replay.stats["replayed"], 0)
++
++    def test_an_untouched_continuation_is_recorded_and_stays_exact(self):
++        script = "think\n</think>\n\nok"
++        first = [{"role": "user", "content": "go"}]
++        _, svc = self.make(script)
++        ids, _, reasoning, content, calls = self.turn(svc, first)
++        second = self.second_prompt(svc, first, self.echo(reasoning, content, calls), [{"role": "user", "content": "x"}])
++        live = list(ids) + svc.tok.encode(script, parse_special=True)
++        self.assertEqual(list(second)[:len(live)], live)
++        self.assertEqual(svc.replay.stats["exact"], 1)
++
++    def test_replay_is_off_unless_the_service_has_it(self):
++        _, svc = self.make("ok", replay=False)
++        ids, *_ = self.turn(svc, [{"role": "user", "content": "go"}])
++        self.assertNotIsInstance(ids, PromptIds)
++
++    def test_a_new_chat_pins_the_prefix_it_shares_with_the_last_one(self):
++        _, svc = self.make("ok")
++        shared = "You are an agent. " * 20
++        self.turn(svc, [{"role": "system", "content": shared + "<cwd>/a</cwd>"}, {"role": "user", "content": "hi"}])
++        req = {}
++        ids, _, _ = svc.prepare([{"role": "system", "content": shared + "<cwd>/b</cwd>"},
++                                 {"role": "user", "content": "hi"}], TOOLS, {}, 512, req=req)
++        pin = req["strata_prefix"]["tokens"]
++        self.assertGreater(pin, len(shared) // 2)
++        self.assertLess(pin, len(ids) - 1)
++        self.assertIn("/a</cwd>", svc.tok.decode(svc.replay.records[0].ids))
++        a, b = svc.replay.records[0].ids, list(ids)
++        self.assertEqual(a[:pin], b[:pin])
++        self.assertNotEqual(a[pin], b[pin])                              # exactly the first token that differs
++        req2 = {"strata_prefix": {"tokens": 5}}                           # a client's own prefix wins
++        svc.prepare([{"role": "system", "content": shared + "<cwd>/c</cwd>"}, {"role": "user", "content": "hi"}],
++                    TOOLS, {}, 512, req=req2)
++        self.assertEqual(req2["strata_prefix"], {"tokens": 5})
++
++
++TOK_DIR = Path(os.environ.get("STRATA_TEST_TOKENIZER", Path.home() / "models/qwen38fn/packs/iq3_s/tokenizer"))
++
++
++@unittest.skipUnless((TOK_DIR / "vocab.json").exists(), "the model's tokenizer files are not here")
++class RealTokenizer(unittest.TestCase):
++    """The Qwen tokenizer and chat template: the drifts a real agent produces, and a non-canonical token split."""
++
++    @classmethod
++    def setUpClass(cls):
++        import strata_tokenizer as ST
++        vocab = json.loads((TOK_DIR / "vocab.json").read_text(encoding="utf-8"))
++        tokens = [None] * len(vocab)
++        for t, i in vocab.items():
++            tokens[i] = t
++        merges = (TOK_DIR / "merges.txt").read_text(encoding="utf-8").split("\n")
++        types = json.loads((TOK_DIR / "token_type.json").read_text())
++        cls.tok = ST.Tokenizer(tokens, merges, types)
++        cls.tpl = ChatTemplate(TOK_DIR / "chat_template.jinja")
++        cls.im_end = cls.tok.encode("<|im_end|>", parse_special=True)
++
++    def drift(self, raw, split_token=False):
++        """Round trip one model output: -> (the engine's session after it, the next prompt with and without replay)."""
++        tok = self.tok
++        sysmsg = {"role": "system", "content": "You are an agent.\n<cwd>\n/tmp\n</cwd>"}
++        first = [sysmsg, {"role": "user", "content": "do it"}]
++        prompt = tok.encode(self.tpl.render(first, tools=TOOLS), parse_special=True)
++        out = tok.encode(raw, parse_special=True)
++        if split_token:                                                # a non-canonical split: "\n\n" as "\n", "\n"
++            at = next(i for i, t in enumerate(out) if tok.decode([t]) == "\n\n")
++            out = out[:at] + tok.encode("\n") * 2 + out[at + 1:]
++            self.assertEqual(tok.decode(out), tok.decode(tok.encode(raw, parse_special=True)))
++        live = prompt + out + self.im_end + tok.encode("\n")
++        parser = OutputParser(thinking=True, tools=TOOLS)
++        evs = parser.feed(raw) + parser.finish("stop")
++        reasoning = "".join(e.text for e in evs if e.kind == "reasoning")
++        content = "".join(e.text for e in evs if e.kind == "content")
++        calls = [e.call for e in evs if e.kind == "tool_call"]
++        reply = {"role": "assistant", "content": content or None, "reasoning_content": reasoning}
++        if calls:
++            reply["tool_calls"] = [{"id": c.id, "type": "function",
++                                    "function": {"name": c.name, "arguments": json.dumps(c.arguments)}} for c in calls]
++        follow = ([{"role": "tool", "tool_call_id": calls[0].id, "content": "done"}] if calls
++                  else [{"role": "user", "content": "next"}])
++        messages, _, kw = openai_to_messages({"messages": first + [reply] + follow,
++                                              "tools": [{"type": "function", "function": TOOLS[0]}]})
++        plain = tok.encode(self.tpl.render(messages, tools=TOOLS, **kw), parse_special=True)
++        rp = PrefixReplay(list(self.im_end))
++        rp.record(prompt, out + self.im_end, len(first), fingerprint(reasoning, content,
++                                                                      [(c.name, c.arguments) for c in calls]))
++        replayed, _ = rp.apply(plain, messages)
++        return live, plain, list(replayed)
++
++    def check(self, raw, **kw):
++        live, plain, replayed = self.drift(raw, **kw)
++        self.assertNotEqual(plain[:len(live)], live, "this output no longer drifts: the case proves nothing")
++        self.assertEqual(replayed[:len(live)], live)
++        self.assertGreater(len(replayed), len(live))
++
++    CALL = ("<tool_call>\n<function=bash>\n<parameter=command>\n{cmd}\n</parameter>\n{extra}</function>\n</tool_call>")
++
++    def test_reasoning_with_trailing_blank_lines(self):
++        self.check("The user wants X.  \n\n</think>\n\nok")
++
++    def test_content_with_a_trailing_newline(self):
++        self.check("think\n</think>\n\nok\n")
++
++    def test_float_argument(self):
++        self.check("think\n</think>\n\n" + self.CALL.format(cmd="ls", extra="<parameter=timeout>\n1.50\n</parameter>\n"))
++
++    def test_compact_json_argument(self):
++        self.check("think\n</think>\n\n" + self.CALL.format(cmd="ls", extra='<parameter=flags>\n["a","b"]\n</parameter>\n'))
++
++    def test_non_canonical_token_split(self):
++        self.check("think\n</think>\n\nSure.\n\n" + self.CALL.format(cmd="ls", extra=""), split_token=True)
++
++    def test_a_faithful_round_trip_needs_no_replay(self):
++        live, plain, replayed = self.drift("think\n</think>\n\n" + self.CALL.format(cmd="ls -la", extra=""))
++        self.assertEqual(plain[:len(live)], live)
++        self.assertEqual(replayed, plain)
++
++
++if __name__ == "__main__":
++    unittest.main()

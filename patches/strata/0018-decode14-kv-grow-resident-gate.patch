@@ -1,0 +1,36 @@
+# Decode14 (2026-10-14): STRATA_KV_GROW_RESIDENT=1 lifts the generate.cpp gate that kept the elastic K/V (--kv-grow, VMM
+# pools) off in the resident-RAM mode (--resident-budget-gib); with it the 200K K/V costs 0.21 GiB at short context and
+# the expert cache gets the rest (8,393 -> 9,467 slots). Needs the cuMem* VMM emulation of the Decode14 shim
+# (shim/tgcudart.cpp, tgcu.py, tgcu_api.py).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0017, applied in order with `git apply -p1`.
+
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 918d4a4..27bc01d 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -3837,14 +3837,22 @@ int main(int argc, char** argv) {
+             bool remote = false;
+             for (const int r : o.expert_cache_remote) remote = remote || r > 0;
+             const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
++            // Decode14: STRATA_KV_GROW_RESIDENT=1 also allows the resident RAM mode (--resident-budget-gib).  Under the EXL3 Metal lane an expert the cache gives up is computed by the mini
++            // (LRU / pread from the pack, the same path as any other non-resident expert), so the RAM copy of the complement is not what serves it
++            const char* rv = std::getenv("STRATA_KV_GROW_RESIDENT");
++            const bool res_ok = !o.resident_cpu_experts || (rv != nullptr && rv[0] != '\0' && rv[0] != '0');
++            const bool vmm_ok = strata::core::vmm_available();
+             const bool on = asked && !multi_gpu && o.kv_resident <= 0 &&
+-                            !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&
+-                            strata::core::vmm_available() &&
++                            !o.expert_profile.empty() && res_ok && o.expert_cache != 0 && !remote &&
++                            vmm_ok &&
+                             // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range
+                             o.batch == 0 && !o.vram_elastic && o.peer_device < 0;
+             if (asked && !on)
+                 std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
+-                                     "every expert in RAM, no --batch, --vram-elastic or --peer-device)\n");
++                                     "every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=%d kv_resident=%lld profile=%d resident_cpu=%d "
++                                     "expert_cache=%d remote=%d vmm=%d batch=%d vram_elastic=%d peer=%d]\n",
++                             (int) multi_gpu, (long long) o.kv_resident, (int) !o.expert_profile.empty(), (int) o.resident_cpu_experts,
++                             (int) o.expert_cache, (int) remote, (int) vmm_ok, (int) o.batch, (int) o.vram_elastic, (int) o.peer_device);
+             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
+             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
+             strata::core::ExpertCache::set_vmm(on);
