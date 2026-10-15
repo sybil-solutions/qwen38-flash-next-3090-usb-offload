@@ -5,6 +5,8 @@ results (2026-10-12). Anything marked **not pinned** could not be recovered from
 reconstructed from build files and logs but not executed again for this repo. Steps that were re-run card-free are listed in
 [results.md](results.md) section 8 and are runnable with `scripts/verify-card-free.sh`.
 
+**Config C (2026-10-15):** the recommended recipe is `configs/strata-exl3-full512-c.json.tmpl` (patches `strata/0001`-`0019`, `shim/`, `exl3/placement/d8w4/profile.bin`); sections 1-10 were written for the host-tail step and still describe the toolchain; what changes for config C is in [section 11](#11-config-c-what-was-reproduced).
+
 **Automated path:** `docker compose run --rm build` (the Linux/CUDA half, pinned) followed by `./run.sh` on the Mac does sections 2-6 below in one go; what was run and what was not is in [section 10](#10-one-click-what-was-run).
 The numbered steps remain the manual reference.
 
@@ -74,16 +76,16 @@ uv pip install --python ~/tinygrad/.venv numpy==2.5.3 libusb1==3.4.0 libusb-pack
 zsh <repo>/shim/install.sh
 ```
 
-`install.sh` copies `tgcu.py tgcu_api.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h run-strata.sh srv.sh ls_srv.sh macbuild.py ...` and
+`install.sh` copies `tgcu.py tgcu_api.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h run-strata.sh run-d7.sh srv.sh ls_srv.sh macbuild.py ...` and
 `shim/prebuilt/{tgcu_builtin.fatbin,tgcu_libc.cubin}` to `~/shim`, then builds `libcudart.dylib` (`shim/build-libcudart.sh`: clang++ -O2, CUDA 12.8 headers, CPython 3.12.15
-from uv, `-install_name @rpath/libcudart.dylib`; compiles and exports the same 136 symbols as the deployed one, flags of the deployed build were not recorded).
+from uv, `-install_name @rpath/libcudart.dylib`, ad-hoc codesign; the flags are those of the deployed config-C build and on the mini the result is **byte-identical** to the deployed `libcudart.dylib`, section 11).
 Every engine start runs `pcie_cycle.py` and `usb_drain.py` (power-cycles the card over the bridge and drains stale USB state) before tinygrad opens the device;
 `TGCU_NO_USB_RESET=1` skips that.
 
 ```sh
 # Strata
 git clone https://github.com/Niko1221/Strata ~/strata && cd ~/strata && git checkout v0.1.41      # fb58e0dbc8399662c0e47c76578c6e878b14f6cf
-for p in <repo>/patches/strata/0*.patch; do git apply --check $p && git apply $p; done              # in order; scripts/verify-card-free.sh patches
+for p in <repo>/patches/strata/0*.patch; do git apply --check $p && git apply $p; done              # 19 patches in order (config C); scripts/verify-card-free.sh patches
 uv venv --python 3.12 .venv && uv pip install --python .venv -r requirements.txt
 ```
 
@@ -183,12 +185,18 @@ llama.cpp at the pin above into `~/strata-linux/_deps/strata_llamacpp-src`, whic
 ## 6. Run
 
 ```sh
-zsh <repo>/configs/render.sh <repo>/configs/strata-exl3-full512-final-g4-lru.json.tmpl > ~/shim/strata-exl3-full512-final-g4-lru.json
-zsh ~/shim/ls_srv.sh ~/shim/strata-exl3-full512-final-g4-lru.json      # stops any server + engine, starts this one, waits for "ready", prints cache/VRAM lines
+# host prerequisites of config C (run.sh checks and prints them): wired limit (resets on reboot) and no idle sleep
+sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536
+caffeinate -dimsu &
+zsh <repo>/configs/render.sh <repo>/configs/strata-exl3-full512-c.json.tmpl > ~/shim/strata-exl3-full512-c.json
+# the config's exe is ~/shim/run-d7.sh, which runs the engine at D7_BIN = ~/strata-mac/strata (the run.sh / macbuild.py build output)
+zsh ~/shim/ls_srv.sh ~/shim/strata-exl3-full512-c.json      # stops any server + engine, starts this one, waits for "ready", prints cache/VRAM lines
 # which is: cd ~/strata && STRATA_PREFILL_CPU_SHARE=1 .venv/bin/python serve/server.py --engine strata --config <cfg> --port 8080
 ```
 
-Expected log lines (from `results/raw/lru/final_lru.log`): `expert cache auto: 15.36 GiB free, 400 MiB reserved (+218 MiB for the draft head) -> 7400 slots`,
+Expected log lines for config C (from `results/raw/decode16/logs/d15_final.log`): `profile .../d8w4/profile.bin: 24576 ranked pairs`, `expert cache auto: 17.79 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9958 slots`, `staged profile fill ... 9958 of 9958 slots ... in 63.7 s`, `exl3-metal: lane ready (... 6400 slots of 1867776 B registered)`,
+`LRU preloaded with 6400 of 6400 slots by profile rank in 5.3 s`, `the prompt path borrows 884 CUDA0 cache slots`, `elastic K/V: 16384 of 204800 cells in VRAM`, `190 MiB of VRAM free with everything loaded - LOW` (expected: reserve 310 is the floor), `READY` after ~146 s.
+For the host-tail config (from `results/raw/lru/final_lru.log`): `expert cache auto: 15.36 GiB free, 400 MiB reserved (+218 MiB for the draft head) -> 7400 slots`,
 `pre-filled 7400 of 7400 slots from the profile in 64.1 s`, `exl3-metal: lane ready (... 5600 slots of 1867776 B registered)`, `LRU preloaded with 5600 of 5600 slots by profile rank in 4.8 s`,
 `716 MiB of VRAM free with everything loaded`, `READY`. Startup to ready took about 200 s in the earlier campaign notes (not timed in the final run). Stop it with `kill -TERM $(cat ~/shim/server.pid)` and wait until
 `pgrep -x strata` is empty before starting another: two engines fight over the USB device. If the dock reports LTSSM other than `0x78` run `~/tinygrad/.venv/bin/python ~/shim/pcie_cycle.py` (with `PYTHONPATH=~/tg-strata`).
@@ -212,10 +220,10 @@ bash bench/final_lru.sh                           # the whole sequence that prod
 ## 8. What cannot be rebuilt from this repo alone
 
 - the dock/PSU model and firmware, the `libamd_comgr.dylib` source (and whether the NV backend needs it at all), colima/docker installation on the mini, SIMDe's upstream URL (pinned by commit);
-- the exact flags of the deployed `libcudart.dylib` (the rebuilt one exports the same symbols; its bytes differ). Recovered since the first version of this file: `tgcu_libc.cubin` is `ptxas -arch=sm_86 -c tgcu_libc.ptx`
+- ~~the exact flags of the deployed `libcudart.dylib`~~ recovered 2026-10-15 (campaign script `build_shim15.sh`, now `shim/build-libcudart.sh`): on the mini the rebuilt one is byte-identical, section 11. Recovered earlier: `tgcu_libc.cubin` is `ptxas -arch=sm_86 -c tgcu_libc.ptx`
   and `tgcu_builtin.fatbin` is `nvcc -std=c++17 -O3 -Xptxas -v --fatbin -arch=sm_86 -no-compress` (both byte-identical, section 10); `exl3_strata.fatbin` is byte-identical when built at `/Users/sero/exl3` (the id is path-dependent);
   the Strata CMake options come from the deployed `CMakeCache.txt`;
-- the full engine rebuild: the device half (63 fatbins) is now reproduced in the container (61 of 63 byte-identical to the deployed ones, section 10); the host half was built on a driver Mac, not on the mini, and the resulting `strata` binary was not run;
+- the full engine rebuild: the device half (63 fatbins) is reproduced in the container (59-61 of 63 byte-identical to the deployed ones, section 10: nvcc names four of them differently on every build); the host half of config C was rebuilt on the mini itself and equals the deployed engine instruction for instruction (section 11); no rebuilt `strata` binary was run;
 - the deployed GGUF files themselves were never hashed (size-matched only); `docker/models.sha256` pins Hugging Face revision `ed59f92082b1e93c0e96d60a8b11aab089b52f09` with the LFS sha256 the API reports for it (sizes equal the deployed files'). The routing calibration behind `profile.bin` (the file is shipped);
 - the decode and prefill numbers need the card: nothing in the card-free checks measures them.
 
@@ -247,3 +255,39 @@ Findings while doing this: (1) `exl3_strata.fatbin` is path-dependent (built at 
 with SDK 26.2 and Apple clang 17.0.0 (the mini: SDK 26.5, Apple clang 21.0.0); which of the two differences causes it was not isolated; (4) the mini's CLT has no Metal compiler, so `libexl3metal` and `strata-vision-metal` come from
 `./run.sh --build-metal` on another Mac, as before; (5) the deployed `libamd_comgr.dylib` stays unexplained: the tinygrad NV backend imports without it here, but whether the engine needs it at run time is unknown;
 (6) the repo had lagged behind the measured configuration: the host-tail step (`patches/strata/0005`, `shim/tgcu*.py`, `exl3/metal`, `configs/...-ht.json.tmpl`) was added from the campaign's diffs and verified byte-identical to the deployed files.
+
+## 11. Config C: what was reproduced
+
+Date 2026-10-15; the record with every number and log is [`results/verification/config-c-repro.md`](../results/verification/config-c-repro.md), its summary is [results.md section 8b](results.md#8b-config-c-rebuilt-from-the-repos-patches-and-compared-with-the-deployed-files-2026-10-15).
+
+**Steps (what to run, what you should see).**
+
+```sh
+git clone https://github.com/sybil-solutions/qwen38-flash-next-3090-usb-offload && cd qwen38-flash-next-3090-usb-offload
+docker compose build build && docker compose run --rm build        # Strata v0.1.41 + patches 0001-0019 + vision patch, CMake configure (STRATA_ISA_FLOOR=none), 63 nvcc rules, EXL3 fatbins; prints "MATCH deployed" for the 5 blobs
+./run.sh --build-metal                                             # on a Mac with the Metal toolchain -> ./out/metal (libexl3metal sha256 e38a011c...)
+RUN_ROOT=/tmp/recipe JOBS=2 ./run.sh --check                       # on the mini: installs, builds, renders config C, checks the host prerequisites; engine and USB untouched
+scripts/verify-card-free.sh patches                                # applies the 19 + 5 patches, checks results/verification/config-c-sha256.txt (20 files), regenerates the d8w4 profile
+python3 scripts/compare-engine.py ~/strata-decode15/bin/strata_d15a /tmp/recipe/strata-mac/strata /Users/sero /tmp/recipe     # the engine comparison of results.md 8b
+```
+
+`RUN_ROOT=/tmp/recipe` has the length of `/Users/sero`: that makes the paths embedded in the binaries the same length, so a rebuild can be compared with the deployed file after rewriting the root (`compare-engine.py` does it). On the mini the scratch root needs a copy of `~/cuda-12.8` and `~/simde` (a real CUDA installation: clang refuses a headers-only copy; `run.sh` would
+otherwise download them) and 1-2 GB of disk. Everything it does is `nice`d; it took about 45 s for the 135 host rules with 2 jobs.
+
+**Deployed artifacts of config C** (mini, 2026-10-15; the table is also what `run.sh` and the config expect):
+
+| artifact | where | md5 / sha256 | reproduced by |
+|---|---|---|---|
+| live config | `~/shim/strata-exl3-full512-final-g4-lru-ht-prefix-p600.json` | md5 `bc8450a1e583f2ba5b3f756832cc1f62` (contains the API key: the template drops key, host and `allowed_hosts`) | `configs/strata-exl3-full512-c.json.tmpl` (all args and env identical, checked key by key) |
+| engine | `~/strata-decode15/bin/strata_d15a` | md5 `fc6e4ddd2c9549d6c52a922ffb8ad718`, sha256 `9ac46e32...` | patches `0001`-`0019` + `run.sh`; differs only in four nvcc fatbins (8b) |
+| engine wrapper | `~/strata-decode7/run-d7.sh` | md5 `11d7d6f3` | `shim/run-d7.sh` (byte-identical) |
+| shim | `~/shim/tgcu.py`, `tgcu_api.py` | md5 `d2692131`, `9697e39c` | `shim/` (byte-identical), `patches/shim/` |
+| CUDA runtime shim | `~/shim/libcudart.dylib` | md5 `ec0517ecb87846cfcaffc02c7f99808a`, sha256 `20e8167d...` | `shim/build-libcudart.sh` on the mini (byte-identical) |
+| server | `~/strata/serve/server.py`, `prefix_replay.py` | md5 `780aa4b1`, `398c46f5` | patches `0007`, `0012` |
+| Metal lib | `~/exl3/metal/libexl3metal.dylib` | sha256 `e38a011c79933a8e...` | `exl3/metal/build.sh` (byte-identical, unchanged since the host-tail step) |
+| profile | `~/exl3/placement/d8w4/profile.bin` | md5 `2ac3b7e1436c1720487993969c651c5c` | `exl3/make_profile_wholelayers.py` (byte-identical) and committed |
+
+**Host prerequisites** (all three are printed or started by `run.sh`): `sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536` (resets on reboot; without it the 6,400-slot LRU cannot be locked), `caffeinate -dimsu`, `STRATA_EXL3_METAL_SLOTS 6400` (in the config), free disk
+(a few GiB for swap and logs; ~190 GB on a fresh install).
+
+**Not pinned / not reproduced:** the four nvcc fatbins' bytes; the model files (the 2026-10-12 notes apply); a measured number (nothing here needs less than the card). The deployed `~/shim/tgcudart.cpp` on the mini (md5 `0af47eac`) is an older copy, not the build input of the deployed `libcudart.dylib`: the input is `~/strata-decode15/src/tgcudart.cpp` (md5 `327a7e18`), which is `shim/tgcudart.cpp`.

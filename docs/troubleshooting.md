@@ -64,6 +64,32 @@ and `td/experts_index.json` (27 MB) are what you need (plus the engine log, whic
 
 **`./run.sh`: `... differs from the bundle's copy: kept`.** `run.sh` never overwrites an installed file that differs from what it would install (the mini's live `~/shim` is such a case); `--force` replaces, otherwise the difference is only reported.
 
+## Config C (2026-10-15)
+
+Entries from the Decode3-Decode16 logs ([results.md](results.md) section 0; plan entries in `results/campaign/EXL3_PLAN-log.md`).
+
+**Decode 13 tok/s instead of 26-31, `mlock failed errno 35` (or the engine's anonymous LRU slots in swap).** The 6,400-slot mini-side LRU locks 12.0 GB; the default wired limit of the 16 GiB mini (12,451 MiB) is below that. `sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536`
+(once per boot; it resets on reboot; `run.sh` checks it and prints the command). Without it set `STRATA_EXL3_METAL_SLOTS=5600`. Decode6: at 6,600 slots with the default limit the engine swapped 9.9 GB out and decoded 13/13/12.
+
+**Image request fails with `Mac cold-expert lane failed at layer 10 (-3)` (Metal `Insufficient Memory`).** The LRU plus the 1.2 GB vision encoder exceeded the M4 GPU's working set. Config C gives 1,400 MiB of the LRU back while the encoder runs (`vision.lru_release_mib`, patch `0012`); do not remove that key at 6,400 slots.
+
+**Seconds-to-minutes freezes, bimodal decode (7-8 vs 15-21 tok/s).** The mini idle-slept about a minute after the last terminal session (the engine holds no power assertion; Decode4 found a 411 s "freeze" that was a sleep): run `caffeinate -dimsu` (or `pmset sleep 0`); `run.sh` starts it.
+
+**`190 MiB of VRAM free with everything loaded - LOW: requests may stall` at start.** Expected: `--vram-reserve-mib 310` is the floor of config C (290 failed to start with a draft-head OOM; the Decode15 ABBA, a 190K needle and 5 x 33K needles ran without a GPU timeout). If a GPU timeout does appear after a long prompt,
+raise the reserve (the engine suggests `--vram-reserve-mib 632`; each +100 MiB costs ~57 expert slots).
+
+**`MemoryError: Failed to allocate memory (OOM) Request size=0x7400000` tracebacks in `serve-engine.log`.** Handled: tgcu's `_new_chunk` asked for a fresh 116 MiB chunk and the free list served the request (no request failed; Decode7/8 logs).
+
+**First short request after a 100K/190K prompt takes 6.5 / 13.7 s.** The elastic K/V trims back and the 538 / 1,241 lent expert slots are refilled from the profile over USB at ~290 MB/s; the next request is normal.
+
+**GPU timeout when the prefill borrow is on (before `0009`).** The lockstep group constants lived in the borrowed slots and the refill overwrote them: fixed in `0009`; `TGCU_LAUNCH_RING=64` prints the last launches with every parameter resolved to chunk + offset to stderr on a timeout.
+
+**Decode after the mini was rebooted is slow for ~10 minutes.** Spotlight re-indexing and the cold file cache; compare arms only interleaved (the campaign's ABBA rule).
+
+**`--batch` is slower than one request at a time.** Measured (results.md 0.4): batch windows compute their misses on the CPU tier, not through the Metal lane. Config C runs one request at a time and queues the rest.
+
+**`docker compose run --rm build` writes an old bundle after a patch change.** `run` reuses the image; run `docker compose build build` (or `make`) first.
+
 ## Server and benchmarks
 
 **`bench/final_vision.py`: `No module named 'PIL'`.** Run it with `~/strata/.venv/bin/python` (pillow is in Strata's requirements). The `final_lru` log contains exactly this error.

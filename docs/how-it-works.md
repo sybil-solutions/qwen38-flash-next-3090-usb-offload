@@ -9,22 +9,23 @@ table from the second shard (`--ple-gguf`). A 24 GB card cannot hold the experts
 ```text
   RTX 3090 (24 GB), behind the USB dock                    Mac mini M4 (16 GiB)
   +-------------------------------------------+            +-------------------------------------------------+
-  | dense part, attention + GDN, MTP head      |            | Metal lane (libexl3metal): LRU of 5,600 mlocked, |
-  | 200K k8v4 KV cache                         |  x, ids, w | registered expert slots (10.46 GB) + 0.2 GiB    |
-  | 7,400 expert slots (12.84 GiB), hottest    | ---------> | static tier; computes every expert that is not   |
-  | experts by profile rank; exl3_moe_coop     |   USB 3.2  | resident in VRAM                                 |
-  | kernels compute them                       | <--------- | NEON pool (libexl3cpu) = fallback + exact path   |
-  +-------------------------------------------+     y     +----------------------^--------------------------+
-                                                                                 | F_NOCACHE preads, ~2.4 GB/s
+  | dense part, attention + GDN, MTP head      |            | Metal lane (libexl3metal): LRU of 6,400 mlocked, |
+  | elastic 200K k8v4 KV (0.23 GiB at 16K cells,|  x, ids, w | registered expert slots (11.95 GB) + 0.2 GiB    |
+  |  2.30 GiB at 196K)                         | ---------> | static tier; computes every expert that is not   |
+  | 9,958 expert slots (17.27 GiB), hottest    |   USB 3.2  | resident in VRAM                                 |
+  | experts by profile rank, 4 whole layers;   | <--------- | NEON pool (libexl3cpu) = fallback + exact path   |
+  | exl3_moe_coop kernels compute them         |     y     +----------------------^--------------------------+
+  +-------------------------------------------+                                  | F_NOCACHE preads, 4 KiB-aligned, ~2 GB/s
                                                           +----------------------+--------------------------+
                                                           | NVMe: experts.bin, all 24,576 experts, one 1.86 MB |
                                                           | blob each (sha256 per layer in the manifest)       |
                                                           +-----------------------------------------------------+
 ```
 
-Of the 24,576 experts, 7,400 (30 %) sit in VRAM, 5,600 (23 %) in the Mac's LRU, the other 11,576 only on NVMe. Nothing is pruned or masked: a router
+(Config C, the recommended recipe; the diagram of the host-tail step had 7,400 VRAM slots, a 5,600-slot LRU and a fixed 2.6 GB K/V.) Of the 24,576 experts, 9,958 (41 %) sit in VRAM, 6,400 (26 %) in the Mac's LRU, the other 8,218 only on NVMe. Nothing is pruned or masked: a router
 pick that is in neither VRAM nor the LRU is read from NVMe and computed on the Mac. The static ranking that fills VRAM and primes the LRU is
-`exl3/placement/f512c/profile.bin` (routing frequency from the earlier P256 calibration, mapped onto the 512-expert ids; `exl3/make_profile512_freq.py`).
+`exl3/placement/d8w4/profile.bin` = every expert of layers 0, 1, 2, 6 first (those four layers need no doorbell round trip at decode), then the routing-frequency order of `exl3/placement/f512c/profile.bin`
+(from the earlier P256 calibration, mapped onto the 512-expert ids; `exl3/make_profile512_freq.py`, `exl3/make_profile_wholelayers.py`).
 
 ## The link
 
@@ -91,9 +92,9 @@ layer), 2.61 GB at 200K, 1,308 of the 9,108 expert slots that would otherwise fi
 embeddings file, the server expands `<|image_pad|>` and the engine's `GENI` path prefills the picture rows with M-RoPE positions through the batched
 prefill path. The encoder holds ~1.1 GB wired RAM while loaded, so `idle_unload_s: 120` (patch 0002) ends it after 120 idle seconds.
 
-## Settings in the final config
+## Settings in the previous final config (`final-g4-lru`)
 
-`configs/strata-exl3-full512-final-g4-lru.json.tmpl`:
+`configs/strata-exl3-full512-final-g4-lru.json.tmpl` (the host-tail step; config C adds to it, see the next section):
 
 | setting | value | what it does |
 |---|---|---|
@@ -115,8 +116,46 @@ prefill path. The encoder holds ~1.1 GB wired RAM while loaded, so `idle_unload_
 Older configs kept for rollback: `final-g4` (G=4, 1,000-slot LRU + 5.1 GiB tier) and `final` (G=3, no `--vram-reserve-mib 400`). Going back to `final-g4`
 needs the engine binary from before the LRU change (`strata.bak-1012-prelru` on the mini); the new binary on the old config was not run.
 
+## Config C: what changed since the host-tail step
+
+`configs/strata-exl3-full512-c.json.tmpl`. Everything below is in this repo (patch numbers: [patches/README.md](../patches/README.md)); the numbers are in [results.md](results.md) section 0.
+
+**VRAM is the currency.** Decode time per window is `25.8 ms + rings + in-place Metal work + 0.64 ms per LRU miss` (results.md 0.5), and every extra expert slot in VRAM removes ring work and misses (~7 ms per +1,000 slots), so most of the work was taking VRAM back:
+
+- **Elastic K/V** (`--kv-grow` machinery of Strata, `STRATA_KV_GROW=1`, `STRATA_KV_GROW_RESIDENT=1`, patch `0018` + the cuMem* emulation of `shim/0004`): the K/V pools and the expert cache are virtual ranges; the pools map physical memory only for the cells the context has reached (16,384 at start, step 8,192), the expert cache keeps the rest, and when a context grows
+  the cache gives up slots below the prompt path's loan (hotter experts move into colder slots first; the given-up ones become ordinary mini-lane misses) and gets them back, refilled from the profile, when the next short request trims the K/V. 8,393 -> 9,467 slots at the same 200K maximum; 100K needs 538 slots lent, 190K 1,241 (first short request after a 190K one reads 13.7 s instead of 1.7 s while the slots refill).
+- **Decode15 census and knobs** (`0019`, `shim/0005`): the VRAM census of an idle engine at 16K cells (physical pool 24,256 MiB; expert cache + elastic K/V 17,028; dense.bin 1,467; native projections 2,019; LM head 497; MTP 675 + 111 + 213; session 474; ...; `results/raw/decode15/census.out`) priced every permanent item. The indexer's pooled keys became elastic
+  (session 474 -> ~198 MiB), the tgcu arenas shrank (`TGCU_CODE_MIB=32`, `TGCU_MAPPED_MIB=16`), the RAM-tier VRAM mirror (204 MiB that `--pcie-frac 0` never reads) is not allocated (`TGCU_NO_MIRROR_HOSTALLOC_MIB=150:260`: locked pageable memory), the lazy-D2H shadow is capped (`TGCU_LAZY_D2H_MB=128`), shader local memory is
+  480 B/thread (`TGCU_LMEM_STACK`), and cudaMemGetInfo subtracts 742 MiB instead of 1,024 (`TGCU_MEMINFO_FIXED_MIB`, with `TGCU_TOP_RESERVE_MIB=170` keeping chunks out of the pool's dead top). With `--vram-reserve-mib 310`: 9,958 slots, **190 MiB of VRAM free after load** (the engine warns LOW; a reserve of 290 failed to start with a draft-head OOM).
+- **Prefill borrow back on** (no `--no-prefill-borrow`, `0009`): the prompt path lends 884 expert slots (1.53 GiB: the group buffers of G=6, pair jobs and lane buffers) and the refill after the prompt is guided by the prompt's own routing histogram (`STRATA_D7_MODE=7`, `0011`) and staged (one multi-blob H2D per 8-slot piece, 346 MB/s = the link rate); the startup fill uses the same path (`STRATA_D8_FILL=1`, 63.7 s for 9,958 slots).
+
+**Decode ring.** Four whole-resident layers (profile `d8w4`: 2,048 slots) need no doorbell, the other 44 ring as before (pre-armed pull, gated push). `TGCU_ARM_EARLY=1` issues the OUT arm of the push in `h2d_pre` (off the critical path), `TGCU_PULL_PACK=1` pulls only the ring's three segments instead of the arena span between them
+(`shim/0003`). The mini-side LRU is 6,400 slots (11.95 GB mlocked + registered; needs `iogpu.wired_limit_mb=14336` and the two `vm.*wire_limit` values, while the vision encoder runs it takes 1,400 MiB of the LRU back (`vision.lru_release_mib`, `0012`; `LRUMIB` command, `0011`): at 6,000 slots with the encoder resident an image request failed with Metal `Insufficient Memory` (Decode6)).
+LRU-slot reads are 4 KiB aligned (`STRATA_D11_ALIGN=1`, `0016`): a blob (1,862,400 B at a 128 B-aligned offset) is read from the enclosing aligned range into the start of its 1,867,776 B slot and addressed `d11_skew` (<= 3,968 B) bytes in; unaligned `F_NOCACHE` reads were measurably slower on this SSD (1 blob 0.9-1.4 vs 0.68 ms).
+
+**Prefill lane.** `STRATA_PF_XPORT8=1`: the lane's x rows (card -> Mac) and y rows (Mac -> card) cross the link as int8 + one fp16 scale per 32 values (53 % of the fp16 bytes; quantized on the card by a CUDA kernel, on the Mac with NEON; format in `include/strata/prefill/xport8.hpp`); `STRATA_PF_PAIR=1` runs two chunks per Metal job; `STRATA_PF_GROUP=6`
+(six 2,048-token chunks in lockstep, `STRATA_EXL3_METAL_JOBS=6`, `STRATA_PF_MIN_CHUNKS=6`) gives the pair job the depth it needs; the lane takes every batched chunk (`0006`); prompt-set reads are aligned too (`STRATA_D12_PFALIGN=1`, `0017`). In the G=6 stats a Metal pair job takes ~115 ms = ~80 ms per chunk-layer, against the 87-91 ms chunk-layer period of the host-tail steady state; prefill speed rises with prompt length (176 -> 584 tok/s from 2.5K to 33K), short prompts remain SSD-bound (233 ms per layer pass at 2.5K).
+
+**Server.** `prefix_replay` (`0007`): the model's own reply tokens are put back into the next turn's prompt (and a new chat sharing >= `prefix_pin_min` = 2,048 tokens with a recent one gets a checkpoint pin), so agent turns read only what is new (tool-call reuse: read 40 of 3,379).
+
+**Settings of config C that differ from the table above**:
+
+| setting | value |
+|---|---|
+| `--expert-profile` | `exl3/placement/d8w4/profile.bin` |
+| `--vram-reserve-mib` | 310 (was 400); `--no-prefill-borrow` removed |
+| `exe` / `D7_BIN` | `~/shim/run-d7.sh` (= `run-strata.sh` with the engine path from `D7_BIN`) / `~/strata-mac/strata` |
+| prefill lane | `STRATA_PF_GROUP=6`, `STRATA_EXL3_METAL_JOBS=6`, `STRATA_PF_MIN_CHUNKS=6`, `STRATA_PF_XPORT8=1`, `STRATA_PF_PAIR=1` (carried over from the host-tail config: `STRATA_PF_MAC*`, `STRATA_PF_SETS=3`, `STRATA_PF_SPLITF=1`, `STRATA_PF_SPLITF_MIN=4`) |
+| mini lane | `STRATA_EXL3_METAL_SLOTS=6400`, `STRATA_D7_MODE=7`, `STRATA_D8_FILL=1`, `STRATA_D11_ALIGN=1`, `STRATA_D12_PFALIGN=1` |
+| K/V | `STRATA_KV_GROW=1`, `STRATA_KV_GROW_RESIDENT=1` |
+| tgcu | `TGCU_TOP_RESERVE_MIB=170`, `TGCU_BESTFIT=1`, `TGCU_HANG_DUMP=2`, `TGCU_ARM_EARLY=1`, `TGCU_PULL_PACK=1`, `TGCU_CODE_MIB=32`, `TGCU_MAPPED_MIB=16`, `TGCU_NO_MIRROR_HOSTALLOC_MIB=150:260`, `TGCU_LAZY_D2H_MB=128`, `TGCU_LMEM_STACK=480`, `TGCU_MEMINFO_FIXED_MIB=742` (carried over: `TGCU_POKE1=15`, `TGCU_FREE_DEFER=1`, `TGCU_H2D_RELAX=1`, `TGCU_TS_G=150`, `EXL3M_WAIT_SPIN=1`) |
+| `vision` | `lru_release_mib: 1400` added |
+| server | `prefix_replay: true`, `prefix_pin_min: 2048` (the API key and bind address are not in the template: `run.sh` passes `STRATA_API_KEY` and `--host`) |
+
+Fallbacks: the templates of the earlier steps stay in `configs/`; they need the engine and shim of their own step (patches up to `0003` / `0004` / `0005`, see [patches/README.md](../patches/README.md)).
+
 ## What is not here
 
 A KL/top-1 comparison against stock exllamav3; a decode path that hides the 0.85 ms two-transaction floor (GPU-written landed flags are not
 possible because layer l's router input only exists after the GPU finishes attention l); GPU-side expert prefetch from a layer-ahead router (measured
-negative: 42-49 % coverage); more than ~5,600 LRU slots (needs `iogpu.wired_limit_mb`, a system setting that was not changed).
+negative: 42-49 % coverage); an LRU beyond 6,400 slots (config C already needs the raised `iogpu.wired_limit_mb` / `vm.*wire_limit`; the Decode13 sweep measured 6,700-7,000 slots at +2.4..+4.4 % with growing swap-ins on this 16 GB mini, 6,600 also passed its regression); a KL against stock exllamav3.
