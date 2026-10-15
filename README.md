@@ -34,7 +34,7 @@ docker compose --profile fetch run --rm fetch all    # optional, ~130 GB: expert
 ./run.sh --config final-g4-lru-ht  # an older config (fallbacks, see below)
 ```
 
-(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config C** (`configs/strata-exl3-full512-c.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
+(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config D** (config C = `--config c`, best decode; D adds the lazy refill, patch 0020) (`configs/strata-exl3-full512-c.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
 (nothing is stored, no password is asked for):
 
 ```sh
@@ -46,6 +46,28 @@ caffeinate -dimsu &                # no idle sleep (run.sh starts it when none r
 The serving runtime is native macOS (the engine drives the 3090 over USB through libusb and computes the cold experts with Metal), and Docker on a Mac runs a Linux VM with no Metal and no
 USB passthrough of this dock, so Docker makes the build and the model download one command but cannot run the server; `./run.sh` is the one native step. Two Metal binaries need Xcode's Metal toolchain,
 which the mini's Command Line Tools lack: `./run.sh --build-metal` builds them on any Mac that has it (into `./out/metal`; copy that directory to the mini). What was run and what was not: [docs/reproduce.md](docs/reproduce.md#10-one-click-what-was-run) and [section 11](docs/reproduce.md#11-config-c-what-was-reproduced).
+
+## Results: config D (default) and config C (best decode)
+
+Config D = config C + the lazy loan refill (`patches/strata/0020`, `STRATA_D7_MODE=15`, `STRATA_D18_K=300`; template `configs/strata-exl3-full512-d.json.tmpl`, live config md5 `b481bfe4`, engine `strata_d18d` md5 `b5b0e1bc`).
+After a prompt only 300 of the 884 prefill-lent VRAM slots are refilled before the first token; the other 584 are served by the mini LRU (exact) and copied while the server waits for the next request.
+Measured 2026-10-15 on the mini (Prefill18), same rig and prompt sets as config C. Trade-off: **prefill +10..+32 %, TTFT -1.8..-4.5 s, agent turns 1-3 s faster; decode about -2..-4 % vs config C** (config C stays the choice for best decode: `./run.sh --config c`).
+
+| | config C | config D |
+|---|---|---|
+| prefill 2,565 tokens (tok/s) | 176 / 177 | 229 / 226 |
+| prefill 8,018 | 383 / 418 | 457 / 511 |
+| prefill 18,330 | 446 / 470 | 489 / 521 |
+| prefill 33,842 | 555 / 584 | 589 / 619 |
+| decode, 29 realistic prompts (tok/s) | 31.03 | 29.70 (paired in-server A/B -1.5 %) |
+| decode, 12 probes (tok/s) | 26.84 | 25.88 |
+| agent turn, 100 new tokens on a 3K prefix (s) | 5.6 | 4.3 |
+| 190K needle | found, 346 s | found, 357 s |
+| quality gate vs the saved baseline (705 positions) | PASS (p99 KL 0.057) | PASS (top-1 97.59 %, mean KL 0.00530, p99 KL 0.056416) |
+
+Also PASS on config D: image request, tool-call prefix reuse, 5 successive 32K needles, 0 GPU timeouts. The stricter comparison of config D against the config C run gives p99 KL 0.1022 (informational; the gate is against the saved baseline).
+Not shipped, measured: refill pieces between decode windows (-15 % decode), `STRATA_PF_GROUP=9` (631/642 tok/s at 18K/33K but -3 % decode), 2.5K prompts are SSD-bound (18.3 GB read per request, ~280 tok/s ceiling).
+Raw logs and tools: [`results/raw/prefill18/`](results/raw/prefill18/).
 
 ## Results: config C
 

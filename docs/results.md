@@ -15,6 +15,13 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
+## 0.0 Latest configuration: `configs/strata-exl3-full512-d.json.tmpl` (config D, Prefill18, 2026-10-15)
+
+= config C (section 0) + patch `strata/0020` (lazy loan refill; `STRATA_D7_MODE=15`, `STRATA_D18_K=300`). Live config md5 `b481bfe4dd4f299be24c59c70f4e12cc`, engine `strata_d18d` md5 `b5b0e1bcc566424353e37625aba1c7d8`; shim and Metal library as config C. Raw: [`results/raw/prefill18/`](../results/raw/prefill18/).
+Prefill (2 runs each, tok/s): 2,565 tokens 229.1 / 226.0; 8,018 457.2 / 510.5; 18,330 489.1 / 520.9; 33,842 588.5 / 618.6 (config C: 176 / 383-418 / 446-470 / 555-584). Realistic 29 prompts 29.70 tok/s, TTFT 20.2 s (config C 31.03, 23.75 s); 12 probes 25.88 (26.84).
+Controlled in-server A/B (flag per request, 29 prompts x 2): prefill TTFT 23.07 -> 19.63 s, decode -1.5 % (se 1.6 %). Quality gate vs the saved baseline: top-1 97.59 %, mean KL 0.005303, p99 KL 0.056416 (PASS); image, tool reuse, 190K needle (357 s), 5 x 32K needles PASS, 0 GPU timeouts.
+Sweeps (decode paired vs control): K=0 -4.7 %, K=300 -1.5 %, 300 slots pending (K=584) +0.9 %, G=9 K=300 -3.2 %, refill between decode windows -15.3 %. 2.5K prompts read 18.3 GB per request (SSD-bound, ~280 tok/s ceiling).
+
 ## 0. Latest configuration: `configs/strata-exl3-full512-c.json.tmpl` (config C, Decode16, 2026-10-15)
 
 = the host-tail configuration (section 0a) plus everything the campaign shipped after it, in this order (every item has its patch or file in this repo, see [patches/README.md](../patches/README.md)): the Mac lane takes every chunk (`0006`) and PLE rows are warmed ahead;

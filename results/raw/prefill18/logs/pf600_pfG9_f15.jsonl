@@ -1,0 +1,8 @@
+{"tag": "pfG9_f15", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 10930, "tok_s": 234.7, "wall_s": 10.99, "ts": "2026-10-15T13:20:31Z"}
+{"tag": "pfG9_f15", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 10879, "tok_s": 235.8, "wall_s": 10.96, "ts": "2026-10-15T13:20:42Z"}
+{"tag": "pfG9_f15", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 15805, "tok_s": 507.3, "wall_s": 15.86, "ts": "2026-10-15T13:21:36Z"}
+{"tag": "pfG9_f15", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 15755, "tok_s": 508.9, "wall_s": 15.83, "ts": "2026-10-15T13:21:52Z"}
+{"tag": "pfG9_f15", "target": 17000, "run": 1, "prompt_n": 18330, "cache_n": 0, "prompt_ms": 29025, "tok_s": 631.5, "wall_s": 29.1, "ts": "2026-10-15T13:23:19Z"}
+{"tag": "pfG9_f15", "target": 17000, "run": 1, "prompt_n": 18330, "cache_n": 0, "prompt_ms": 28975, "tok_s": 632.6, "wall_s": 29.05, "ts": "2026-10-15T13:23:48Z"}
+{"tag": "pfG9_f15", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 52688, "tok_s": 642.3, "wall_s": 52.82, "ts": "2026-10-15T13:26:17Z"}
+{"tag": "pfG9_f15", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 53073, "tok_s": 637.6, "wall_s": 53.16, "ts": "2026-10-15T13:27:10Z"}

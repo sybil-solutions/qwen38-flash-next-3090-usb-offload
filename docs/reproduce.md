@@ -267,7 +267,7 @@ git clone https://github.com/sybil-solutions/qwen38-flash-next-3090-usb-offload 
 docker compose build build && docker compose run --rm build        # Strata v0.1.41 + patches 0001-0019 + vision patch, CMake configure (STRATA_ISA_FLOOR=none), 63 nvcc rules, EXL3 fatbins; prints "MATCH deployed" for the 5 blobs
 ./run.sh --build-metal                                             # on a Mac with the Metal toolchain -> ./out/metal (libexl3metal sha256 e38a011c...)
 RUN_ROOT=/tmp/recipe JOBS=2 ./run.sh --check                       # on the mini: installs, builds, renders config C, checks the host prerequisites; engine and USB untouched
-scripts/verify-card-free.sh patches                                # applies the 19 + 5 patches, checks results/verification/config-c-sha256.txt (20 files), regenerates the d8w4 profile
+scripts/verify-card-free.sh patches                                # applies the 20 + 5 patches, checks results/verification/config-d-sha256.txt (20 files), regenerates the d8w4 profile
 python3 scripts/compare-engine.py ~/strata-decode15/bin/strata_d15a /tmp/recipe/strata-mac/strata /Users/sero /tmp/recipe     # the engine comparison of results.md 8b
 ```
 
