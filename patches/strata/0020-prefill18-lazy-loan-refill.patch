@@ -1,0 +1,315 @@
+# Prefill18 (2026-10-15): lazy loan refill. STRATA_D7_MODE bit 8 (15 = guided 1 + LRU warm 2 + staged 4 + lazy 8): the guided refill of the VRAM slots a prompt lent
+# to the prefill buffers no longer blocks the first token. At the end of a prompt STRATA_D18_K (config D: 300; unset = all but STRATA_D18_PEND, default 300) of the lent slots are refilled (best score
+# first); the rest stay NOT resident (their experts are misses the mini LRU serves, exact; the LRU warm
+# already holds them) and are copied in pieces of STRATA_D18_P slots (4) while the engine waits for the next request (STRATA_D18_IDLE, default 1) and,
+# optionally, between decode windows within a stall budget of STRATA_D18_PHI x the decode time so far + STRATA_D18_GRACE ms (default 0 = off: it only moves the
+# stall into decode). Every piece re-checks that its slot is free and its expert not resident; pending slots below a later loan stay pending, the ones that loan
+# overwrites are dropped. STRATA_D18_CFG=<file> re-reads the knobs (K=, PEND=, P=, W=, IDLE=, PHI=, GRACE=) at every refill (A/B).
+# Measured (config D = config C + STRATA_D7_MODE=15 STRATA_D18_K=300, G=6): prefill 2.5K/8K/18K/33K 176/382-422/444-473/550-579 -> 233/506-511/517/614 tok/s, paired in-server decode -1.5%.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0019, applied in order with `git apply -p1`.
+
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -8809,6 +8809,146 @@
+                 if (!pump(false)) return false;
+             return true;
+         };
++        // ---- Prefill18: LAZY loan refill (STRATA_D7_MODE / flag file bit 8 on top of the guided + staged refill, bits 1 + 4).  The
++        // guided refill of the lent slots no longer blocks the first token: at the end of the prompt the first K slots (best
++        // score first) are copied, the rest stay NOT resident (the expert is a miss: the mini computes it, exact) and are copied
++        // later, a few slots at a time, (a) between two decode windows while the time spent on them stays below phi x the
++        // decode time so far (+ grace_ms), and (b) while the engine is idle waiting for the next request (stops at the next
++        // line; a piece is P slots, ~5.5 ms each over the link).  The pieces run on the engine thread at a window boundary
++        // or in the idle wait, never beside a ring.  Every piece re-checks that its slot is still free and its expert is
++        // still not resident (the elastic K/V and the adaptive tier move residents), so a stale entry is skipped, never
++        // written.  A loan (the next prompt that lends) drops the pending entries it overwrites (slots from its first slot on; the next guided refill assigns those slots again); the ones below it stay pending.
++        struct D18State {
++            bool active = false, idle = true;
++            int32_t lo = 0;                    // first slot of the region the pending entries live in
++            std::vector<int32_t> idx, slot;    // pending (residency index, slot), best score first
++            size_t next = 0;
++            int P = 4;                         // slots per piece
++            double phi = 0.0, grace_ms = 0.0, spent_ms = 0.0, ms_per_slot = 6.0;
++            int64_t pieces_dec = 0, slots_dec = 0, pieces_idle = 0, slots_idle = 0, skipped = 0, total = 0;
++            double idle_ms = 0.0;
++            int64_t req = 0;
++            std::vector<uint8_t> buf;
++        };
++        D18State d18;
++        auto d18_clear = [&](const char* why) {
++            if (d18.total == 0) return;
++            std::fprintf(stderr, "strata d18: req %lld pending refill %s (%s): %lld of %lld slots done (%lld in decode pieces %.0f ms spent, %lld idle %.0f ms), %lld pending dropped, %lld stale skipped\n",
++                         (long long) d18.req, d18.next >= d18.idx.size() ? "finished" : "ended", why, (long long) (d18.slots_dec + d18.slots_idle), (long long) d18.total,
++                         (long long) d18.slots_dec, d18.spent_ms, (long long) d18.slots_idle, d18.idle_ms,
++                         (long long) (d18.idx.size() > d18.next ? d18.idx.size() - d18.next : 0), (long long) d18.skipped);
++            d18.active = false; d18.idx.clear(); d18.slot.clear(); d18.next = 0; d18.total = 0;
++            d18.pieces_dec = d18.slots_dec = d18.pieces_idle = d18.slots_idle = d18.skipped = 0;
++            d18.spent_ms = d18.idle_ms = 0.0;
++        };
++        auto d18_trim = [&](int32_t first) {   // a loan from slot `first` on carries prompt buffers: the pending entries there are dropped, the ones below stay pending
++            if (d18.total == 0) return;
++            size_t w = 0;
++            for (size_t k = d18.next; k < d18.idx.size(); ++k)
++                if (d18.slot[k] < first) { d18.idx[w] = d18.idx[k]; d18.slot[w] = d18.slot[k]; ++w; }
++            const size_t dropped = (d18.idx.size() - d18.next) - w;
++            if (dropped > 0)
++                std::fprintf(stderr, "strata d18: req %lld loan from slot %d: %zu pending slots dropped, %zu kept (%lld of %lld done before)\n", (long long) d18.req, (int) first, dropped, w,
++                             (long long) (d18.slots_dec + d18.slots_idle), (long long) d18.total);
++            d18.idx.resize(w); d18.slot.resize(w); d18.next = 0;
++            d18.total = (int64_t) w + d18.slots_dec + d18.slots_idle;
++            if (w == 0) {
++                d18.active = false; d18.total = 0;
++                d18.pieces_dec = d18.slots_dec = d18.pieces_idle = d18.slots_idle = d18.skipped = 0;
++                d18.spent_ms = d18.idle_ms = 0.0;
++            }
++        };
++        // copy the next n pending slots: 1 = done, 0 = nothing to do, -1 = failed
++        auto d18_piece = [&](size_t n) -> int {
++            if (!d18.active || d18.next >= d18.idx.size() || pf_parts.size() != 1 || pf_parts[0].cache == nullptr) return 0;
++            PfPart& p = pf_parts[0];
++            strata::core::ExpertCache& xc = *p.cache;
++            const int32_t slots = (int32_t) xc.slots();
++            const size_t hi = std::min(d18.idx.size(), d18.next + n);
++            const int64_t ne = g.n_expert;
++            const uint64_t nb = (uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(0);
++            auto soff = [&](int32_t s) -> uint64_t { return (uint64_t) (xc.device_slot(s) - xc.device_slot(0)); };
++            std::vector<char> occ((size_t) std::max<int32_t>(0, slots - d18.lo), 0);
++            for (size_t i = 0; i < host_res.size(); ++i)
++                if (host_res[i] >= d18.lo && host_res[i] < slots) occ[(size_t) (host_res[i] - d18.lo)] = 1;
++            std::vector<int32_t> vi, vs;
++            for (size_t k = d18.next; k < hi; ++k) {
++                const int32_t s = d18.slot[k], i = d18.idx[k];
++                if (s < d18.lo || s >= slots || occ[(size_t) (s - d18.lo)] || host_res[(size_t) i] >= 0) { ++d18.skipped; continue; }
++                vi.push_back(i);
++                vs.push_back(s);
++            }
++            d18.next = hi;
++            if (vi.empty()) return 1;
++            const strata::core::OnDevice on(p.dev);
++            std::string e;
++            for (size_t j0 = 0; j0 < vi.size();) {
++                size_t j1 = j0 + 1;
++                while (j1 < vi.size() && vs[j1] == vs[j1 - 1] + 1) ++j1;
++                const int32_t a = vs[j0], b = vs[j1 - 1] + 1;
++                const uint64_t span = soff(b - 1) - soff(a) + nb;
++                bool done = false;
++                if (d18.buf.size() < (size_t) span) d18.buf.resize((size_t) span);
++                {
++                    std::vector<int32_t> si(vi.begin() + (std::ptrdiff_t) j0, vi.begin() + (std::ptrdiff_t) j1);
++                    std::vector<uint64_t> so(j1 - j0);
++                    for (size_t j = j0; j < j1; ++j) so[j - j0] = soff(vs[j]) - soff(a);
++                    if (strata_stage_begin(srcp, si.data(), so.data(), (int) si.size(), d18.buf.data()) >= 0) {
++                        if (strata_stage_finish() == 0) {
++                            const cudaError_t ce = cudaMemcpyAsync(xc.device_slot(a), d18.buf.data(), (size_t) span, cudaMemcpyHostToDevice, (cudaStream_t) 0);
++                            if (ce != cudaSuccess) { std::fprintf(stderr, "strata d18: copy failed: %s\n", cudaGetErrorString(ce)); return -1; }
++                            done = true;
++                        }
++                    }
++                }
++                if (!done)
++                    for (size_t j = j0; j < j1; ++j) {
++                        const uint8_t* bl = srcp->blob_stable(vi[j] / ne, vi[j] % ne);
++                        if (bl == nullptr || !xc.fill_slot_queued(vs[j], bl, e, (int64_t) nb)) { std::fprintf(stderr, "strata d18: plain copy failed: %s\n", e.c_str()); return -1; }
++                    }
++                j0 = j1;
++            }
++            if (!xc.sync_queued(e)) { std::fprintf(stderr, "strata d18: sync failed: %s\n", e.c_str()); return -1; }
++            for (size_t j = 0; j < vi.size(); ++j) host_res[(size_t) vi[j]] = vs[j];
++            (void) strata_lru_drop(vi.data(), (int) vi.size());
++            res_upload();
++            return 1;
++        };
++        // a piece between two decode windows if the stall budget allows it (elapsed: ms of decode so far)
++        auto d18_tick = [&](double elapsed_ms) -> bool {
++            if (!d18.active || d18.phi <= 0.0 || d18.next >= d18.idx.size()) return true;
++            const double est = d18.ms_per_slot * (double) d18.P;
++            if (d18.phi * elapsed_ms + d18.grace_ms - d18.spent_ms < est) return true;
++            const auto t0 = Clock::now();
++            const size_t n0 = d18.next;
++            const int r = d18_piece((size_t) d18.P);
++            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++            if (r < 0) return false;
++            const size_t n = d18.next - n0;
++            d18.spent_ms += ms; ++d18.pieces_dec; d18.slots_dec += (int64_t) n;
++            if (n > 0) d18.ms_per_slot = 0.7 * d18.ms_per_slot + 0.3 * (ms / (double) n);
++            return true;
++        };
++        auto d18_next_line = [&](std::string& out) -> bool {
++            for (;;) {
++                {
++                    std::unique_lock<std::mutex> lk(in_mu);
++                    if (!in_lines.empty()) { out = std::move(in_lines.front()); in_lines.pop_front(); return true; }
++                    if (in_eof) return false;
++                    if (!(d18.active && d18.idle && d18.next < d18.idx.size())) {
++                        in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
++                        continue;
++                    }
++                }
++                const auto t0 = Clock::now();
++                const size_t n0 = d18.next;
++                const int r = d18_piece((size_t) d18.P);
++                d18.idle_ms += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++                d18.slots_idle += (int64_t) (d18.next - n0); ++d18.pieces_idle;
++                if (r < 0) { d18.active = false; d18.idx.resize(d18.next); }
++                if (d18.next >= d18.idx.size()) d18_clear("idle");
++            }
++        };
+         for (;;) {
+             if (batch_on() || (piped && pipe_inflight())) {
+                 if (!try_next_line(line)) {
+@@ -8817,7 +8957,7 @@
+                 }
+                 // a request reads its prompt through every stage: the groups in flight finish first
+                 if (piped && line.rfind("BSTOP ", 0) != 0 && !pipe_drain()) return 1;
+-            } else if (!next_line(line)) {
++            } else if (!d18_next_line(line)) {
+                 break;
+             }
+             // --batch: BSTOP <slot> ends that slot at its next batch window; BGEN <slot> <max_new> ... reads the
+@@ -9841,8 +9981,30 @@
+                 if (flags == 0 && !d7.dirty) return 0;
+                 strata::core::ExpertCache& xc = *p.cache;
+                 const int32_t slots = (int32_t) xc.slots(), fn = p.first_now;
+-                if (fn < d7.r0 || fn >= slots || p.lent.size() != (size_t) (slots - fn)) return 0;   // not the contiguous loan this expects
++                const bool lazy = (flags & 13) == 13;   // Prefill18: guided + staged + lazy
++                if (fn < d7.r0 || fn >= slots) return 0;   // (the plain refill, below, needs every slot of a full loan: an unfilled one returns 0 before anything changes)
+                 const bool g_on = (flags & 1) != 0, w_on = (flags & 2) != 0, s_on = (flags & 4) != 0;
++                auto d18_env = [](const char* n, double dflt) { const char* v = std::getenv(n); return v != nullptr ? std::atof(v) : dflt; };   // STRATA_D18_K / _PEND / _P / _W / _IDLE / _PHI / _GRACE: the defaults of the lazy knobs
++                int c18_K = (int) d18_env("STRATA_D18_K", -1), c18_pend = (int) d18_env("STRATA_D18_PEND", 300), c18_P = std::max(1, (int) d18_env("STRATA_D18_P", 4)), c18_W = (int) d18_env("STRATA_D18_W", -1);   // K < 0: leave at most PEND slots pending
++                bool c18_idle = d18_env("STRATA_D18_IDLE", 1.0) != 0.0;
++                double c18_phi = d18_env("STRATA_D18_PHI", 0.0), c18_grace = d18_env("STRATA_D18_GRACE", 0.0);
++                if (lazy) {   // STRATA_D18_CFG=<file> re-reads the knobs at every refill (research A/B): K (slots before the first token), P (slots per piece), W (warm cap), IDLE, PHI, GRACE (ms)
++                    const char* cf = std::getenv("STRATA_D18_CFG");
++                    if (cf != nullptr) if (std::FILE* fp = std::fopen(cf, "r")) {
++                        char tok[96];
++                        while (std::fscanf(fp, "%95s", tok) == 1) {
++                            double v = 0;
++                            if (std::sscanf(tok, "K=%lf", &v) == 1) c18_K = (int) v;
++                            else if (std::sscanf(tok, "PEND=%lf", &v) == 1) c18_pend = (int) v;
++                            else if (std::sscanf(tok, "P=%lf", &v) == 1) c18_P = std::max(1, (int) v);
++                            else if (std::sscanf(tok, "W=%lf", &v) == 1) c18_W = (int) v;
++                            else if (std::sscanf(tok, "IDLE=%lf", &v) == 1) c18_idle = v != 0;
++                            else if (std::sscanf(tok, "PHI=%lf", &v) == 1) c18_phi = v;
++                            else if (std::sscanf(tok, "GRACE=%lf", &v) == 1) c18_grace = v;
++                        }
++                        std::fclose(fp);
++                    }
++                }
+                 const int64_t ne = g.n_expert, NI = g.n_layers * g.n_expert;
+                 const int64_t ntok = strata_pf_hist_tokens();
+                 const auto t0 = Clock::now();
+@@ -9888,7 +10050,7 @@
+                     for (const auto& [i, slot] : p.lent) was_lent[(size_t) i] = 1;
+                     cand.reserve((size_t) NI);
+                     for (int64_t i = 0; i < NI; ++i) if (host_res[(size_t) i] < 0) cand.emplace_back(score[(size_t) i], (int32_t) i);
+-                    const size_t nl = p.lent.size();
++                    const size_t nl = nsl;
+                     auto better = [&](const std::pair<float, int32_t>& a, const std::pair<float, int32_t>& b) {
+                         if (a.first != b.first) return a.first > b.first;
+                         if (was_lent[(size_t) a.second] != was_lent[(size_t) b.second]) return was_lent[(size_t) a.second] > was_lent[(size_t) b.second];
+@@ -9896,18 +10058,21 @@
+                     };
+                     if (cand.size() < nl) return 0;
+                     std::nth_element(cand.begin(), cand.begin() + (std::ptrdiff_t) nl - 1, cand.end(), better);
++                    if (lazy) std::sort(cand.begin(), cand.begin() + (std::ptrdiff_t) nl, better);   // best score first: the slots fill in this order
+                     std::vector<int32_t> sel;
+                     sel.reserve(nl);
+                     for (size_t k = 0; k < nl; ++k) { sel.push_back(cand[k].second); changed += was_lent[(size_t) cand[k].second] ? 0 : 1; }
+-                    std::sort(sel.begin(), sel.end());
++                    if (!lazy) std::sort(sel.begin(), sel.end());
+                     for (size_t k = 0; k < nl; ++k) assign[k] = sel[k];
+                 } else {
+                     for (const auto& [i, slot] : p.lent) assign[(size_t) (slot - rb)] = i;
+                 }
+                 for (const int32_t a : assign) if (a < 0) return 0;
+                 // the table: every slot of the region takes its new expert (nothing reads it until the refill has landed)
++                const size_t Kc = !lazy ? nsl : c18_K >= 0 ? std::min<size_t>(nsl, (size_t) c18_K) : nsl - std::min<size_t>(nsl, (size_t) std::max(0, c18_pend));   // slots refilled before the first token (lazy: K, or all but PEND)
+                 for (size_t i = 0; i < host_res.size(); ++i) if (host_res[i] >= rb) host_res[i] = strata::core::kNotResident;
+-                for (size_t k = 0; k < nsl; ++k) host_res[(size_t) assign[k]] = rb + (int32_t) k;
++                for (size_t k = 0; k < Kc; ++k) host_res[(size_t) assign[k]] = rb + (int32_t) k;
++                if (restore) d18_trim(d7.r0);   // the whole region is assigned from the profile's owners again
+                 if (guide) d7.dirty = true;
+                 else if (restore) d7.dirty = false;
+                 // the experts that are in VRAM now leave the mini LRU; its free slots (the prompt's scratch sets) take the prompt's next hottest
+@@ -9915,12 +10080,12 @@
+                 double warm_ms = 0;
+                 std::thread warm_thr;
+                 std::vector<int32_t> warm_idx;
+-                if (guide && !assign.empty()) (void) strata_lru_drop(assign.data(), (int) assign.size());
++                if (guide && !assign.empty()) (void) strata_lru_drop(assign.data(), (int) Kc);
+                 if (w_on && have_hist && !score.empty()) {
+                     std::vector<std::pair<float, int32_t>> wc;
+                     wc.reserve((size_t) NI);
+                     for (int64_t i = 0; i < NI; ++i) if (host_res[(size_t) i] < 0 && score[(size_t) i] > 0.0f) wc.emplace_back(score[(size_t) i], (int32_t) i);
+-                    const size_t wl = std::min<size_t>(wc.size(), (size_t) d7.warm_list);
++                    const size_t wl = std::min<size_t>(wc.size(), (size_t) (lazy && c18_W > 0 ? c18_W : d7.warm_list));
+                     std::partial_sort(wc.begin(), wc.begin() + (std::ptrdiff_t) wl, wc.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+                     for (size_t k = 0; k < wl; ++k) warm_idx.push_back(wc[k].second);
+                     warm_n = (int64_t) warm_idx.size();
+@@ -9929,7 +10094,7 @@
+                 // the copies: pieces of d7.piece slots, the next piece's blobs gathered on the mac-pull threads while this one goes over the link
+                 const strata::core::OnDevice on(p.dev);
+                 const int P = d7.piece;
+-                const int np = (int) ((nsl + (size_t) P - 1) / (size_t) P);
++                const int np = (int) ((Kc + (size_t) P - 1) / (size_t) P);
+                 std::vector<uint8_t> buf[2];
+                 bool staged = s_on;
+                 if (staged) {
+@@ -9953,7 +10118,7 @@
+                     }
+                     return true;
+                 };
+-                if (staged) staged = begin_piece(0);
++                if (staged && np > 0) staged = begin_piece(0);
+                 int64_t n_staged = 0, n_plain = 0;
+                 for (int k = 0; k < np; ++k) {
+                     int32_t a, b;
+@@ -9975,11 +10140,28 @@
+                         if (!plain_piece(a, b) || !xc.sync_queued(e)) { if (warm_thr.joinable()) warm_thr.join(); return -1; }
+                         n_plain += b - a;
+                     }
++                }
++                if (lazy && Kc < nsl) {   // the rest of the region is copied later (decode windows within the stall budget, the engine's idle wait); pending entries below this region (an earlier lazy request's) stay
++                    d18_trim(rb);
++                    if (d18.idx.empty()) {
++                        d18.lo = rb; d18.next = 0; d18.total = 0;
++                        d18.pieces_dec = d18.slots_dec = d18.pieces_idle = d18.slots_idle = d18.skipped = 0;
++                        d18.spent_ms = d18.idle_ms = 0.0;
++                    }
++                    const size_t base = d18.idx.size();
++                    d18.idx.insert(d18.idx.end(), assign.begin() + (std::ptrdiff_t) Kc, assign.end());
++                    d18.slot.resize(d18.idx.size());
++                    for (size_t k = Kc; k < nsl; ++k) d18.slot[base + (k - Kc)] = rb + (int32_t) k;
++                    d18.total += (int64_t) (nsl - Kc);
++                    d18.P = c18_P; d18.phi = c18_phi; d18.grace_ms = c18_grace; d18.idle = c18_idle;
++                    d18.req = d7.req;
++                    d18.active = true;
+                 }
+                 if (warm_thr.joinable()) warm_thr.join();
+                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                 std::fprintf(stderr, "strata d7: req %lld flags %d: %s %zu slots (%lld changed) from %lld prompt tokens; copies %lld staged + %lld plain; warm %lld of %lld candidates in %.0f ms; refill %.0f ms\n", (long long) d7.req, flags,
+                              restore ? "static restore of" : guide ? "guided refill of" : "refill of", nsl, (long long) changed, (long long) ntok, (long long) n_staged, (long long) n_plain, (long long) warm_loaded, (long long) warm_n, warm_ms, ms);
++                if (lazy) std::fprintf(stderr, "strata d18: req %lld lazy refill: %zu of %zu slots before the first token, %zu pending (P %d, phi %.2f, grace %.0f ms, idle %d, warm cap %d)\n", (long long) d7.req, Kc, nsl, nsl - Kc, c18_P, c18_phi, c18_grace, (int) c18_idle, c18_W);
+                 return 1;
+             };
+             // the batched path's slots are lent just before its first run and given back (refilled) before a window
+@@ -10079,6 +10261,7 @@
+                     }
+                     const strata::core::OnDevice on(p.dev);
+                     const int32_t first = std::max<int32_t>(p.first, (int32_t) (p.cache->slots() - part_slots(p, want)));
++                    d18_trim(first);
+                     if (want != p.sp->chunk() || first != p.first_now) {
+                         if (!p.sp->relayout(want, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
+                         p.first_now = first;
+@@ -11102,6 +11285,10 @@
+                     std::printf("ERR the K/V cannot grow: no VRAM is left\n");
+                     return 1;
+                 }
++                if (d18.active && !first_window && !d18_tick(std::chrono::duration<double, std::milli>(Clock::now() - d0).count())) {   // Prefill18: a lazy refill piece between two windows, within its stall budget
++                    std::printf("ERR a lazy refill piece failed\n");
++                    return 1;
++                }
+                 tr("window", p, T);
+                 const Clock::time_point tw0 = Clock::now();
+                 // STRATA_SPEC_PROB: the MTP drafts' distributions q, judged by rejection sampling (core/spec_prob.hpp);
