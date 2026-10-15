@@ -37,6 +37,21 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
   for p in $REPO/patches/strata/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied $(basename $p)"; done
   rm -rf $WORK/vis && mkdir -p $WORK/vis/tools && cp -r $WORK/strata/tools/vision $WORK/vis/tools/ && cd $WORK/vis && git init -q . 2>/dev/null
   git apply --check $REPO/patches/vision/0001-strata-vision-metal-macos.patch; echo "vision patch applies to tools/vision"
+  # config C (Decode16): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
+  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-c-sha256.txt)
+  rm -rf $WORK/shimchk && mkdir -p $WORK/shimchk/shim && cp $REPO/patches/shim/base/* $WORK/shimchk/shim/ && cd $WORK/shimchk && git init -q . 2>/dev/null || true
+  for p in $REPO/patches/shim/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied shim/$(basename $p)"; done
+  for f in tgcu.py tgcu_api.py tgcudart.cpp; do cmp $WORK/shimchk/shim/$f $REPO/shim/$f || fail "patches/shim/base + 0*.patch differ from shim/$f"; done
+  echo "shim base + patches/shim/0*.patch == shim/{tgcu.py,tgcu_api.py,tgcudart.cpp} MATCH"
+  local n=0 h f
+  while read -r h f _; do
+    case $h in ""|\#*) continue;; esac
+    case $f in shim/*|exl3/*) f=$REPO/$f;; *) f=$WORK/strata/$f;; esac
+    expect_sha $f $h "${f#$REPO/}"; n=$((n + 1))
+  done < $REPO/results/verification/config-c-sha256.txt
+  echo "$n files of config C match results/verification/config-c-sha256.txt"
+  logged profile-d8w4 1 env STRATA_TOOLS=$WORK/strata/tools python3 $REPO/exl3/make_profile_wholelayers.py $WORK/d8w4 0,1,2,6
+  [ "$(md5 -q $WORK/d8w4/profile.bin)" = 2ac3b7e1436c1720487993969c651c5c ] && echo "exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH" || fail "d8w4 profile does not reproduce"
 }
 step_cpu() {       # libexl3cpu from source + its parity tests (decode/had_in bit-exact vs exl3_ref, GEMV gate, 18 real experts from the pack)
   say "cpu: build libexl3cpu, run exl3/test_exl3_cpu.py"
@@ -57,6 +72,9 @@ step_cudart() {    # the CUDA-runtime shim compiles; exported symbol set printed
   logged cudart-build 2 zsh $REPO/shim/build-libcudart.sh $WORK/cudart
   local n=$(nm -gU $WORK/cudart/libcudart.dylib | wc -l | tr -d ' ')
   [ "$n" = 136 ] && echo "exported symbols: $n MATCH (deployed: 136)" || fail "libcudart exports $n symbols, the deployed one 136"
+  local got=$(sha_of $WORK/cudart/libcudart.dylib) want=20e8167d271ba797fa12e1442dbc155a6c6cc6405dc330a8dd92b05a14508b1d
+  [ "$got" = $want ] && echo "libcudart.dylib sha256 $got MATCH (the deployed config-C one)" \
+    || echo "libcudart.dylib sha256 $got differs from the deployed $want: byte-identical only with the mini's toolchain (Apple clang 21, MacOSX26.5.sdk, uv CPython 3.12.15); not a failure"
 }
 step_fatbins() {   # sm_86 fatbins of the EXL3 engine kernels (nvcc 13.4 in the strata-cuda container) + the host library around them
   say "fatbins: exl3_strata / _recon / _pf with nvcc 13.4 in the container, then strata_m4/build.sh"

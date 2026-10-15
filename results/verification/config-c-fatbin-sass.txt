@@ -1,0 +1,4 @@
+kernels: SASS lines live 39342 rebuilt 39342; instructions 19536 / 19536; lines differing after name normalisation 0; instruction streams EQUAL
+sampler: SASS lines live 40123 rebuilt 40123; instructions 16416 / 16416; lines differing after name normalisation 14389; instruction streams differ (3970 of 16416)
+moe_mmq: SASS lines live 1090 rebuilt 1090; instructions 520 / 520; lines differing after name normalisation 6; instruction streams EQUAL
+fused_gr: SASS lines live 262838 rebuilt 262838; instructions 129296 / 129296; lines differing after name normalisation 0; instruction streams EQUAL

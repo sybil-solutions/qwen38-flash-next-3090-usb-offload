@@ -1,0 +1,114 @@
+
+== preflight
+[ ok ] macOS 26.6.2 on arm64
+[ ok ] Command Line Tools: Apple clang version 21.0.0 (clang-2100.1.1.101)
+[ ok ] SDK /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+[ ok ] clang: Apple clang version 21.0.0 (clang-2100.1.1.101)
+[warn] no Metal compiler (xcrun -f metal fails): libexl3metal and strata-vision-metal come from /tmp/rcpC-repo/out/metal (./run.sh --build-metal on a Mac that has it)
+[ ok ] uv 0.12.24
+[ ok ] USB dock present (ASM2464 3801:0001 / ADD1:0001)
+[info] free disk at /tmp/recipe: 32 GiB (installed pack 46 GB + dense GGUF 84 GB + builds); judged in the host prerequisites below
+
+== bundle /tmp/rcpC-repo/out
+[ ok ] bundle files match their SHA256SUMS (6200 files)
+       qwen38-flash-next-3090-usb-offload build bundle
+       platform: aarch64 Ubuntu 24.04.5 LTS
+       build root in the container: $HOME
+       Strata: v0.1.41 fb58e0dbc8399662c0e47c76578c6e878b14f6cf + patches/strata/0*.patch + patches/vision/0001
+       llama.cpp (Strata FetchContent pin): 3cf03257f219afbe7334045ff7c6a06ac68c627d
+       nvcc: 13.4.92 (redist manifest redistrib_13.4.2.json)
+       fatbins/SHA256SUMS: sha256 of the products that were compared with the deployed ones
+       engine/strata-mac-fatbins.sha256: 63 engine fatbins
+
+== CUDA 12.8 headers
+[ ok ] /tmp/recipe/cuda-12.8 present
+
+== SIMDe (x86 intrinsics on arm64 for Strata's CPU kernels)
+[ ok ] /tmp/recipe/simde at 0ff5341927e15df0c3da8bb13bb32ec7f95aef84
+
+== tinygrad (PR #17369 head e765a2abf) + patch, venv
+[ ok ] /tmp/recipe/tg-strata at e765a2abf75c1f3a37e810f8856550397f2bcc23
+[ ok ] tinygrad patch 0001 already applied
+[ ok ] tinygrad venv has numpy, libusb1, libusb-package, pytest
+[warn] /tmp/recipe/.local/lib/libamd_comgr.dylib is missing: its source was never recorded (docs/reproduce.md); whether the NV backend needs it was not established
+[ ok ] /tmp/recipe/.chestnut_env exists: kept
+[ ok ] tinygrad NV backend imports (no device opened)
+
+== install the bundle under /tmp/recipe
+[ ok ] Strata v0.1.41 + patches: /tmp/recipe/strata up to date
+[ ok ] Strata configure tree (llama.cpp sources, compile commands): /tmp/recipe/strata-linux up to date
+[ ok ] strata_cmds.txt re-rooted $HOME -> /tmp/recipe
+[ ok ] EXL3 sources, packers, profile: /tmp/recipe/exl3 up to date
+[ ok ] up to date /tmp/recipe/exl3/exl3_strata.fatbin
+[ ok ] up to date /tmp/recipe/exl3/exl3_strata_recon.fatbin
+[ ok ] up to date /tmp/recipe/exl3/exl3_strata_pf.fatbin
+[ ok ] up to date /tmp/recipe/shim/tgcu.py
+[ ok ] up to date /tmp/recipe/shim/tgcu_api.py
+[ ok ] up to date /tmp/recipe/shim/tgcu_prof.py
+[ ok ] up to date /tmp/recipe/shim/usb_drain.py
+[ ok ] up to date /tmp/recipe/shim/pcie_cycle.py
+[ ok ] up to date /tmp/recipe/shim/tgcudart.cpp
+[ ok ] up to date /tmp/recipe/shim/tgcublas.cpp
+[ ok ] up to date /tmp/recipe/shim/tgcuda_launch.h
+[ ok ] up to date /tmp/recipe/shim/tgcu_builtin.cu
+[ ok ] up to date /tmp/recipe/shim/tgcu_libc.ptx
+[ ok ] up to date /tmp/recipe/shim/run-strata.sh
+[ ok ] up to date /tmp/recipe/shim/run-d7.sh
+[ ok ] up to date /tmp/recipe/shim/srv.sh
+[ ok ] up to date /tmp/recipe/shim/ls_srv.sh
+[ ok ] up to date /tmp/recipe/shim/mkcfg.py
+[ ok ] up to date /tmp/recipe/shim/macbuild.py
+[ ok ] up to date /tmp/recipe/shim/build-libcudart.sh
+[ ok ] shim headers: /tmp/recipe/shim/include up to date
+[ ok ] shim x86 compat headers: /tmp/recipe/shim/x86compat up to date
+[ ok ] up to date /tmp/recipe/shim/tgcu_builtin.fatbin
+[ ok ] up to date /tmp/recipe/shim/tgcu_libc.cubin
+[ ok ] Strata venv has its requirements
+
+== models
+[warn] no experts pack at /tmp/recipe/exl3/pack/experts.bin: docker compose --profile fetch run --rm fetch experts  (then re-run; it is read from /tmp/rcpC-repo/out/models)
+[warn] missing /tmp/recipe/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf: docker compose --profile fetch run --rm fetch dense
+[warn] missing /tmp/recipe/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf: docker compose --profile fetch run --rm fetch dense
+[warn] missing /tmp/recipe/models/qwen38fn/mmproj-Qwen3.8-Flash-Next-BF16.gguf: docker compose --profile fetch run --rm fetch dense
+
+== dense pack, tokenizer, MTP draft
+[warn] no GGUF yet: skipping iq_pack / MTP (fetch the models first)
+[ ok ] expert profile present
+
+== native libraries
+[ ok ] libexl3cpu.dylib present
+[ ok ] libexl3cpu sha256 9fe9cab5491e32e3... = the deployed one
+[ ok ] libexl3metal.dylib present
+[ ok ] libexl3metal sha256 e38a011c79933a8e... = the deployed one
+[ ok ] libcudart.dylib present
+[ ok ] libstrata_exl3.dylib present
+
+== Strata engine (host half; the device code is in the bundle)
+       device rules 63, host rules 125, libs 9, links ['strata']
+[ ok ] fatbins placed under /tmp/recipe/strata-mac (63)
+[info] host build: 2 jobs (135 clang rules + link) ...
+[ ok ] built /tmp/recipe/strata-mac/strata
+[ ok ] engine links @rpath/libcudart.dylib with rpath /tmp/recipe/shim
+
+== vision encoder (Metal)
+[ ok ] strata-vision-metal present
+[ ok ] API key file present (/tmp/recipe/.config/strata/flashnext.key, not printed)
+
+== config
+[ ok ] rendered /tmp/recipe/shim/qwen38fn-run.json (host 127.0.0.1, port 8080; key from /tmp/recipe/.config/strata/flashnext.key at start)
+       missing: /tmp/recipe/models/qwen38fn/packs/iq3_s/tokenizer
+       missing: /tmp/recipe/models/qwen38fn/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+       missing: /tmp/recipe/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
+       missing: /tmp/recipe/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
+       missing: /tmp/recipe/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf
+       missing: /tmp/recipe/models/qwen38fn/mtp/rt
+[warn] 6 path(s) named by the config do not exist here (models/packs: expected on a machine that has not fetched them)
+
+== host prerequisites (strata-exl3-full512-c)
+[info] STRATA_EXL3_METAL_SLOTS 6400: 11953 MB of mlocked, Metal-registered expert slots on the mini side (config C ships 6400)
+[ ok ] wired limits: iogpu.wired_limit_mb 14336, vm.global_user_wire_limit 15032385536, vm.user_wire_limit 15032385536
+[ ok ] caffeinate -dimsu is running
+[ ok ] free disk at /tmp/recipe: 31 GiB
+
+== summary: 59 ok, 8 warnings, 0 failures (--check: engine not started, USB not touched)
+exit 0
