@@ -1,0 +1,33 @@
+# Decode5 (2026-10-13): TGCU_LAUNCH_RING=N prints the last N eager launches (name, grid, every device-address parameter
+# resolved to chunk + offset) to stderr when a GPU timeout fires (the embedded interpreter's stdout is dropped). Found
+# the borrow grp_const bug (strata patch 0009).
+# Base: patches/shim/base/ (the host-tail shim, git 25ae464) + the earlier shim patches; `git apply -p1` in a directory that holds shim/<file>.
+
+diff --git a/shim/tgcu_api.py b/shim/tgcu_api.py
+--- a/shim/tgcu_api.py
++++ b/shim/tgcu_api.py
+@@ -471,9 +471,11 @@
+ RING_N = int(os.getenv("TGCU_LAUNCH_RING", "0"))   # keep the last N eager launches (name, grid, params); a GPU timeout prints them with every device-address parameter resolved to chunk + offset
+ _ring: collections.deque = collections.deque(maxlen=max(RING_N, 1))
+ def _ring_dump():
+-  print(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}", flush=True)
++  _p = lambda s: print(s, file=sys.stderr, flush=True)   # Decode5: stderr (the engine log); the stdout lines of the embedded interpreter go nowhere
++  _p(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}")
++  for ci, ch in enumerate(ctx.chunks): _p(f"[tgcu RING] chunk {ci}: base {ch['base']:#x} size {ch['size'] >> 20} MiB")
+   for name, g, b, prm, sv in _ring:
+-    print(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B", flush=True)
++    _p(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B")
+     for i in range(0, len(prm) - 7, 8):
+       w = struct.unpack_from("<Q", prm, i)[0]
+       if w < 0x1000000000 or w >= 0x40000000000: continue
+@@ -481,8 +483,8 @@
+       for ci, ch in enumerate(ctx.chunks):
+         if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD:
+           where = f"chunk {ci} (size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
+-      print(f"[tgcu RING]     word@{i}: {w:#x} -> {where}", flush=True)
+-    print(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}", flush=True)
++      _p(f"[tgcu RING]     word@{i}: {w:#x} -> {where}")
++    _p(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}")
+ if RING_N: tgcu.RING_HOOK = _ring_dump
+ _bad_launch: set = set()
+ def _check_launch(k, g, b, shmem) -> str:

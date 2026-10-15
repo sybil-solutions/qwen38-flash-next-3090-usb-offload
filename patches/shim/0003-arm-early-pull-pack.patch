@@ -1,0 +1,184 @@
+# Decode6 (2026-10-13): TGCU_ARM_EARLY=1 (the bulk OUT arm of the ring's pushed rows is issued in h2d_pre, off the
+# critical path; -0.11 ms per ring) and TGCU_PULL_PACK=1 (the pull gathers only the ring's segments - x rows, ids,
+# weights - into the staging SRAM back to back instead of the contiguous arena span between them). Exact, about +6 %
+# decode.
+# Base: patches/shim/base/ (the host-tail shim, git 25ae464) + the earlier shim patches; `git apply -p1` in a directory that holds shim/<file>.
+
+diff --git a/shim/tgcu.py b/shim/tgcu.py
+--- a/shim/tgcu.py
++++ b/shim/tgcu.py
+@@ -653,6 +653,7 @@
+ # *** async copy engine: a channel group of its own, so copies run while a compute graph spins on a host flag ***
+ 
+ _PROF = bool(os.getenv("TGCU_PROF"))
++_ARM_EARLY = int(os.getenv("TGCU_ARM_EARLY", "0"))   # decode ring (h2d_pre with a next pull): 1 = arm the bulk OUT in h2d_pre (off the critical path), 2 = IN arm then OUT arm, 3 = OUT arm then IN arm; the critical path keeps only the bulk OUT + the hold write
+ _POKE1 = int(os.getenv("TGCU_POKE1", "0"))   # bit 0: GPPut, 1: doorbell, 2: hold word as ONE USB control transfer instead of control + bulk (the stream write)
+ def _w32(mmio, off:int, val:int):
+   a = mmio.addr + off
+@@ -702,6 +703,7 @@
+     self.sem_off = 0x8000                                   # semaphore word inside the same allocation
+     self.sem_value = 0
+     self.gate_seq = 0
++    self._rd_early = self._wr_early = False
+     self.hold_va, self.hold_off, self.hold_tok = 0, 0, 0   # set by Context once its mapped arena exists
+     self._submit(onv.nvm(4, nvg.NVC6C0_SET_OBJECT, iface.dma_class))
+     # TGCU_TS_G / TGCU_TS_C (microseconds): the graphics/compute group's and the copy group's RM time slice (both 1024 by default).  A short compute slice lets the copy
+@@ -915,7 +917,8 @@
+   # ---- pre-armed handshake transfers (STRATA_HS_PRE): the copy engine pulls the doorbell payload the moment the GPU raises
+   # the ring word, with no host poll / arm / submit after the ring; the y push + flag is one gated job submitted before the
+   # CPU computes, so only the arm and the bulk OUT are left once the rows exist.
+-  def _d2h_cmds(self, src:int, n:int, gate_va:int, want:int, hold:int|None=None) -> list[int]:
++  def _d2h_cmds(self, src, n:int, gate_va:int, want:int, hold:int|None=None) -> list[int]:
++    # src: a device VA (one copy of n bytes) or, with TGCU_PULL_PACK, a list of (va, nbytes) gathered back to back into the staging SRAM (n = their total)
+     nvg, nvm = onv.nv_gpu, onv.nvm
+     self.sem_value += 1
+     sem = self.va + self.sem_off
+@@ -926,10 +929,13 @@
+                   onv.nv_flags("NVC56F_SEM_EXECUTE", operation="acquire", payload_size="32bit"))
+     cmds += nvm(0, nvg.NVC56F_SEM_ADDR_LO, gate_va & 0xffffffff, gate_va >> 32, want & 0xffffffff, 0,
+                 onv.nv_flags("NVC56F_SEM_EXECUTE", operation="acq_strict_geq", payload_size="32bit"))
+-    cmds += nvm(4, nvg.NVC6B5_OFFSET_IN_UPPER, src >> 32, src & 0xffffffff, self.sram_va >> 32, self.sram_va & 0xffffffff)
+-    cmds += nvm(4, nvg.NVC6B5_LINE_LENGTH_IN, n)
+-    cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", data_transfer_type="non_pipelined",
+-                                                         src_memory_layout="pitch", dst_memory_layout="pitch"))
++    pos = 0
++    for sva, sn in (src if isinstance(src, list) else [(src, n)]):
++      dva = self.sram_va + pos; pos += sn
++      cmds += nvm(4, nvg.NVC6B5_OFFSET_IN_UPPER, sva >> 32, sva & 0xffffffff, dva >> 32, dva & 0xffffffff)
++      cmds += nvm(4, nvg.NVC6B5_LINE_LENGTH_IN, sn)
++      cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", data_transfer_type="non_pipelined",
++                                                           src_memory_layout="pitch", dst_memory_layout="pitch"))
+     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, self.cq_va >> 32, self.cq_va & 0xffffffff, 0)
+     cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
+     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, sem >> 32, sem & 0xffffffff, self.sem_value & 0xffffffff)
+@@ -939,7 +945,7 @@
+   def _rd_arm(self, wire:int):
+     self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
+ 
+-  def d2h_arm(self, src:int, n:int, gate_va:int, want:int):
++  def d2h_arm(self, src, n:int, gate_va:int, want:int):
+     assert n <= self.CHUNK
+     wire = round_up(self.prefix + n, 512)
+     self._rd_arm(wire)
+@@ -949,7 +955,8 @@
+   def d2h_release(self):
+     # arm the bulk IN, then open the hold word: the queued (deferred) pull may now ring the bridge
+     wire, n = self._rd
+-    self._rd_arm(wire)
++    if self._rd_early: self._rd_early = False
++    else: self._rd_arm(wire)
+     self.hold_tok += 1
+     if _POKE1 & 4: _w32(self.ctx.mapped_mv, self.hold_off, self.hold_tok)
+     else: self.ctx.mapped_mv[self.hold_off:self.hold_off + 4] = struct.pack("<I", self.hold_tok)
+@@ -958,6 +965,10 @@
+     wire, n = self._rd
+     return self.usb.usb.bulk_read(wire, timeout=timeout)[self.prefix:self.prefix + n]   # a view of the USB buffer, valid until the next bulk transfer: the caller copies it out at once
+ 
++  def _wr_arm(self):
++    wire = self._wr[0]
++    self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
++
+   def h2d_pre(self, dsts:list[tuple[int, int]], nxt:tuple|None=None) -> list[int]:
+     # dsts = [(vram va, nbytes multiple of 4)]; the payload is their concatenation. Queue ONE gated job (acquire on the sentinel,
+     # then one copy per destination, ordered by a flushing release in between); returns each part's offset in the payload.
+@@ -984,13 +995,18 @@
+         cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
+     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, sem >> 32, sem & 0xffffffff, self.sem_value & 0xffffffff)
+     cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
+-    if nxt is not None:   # (src va, nbytes, seq gate va, want): the next ring's pull, held until d2h_release()
++    if nxt is not None:   # (src va or [(va, nbytes)], nbytes, seq gate va, want): the next ring's pull, held until d2h_release()
+       src, n, gva, want = nxt
+       assert n <= self.CHUNK
+       cmds += self._d2h_cmds(src, n, gva, want, hold=self.hold_tok + 1)
+       self._rd = (round_up(self.prefix + n, 512), n)
+     self._submit(cmds)
+     self._wr = (wire, gate, o)
++    if _ARM_EARLY and nxt is not None:   # the arms need only the wire sizes: do them now, while the Mac computes
++      if _ARM_EARLY == 2: self._rd_arm(self._rd[0]); self._rd_early = True
++      self._wr_arm()
++      if _ARM_EARLY == 3: self._rd_arm(self._rd[0]); self._rd_early = True
++      self._wr_early = True
+     return pos
+ 
+   def h2d_go(self, parts:list[bytes]):
+@@ -999,7 +1015,8 @@
+     p = 0
+     for b in parts: buf[p:p + len(b)] = b; p += len(b)
+     buf[wire - 8:] = struct.pack("<Q", gate)
+-    self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
++    if self._wr_early: self._wr_early = False
++    else: self._wr_arm()
+     self.usb.usb.bulk_write(buf)   # a bytearray: bulk_write copies it into its C buffer, no extra bytes() copy
+ 
+ # *** TGCU_HSPROF=1 (diagnostic, HostTailAndPrefill 2026-10-12): per-call wall time of the handshake path + USB transfer counts, printed every 480 rings ***
+diff --git a/shim/tgcu_api.py b/shim/tgcu_api.py
+--- a/shim/tgcu_api.py
++++ b/shim/tgcu_api.py
+@@ -322,8 +322,18 @@
+ def _seg(b:int, off:int, n:int) -> tuple[int, int, int]:   # (region base, aligned start, aligned end) of a host range
+     size = mapped[b][1]
+     return b, off & ~3, min(size, (off + n + 3) & ~3)
++_PULL_PACK = int(os.getenv("TGCU_PULL_PACK", "0"))   # 1: the pull gathers only the ring's segments (x rows, ids, w) into the staging SRAM back to back (one CE copy each) instead of the contiguous arena span between them
++def _pull_parts(ss:list):   # [(device va, nbytes)] of the segments, their total
++    parts = [(ctx.mapped_va + mapped[b][2] + a, e - a) for b, a, e in ss]
++    return parts, sum(n for _, n in parts)
+ def hs_arm(segs:list, gb:int, goff:int, want:int) -> int:
+     ss = [_seg(*s) for s in segs]
++    if _PULL_PACK:
++        parts, tot = _pull_parts(ss)
++        if tot > ctx.ace.CHUNK: return -2
++        ctx.ace.d2h_arm(parts, tot, mapped[gb][0] + goff, want)
++        _hs["rd"] = (None, ss)
++        return 0
+     lo = min(mapped[b][2] + a for b, a, e in ss); hi = max(mapped[b][2] + e for b, a, e in ss)
+     if hi - lo > ctx.ace.CHUNK: return -2
+     ctx.ace.d2h_arm(ctx.mapped_va + lo, hi - lo, mapped[gb][0] + goff, want)
+@@ -334,6 +344,10 @@
+     try: data = ctx.ace.d2h_collect(timeout_ms)
+     except Exception as e:
+         print(f"[tgcu] hs_wait failed: {e!r}", file=sys.stderr, flush=True); return -1
++    if lo is None:
++        pos = 0
++        for b, a, e in ss: _mv(b + a, e - a)[:] = data[pos:pos + e - a]; pos += e - a
++        return 0
+     for b, a, e in ss: _mv(b + a, e - a)[:] = data[mapped[b][2] + a - lo:mapped[b][2] + e - lo]
+     return 0
+ def hs_push_pre(segs:list) -> int:
+@@ -344,6 +358,12 @@
+ def hs_push_pre_next(segs:list, nsegs:list, gb:int, goff:int, want:int) -> int:
+     # the rows + flag job AND the next ring's pull (held until hs_release), in one submission
+     ss = [_seg(*s) for s in segs]; ns = [_seg(*s) for s in nsegs]
++    if _PULL_PACK:
++        parts, tot = _pull_parts(ns)
++        if tot > ctx.ace.CHUNK: return -2
++        ctx.ace.h2d_pre([(mapped[b][0] + a_, e - a_) for b, a_, e in ss], (parts, tot, mapped[gb][0] + goff, want))
++        _hs["wr"] = ss; _hs["rd"] = (None, ns)
++        return 0
+     lo = min(mapped[b][2] + a_ for b, a_, e in ns); hi = max(mapped[b][2] + e for b, a_, e in ns)
+     if hi - lo > ctx.ace.CHUNK: return -2
+     ctx.ace.h2d_pre([(mapped[b][0] + a_, e - a_) for b, a_, e in ss], (ctx.mapped_va + lo, hi - lo, mapped[gb][0] + goff, want))
+@@ -471,11 +491,9 @@
+ RING_N = int(os.getenv("TGCU_LAUNCH_RING", "0"))   # keep the last N eager launches (name, grid, params); a GPU timeout prints them with every device-address parameter resolved to chunk + offset
+ _ring: collections.deque = collections.deque(maxlen=max(RING_N, 1))
+ def _ring_dump():
+-  _p = lambda s: print(s, file=sys.stderr, flush=True)   # Decode5: stderr (the engine log); the stdout lines of the embedded interpreter go nowhere
+-  _p(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}")
+-  for ci, ch in enumerate(ctx.chunks): _p(f"[tgcu RING] chunk {ci}: base {ch['base']:#x} size {ch['size'] >> 20} MiB")
++  print(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}", flush=True)
+   for name, g, b, prm, sv in _ring:
+-    _p(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B")
++    print(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B", flush=True)
+     for i in range(0, len(prm) - 7, 8):
+       w = struct.unpack_from("<Q", prm, i)[0]
+       if w < 0x1000000000 or w >= 0x40000000000: continue
+@@ -483,8 +501,8 @@
+       for ci, ch in enumerate(ctx.chunks):
+         if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD:
+           where = f"chunk {ci} (size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
+-      _p(f"[tgcu RING]     word@{i}: {w:#x} -> {where}")
+-    _p(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}")
++      print(f"[tgcu RING]     word@{i}: {w:#x} -> {where}", flush=True)
++    print(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}", flush=True)
+ if RING_N: tgcu.RING_HOOK = _ring_dump
+ _bad_launch: set = set()
+ def _check_launch(k, g, b, shmem) -> str:

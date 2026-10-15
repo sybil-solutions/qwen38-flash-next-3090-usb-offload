@@ -1,0 +1,236 @@
+# Decode14 (2026-10-14): the cuMem* virtual-memory API on top of tinygrad's NV memory manager
+# (cuMemAddressReserve/Create/Map/SetAccess/Unmap/Release, granularity 2 MiB, cuDeviceGetAttribute VMM) so Strata's
+# elastic K/V (--kv-grow, strata patch 0018) works: Context.vmm_* with a batched PTE writer (600 chunks map in 17.5 ms),
+# mem_info counts the VMM chunks; tgcudart.cpp: the driver-API entry points (TGCU_VMM=0 hides them).
+# Base: patches/shim/base/ (the host-tail shim, git 25ae464) + the earlier shim patches; `git apply -p1` in a directory that holds shim/<file>.
+
+diff --git a/shim/tgcu.py b/shim/tgcu.py
+--- a/shim/tgcu.py
++++ b/shim/tgcu.py
+@@ -290,6 +290,78 @@
+       return
+     self.synchronize()   # cudaFree semantics: the block may be reused right away
+     self._release(va)
++  # *** CUDA virtual memory (cuMem*; the engine's --kv-grow / vmm.hpp, reached through tgcudart's driver entry points): an address range is reserved with nothing behind it, 2 MiB
++  # physical chunks are created on their own and mapped into / unmapped from it by address.  The chunks come straight from tinygrad's physical pool (palloc) and the ranges from its
++  # VA allocator, so no tgcu chunk is involved; the chunks count in mem_info (vmm_phys).  A mapped chunk is not zeroed here (the cuMemCreate contract): the caller clears what it needs.
++  # PTE writes are batched: tinygrad's map_range / unmap_range cost 1.6 / 1.5 ms per 2 MiB chunk over the USB link (every PTE is read back and written alone), so cuMemMap / cuMemUnmap only
++  # queue, and the queue is written to the page tables as ONE bulk write per page-table page (512 chunks) when the caller commits (cuMemSetAccess) or touches the address space in another
++  # way (create / release / free / the next map or unmap): nothing can reach a queued mapping before cuMemSetAccess (the CUDA contract), and a queued unmap leaves the old page mapped
++  # until the flush, which is harmless to anything that no longer uses it.
++  VMM_GRAN = 2 << 20
++  vmm_phys, vmm_synced = 0, -1
++  vmm_maps: dict[int, int] = {}       # chunk address -> physical address, as written to the page tables
++  vmm_pend_map: dict[int, int] = {}   # chunk address -> physical address: maps not written yet
++  vmm_pend_unmap: list[int] = []      # chunk addresses to unmap at the next flush
++  def vmm_reserve(self, size:int) -> int:
++    return self.iface.dev_impl.mm.alloc_vaddr(round_up(size, self.VMM_GRAN), align=self.VMM_GRAN)
++  def vmm_free_va(self, va:int):
++    self.vmm_flush()
++    self.iface.dev_impl.mm.va_allocator.free(va)
++  def vmm_create(self) -> int:   # a handle (physical address + 1; 0 = out of memory)
++    try: pa = self.iface.dev_impl.mm.palloc(self.VMM_GRAN, align=self.VMM_GRAN, zero=False)
++    except MemoryError: return 0
++    self.vmm_phys += self.VMM_GRAN
++    return pa + 1
++  def vmm_release(self, h:int):
++    self.vmm_flush()   # a page that is still mapped must not go back to the pool
++    self.iface.dev_impl.mm.pfree(h - 1)
++    self.vmm_phys -= self.VMM_GRAN
++  def vmm_map(self, va:int, h:int):
++    if va in self.vmm_pend_map or (va in self.vmm_maps and va not in self.vmm_pend_unmap): raise AssertionError(f"vmm chunk {va:#x} is already mapped")
++    self.vmm_pend_map[va] = h - 1
++  def vmm_unmap(self, va:int):
++    if va in self.vmm_pend_map: del self.vmm_pend_map[va]; return   # never written
++    if va not in self.vmm_maps or va in self.vmm_pend_unmap: raise AssertionError(f"vmm chunk {va:#x} is not mapped")
++    self.vmm_pend_unmap.append(va)
++  def vmm_flush(self):
++    if not self.vmm_pend_unmap and not self.vmm_pend_map: return
++    if self.vmm_pend_unmap:
++      if self.pending or self.vmm_synced != self.sem_value:   # work queued so far must not run on a page that goes away (the engine quiesces first: this is then one cheap check)
++        self.flush(); self.synchronize(); self.vmm_synced = self.sem_value
++      vas = sorted(self.vmm_pend_unmap); self.vmm_pend_unmap = []
++      self._vmm_write(vas, None)
++      for va in vas: del self.vmm_maps[va]
++    if self.vmm_pend_map:
++      items = sorted(self.vmm_pend_map.items()); self.vmm_pend_map = {}
++      self._vmm_write([va for va, _ in items], [pa for _, pa in items])
++      self.vmm_maps.update(items)
++    self.iface.dev_impl.mm.on_range_mapped()   # one GPU TLB flush for the batch
++  def _vmm_write(self, vas:list[int], pas:list[int]|None):
++    # Page-table entries for the chunks `vas` (sorted, 2 MiB aligned): physical `pas` (pas None: invalid entries).  The entries of a run of chunks that share a page table are
++    # encoded by tinygrad's own set_entry (a stand-in page whose writes are collected) and go to VRAM in one bulk write.
++    import struct as _st
++    from tinygrad.runtime.support.memory import AddrSpace, PageTableTraverseContext
++    from tinygrad.runtime.support.nv.nvdev import NVPageTableEntry
++    dev = self.iface.dev_impl; mm = dev.mm; G = self.VMM_GRAN
++    class Cap:   # what set_entry stores, by entry index
++      def __init__(s, pt): s.nvdev, s.lv, s.entries = pt.nvdev, pt.lv, {}
++      def _is_dual_pde(s): return s.lv == s.nvdev.mm.level_cnt - 2
++    i = 0
++    while i < len(vas):
++      ctx = PageTableTraverseContext(dev, mm.root_page_table, vas[i], create_pts=pas is not None)
++      for _, pt, idx, _cnt, covers in ctx.next(G, paddr=pas[i] if pas is not None else None): break
++      assert covers == G, f"vmm chunk {vas[i]:#x}: the 2 MiB entry is at a page table level that covers {covers:#x}"
++      k = 1
++      while i + k < len(vas) and idx + k < mm.pte_cnt[pt.lv] and vas[i + k] == vas[i] + k * G: k += 1
++      cap = Cap(pt)
++      for j in range(k):
++        if pas is not None: NVPageTableEntry.set_entry(cap, idx + j, pas[i + j], uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=mm._frag_size(vas[i + j], G), valid=True)
++        else: NVPageTableEntry.set_entry(cap, idx + j, 0, valid=False)
++      w = 2 if cap._is_dual_pde() else 1
++      lo, n = w * idx, w * k
++      assert sorted(cap.entries) == list(range(lo, lo + n)), "vmm: the page-table writes are not one contiguous run"
++      pt.entries[lo:lo + n] = _st.pack(f"<{n}Q", *[cap.entries[lo + j] for j in range(n)])
++      i += k
+   def mapped_alloc(self, size:int) -> tuple[int, int]:  # (device va, offset in the BAR-visible mapped arena)
+     off = self.mapped_head
+     self.mapped_head = round_up(off + size, 0x1000)
+diff --git a/shim/tgcu_api.py b/shim/tgcu_api.py
+--- a/shim/tgcu_api.py
++++ b/shim/tgcu_api.py
+@@ -70,8 +70,34 @@
+                                                                         # (only with TGCU_TOP_RESERVE_MIB, which keeps the chunks out of the dead top)
+ def mem_info() -> tuple[int, int]:
+   total = 24 << 30
+-  used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"])
++  used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"]) + ctx.vmm_phys   # + the VMM chunks (cuMemCreate)
+   return total - used - MEMINFO_FIXED, total
++# CUDA virtual memory (tgcudart's cuMem* entry points): vmm_reserve / vmm_create return an address / handle (0 = failure), the others 0 = success
++VMM_LOG = os.getenv("TGCU_VMM_LOG", "0") != "0"
++def vmm_reserve(size:int) -> int:
++  try: va = ctx.vmm_reserve(size)
++  except Exception as e: print(f"[tgcu] vmm_reserve({size}) failed: {type(e).__name__}: {e}", flush=True); return 0
++  if VMM_LOG: print(f"[tgcu vmm] reserve {size >> 20} MiB -> {va:#x}", flush=True)
++  return va
++def vmm_free_va(va:int, size:int) -> int:
++  ctx.vmm_free_va(va)
++  if VMM_LOG: print(f"[tgcu vmm] free range {va:#x} ({size >> 20} MiB)", flush=True)
++  return 0
++def vmm_create() -> int: return ctx.vmm_create()
++def vmm_release(h:int) -> int:
++  ctx.vmm_release(h); return 0
++def vmm_map(va:int, h:int) -> int:
++  try: ctx.vmm_map(va, h)
++  except Exception as e: print(f"[tgcu] vmm_map({va:#x}) failed: {type(e).__name__}: {e}", flush=True); return 1
++  return 0
++def vmm_commit() -> int:   # cuMemSetAccess: the queued maps / unmaps go to the page tables now
++  try: ctx.vmm_flush()
++  except Exception as e: print(f"[tgcu] vmm_commit failed: {type(e).__name__}: {e}", flush=True); return 1
++  return 0
++def vmm_unmap(va:int) -> int:
++  try: ctx.vmm_unmap(va)
++  except Exception as e: print(f"[tgcu] vmm_unmap({va:#x}) failed: {type(e).__name__}: {e}", flush=True); return 1
++  return 0
+ 
+ # TGCU_H2D_RELAX=1: a bulk host->device push (>= PIPE_MIN, the prompt lane's y rows) waits only for the launches that name its destination range as a kernel
+ # argument, not for the whole GPU (cudaMemcpy is stream-ordered, and the engine's lockstep keeps the next chunk's front running behind it).  A range pushed
+diff --git a/shim/tgcudart.cpp b/shim/tgcudart.cpp
+--- a/shim/tgcudart.cpp
++++ b/shim/tgcudart.cpp
+@@ -516,7 +516,10 @@
+ size_t g_lazy_bytes = 0;
+ uint64_t g_lazy_clock = 0;
+ const size_t kLazyBudget = [] { const char* e = getenv("TGCU_LAZY_D2H_MB"); return (size_t)(e ? atoll(e) : 768) << 20; }();
+-const size_t kLazyMin = 1 << 20;
++// TGCU_LAZY_MIN_MB (default 1): the smallest device-to-host copy that is kept in VRAM and downloaded on first touch.  Prefill600: the prompt lane's 10 MB MoE-input
++// copy per chunk-layer was lazy too (a VRAM shadow malloc + d2d + submit before, a fault + free after: ~4 ms of the 88 ms chunk-layer period); a 16+ keeps the
++// 118 MB conversation checkpoints lazy and sends the lane's x straight down.
++const size_t kLazyMin = [] { const char* e = getenv("TGCU_LAZY_MIN_MB"); return (size_t)(e ? atoll(e) : 1) << 20; }();
+ const bool g_lazy_verbose = getenv("TGCU_LAZY_VERBOSE") != nullptr;
+ static bool lazy_still_protected(const Lazy& z) {   // a freed-and-reused range is mapped afresh: not ours any more
+   mach_vm_address_t at = z.lo;                       // every VM entry over [lo, hi) must still be inaccessible
+@@ -1006,13 +1009,87 @@
+ EXPORT cudaError_t cudaPeekAtLastError() { return t_last; }
+ EXPORT const char* cudaGetErrorString(cudaError_t e) { return err_name(e); }
+ EXPORT const char* cudaGetErrorName(cudaError_t e) { return err_name(e); }
+-// no driver API: VMM (cuMem*) users must fall back to cudaMalloc
+-EXPORT cudaError_t cudaGetDriverEntryPoint(const char*, void** fn, unsigned long long, cudaDriverEntryPointQueryResult* st) {
+-  *fn = nullptr; if (st) *st = cudaDriverEntryPointSymbolNotFound; return cudaErrorNotSupported;
+-}
+-EXPORT cudaError_t cudaGetDriverEntryPointByVersion(const char*, void** fn, unsigned, unsigned long long, cudaDriverEntryPointQueryResult* st) {
+-  *fn = nullptr; if (st) *st = cudaDriverEntryPointSymbolNotFound; return cudaErrorNotSupported;
++// *** CUDA virtual memory (cuMem*) ***
++// Strata's vmm.cpp resolves these through cudaGetDriverEntryPoint (the elastic K/V, --kv-grow): an address range reserved with no memory behind it, 2 MiB physical chunks created on
++// their own, mapped into / unmapped from the range.  The work is tgcu.Context.vmm_* (tinygrad's physical pool + GPU page tables); TGCU_VMM=0 hides the entry points again.
++// A reserved range is registered in g_dev, so memcpy kinds / pointer attributes see it as device memory.
++namespace {
++const size_t kVmmGran = 2u << 20;
++#define VMM_ENTER std::lock_guard<std::recursive_mutex> _lk(g_lock); \
++  if (!ensure_init()) return CUDA_ERROR_NOT_INITIALIZED; \
++  Gil _gil; \
++  flush_dirty(); \
++  lazy_reap();
++CUresult vmm_DeviceGetAttribute(int* v, CUdevice_attribute a, CUdevice) {
++  if (a != CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED) return CUDA_ERROR_NOT_SUPPORTED;
++  *v = 1;
++  return CUDA_SUCCESS;
+ }
++CUresult vmm_GetAllocationGranularity(size_t* g, const CUmemAllocationProp*, CUmemAllocationGranularity_flags) { *g = kVmmGran; return CUDA_SUCCESS; }
++CUresult vmm_AddressReserve(CUdeviceptr* p, size_t size, size_t, CUdeviceptr addr, unsigned long long) {
++  if (addr != 0 || size == 0) return CUDA_ERROR_NOT_SUPPORTED;   // the range is 2 MiB aligned (ranges are TLSF blocks of at least that alignment)
++  VMM_ENTER
++  const size_t n = (size + kVmmGran - 1) / kVmmGran * kVmmGran;
++  long long va = call_i("vmm_reserve", "(K)", (unsigned long long)n);
++  if (va <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
++  g_dev[(uint64_t)va] = n;
++  *p = (CUdeviceptr)va;
++  return CUDA_SUCCESS;
++}
++CUresult vmm_AddressFree(CUdeviceptr p, size_t size) {
++  VMM_ENTER
++  if (!g_dev.erase((uint64_t)p)) return CUDA_ERROR_INVALID_VALUE;
++  call_i("vmm_free_va", "(KK)", (unsigned long long)p, (unsigned long long)size);
++  return CUDA_SUCCESS;
++}
++CUresult vmm_Create(CUmemGenericAllocationHandle* h, size_t size, const CUmemAllocationProp*, unsigned long long) {
++  if (size != kVmmGran) return CUDA_ERROR_INVALID_VALUE;
++  VMM_ENTER
++  long long r = call_i("vmm_create", nullptr);
++  if (r <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
++  *h = (CUmemGenericAllocationHandle)r;
++  return CUDA_SUCCESS;
++}
++CUresult vmm_Release(CUmemGenericAllocationHandle h) {
++  VMM_ENTER
++  call_i("vmm_release", "(K)", (unsigned long long)h);
++  return CUDA_SUCCESS;
++}
++CUresult vmm_Map(CUdeviceptr p, size_t size, size_t offset, CUmemGenericAllocationHandle h, unsigned long long) {
++  if (size != kVmmGran || offset != 0 || h == 0 || (p % kVmmGran)) return CUDA_ERROR_INVALID_VALUE;
++  VMM_ENTER
++  return call_i("vmm_map", "(KK)", (unsigned long long)p, (unsigned long long)h) == 0 ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY;
++}
++CUresult vmm_Unmap(CUdeviceptr p, size_t size) {
++  if (size != kVmmGran || (p % kVmmGran)) return CUDA_ERROR_INVALID_VALUE;
++  VMM_ENTER
++  return call_i("vmm_unmap", "(K)", (unsigned long long)p) == 0 ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
++}
++CUresult vmm_SetAccess(CUdeviceptr, size_t, const CUmemAccessDesc*, size_t) {   // a mapped chunk is read/write for the one GPU; the queued maps are written to the page tables here
++  VMM_ENTER
++  return call_i("vmm_commit", nullptr) == 0 ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY;
++}
++void* vmm_entry(const char* n) {
++  static const bool off = [] { const char* e = getenv("TGCU_VMM"); return e && e[0] == '0'; }();
++  if (off) return nullptr;
++  struct E { const char* name; void* fn; };
++  static const E tab[] = {{"cuDeviceGetAttribute", (void*)vmm_DeviceGetAttribute}, {"cuMemGetAllocationGranularity", (void*)vmm_GetAllocationGranularity},
++    {"cuMemAddressReserve", (void*)vmm_AddressReserve}, {"cuMemAddressFree", (void*)vmm_AddressFree}, {"cuMemCreate", (void*)vmm_Create},
++    {"cuMemRelease", (void*)vmm_Release}, {"cuMemMap", (void*)vmm_Map}, {"cuMemUnmap", (void*)vmm_Unmap}, {"cuMemSetAccess", (void*)vmm_SetAccess}};
++  for (const E& e : tab) if (!strcmp(e.name, n)) return e.fn;
++  return nullptr;
++}
++}  // namespace
++EXPORT cudaError_t cudaGetDriverEntryPoint(const char* name, void** fn, unsigned long long, cudaDriverEntryPointQueryResult* st) {
++  *fn = vmm_entry(name);
++  if (st) *st = *fn ? cudaDriverEntryPointSuccess : cudaDriverEntryPointSymbolNotFound;
++  return *fn ? cudaSuccess : cudaErrorNotSupported;
++}
++EXPORT cudaError_t cudaGetDriverEntryPointByVersion(const char* name, void** fn, unsigned, unsigned long long, cudaDriverEntryPointQueryResult* st) {
++  *fn = vmm_entry(name);
++  if (st) *st = *fn ? cudaDriverEntryPointSuccess : cudaDriverEntryPointSymbolNotFound;
++  return *fn ? cudaSuccess : cudaErrorNotSupported;
++}
+ 
+ // built-in kernels (memset, memcpy, cuBLAS stand-in) by name, with cudaLaunchKernel-style argument pointers
+ EXPORT int tgcu_builtin_launch(const char* name, unsigned gx, unsigned gy, unsigned bx, void** args, cudaStream_t st) {

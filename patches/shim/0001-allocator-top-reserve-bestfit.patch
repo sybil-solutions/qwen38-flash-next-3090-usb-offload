@@ -1,0 +1,237 @@
+# Decode3/4 (2026-10-12/13): tgcu allocator and diagnostics. TGCU_TOP_RESERVE_MIB keeps the chunks out of the dead top
+# of the VRAM pool (the top ~170 MiB cannot be used), TGCU_BESTFIT=1 serves allocations from the smallest fitting free
+# hole, TGCU_MEMINFO_FIXED_MIB (the constant cudaMemGetInfo subtracts for everything outside the chunks, default 1024),
+# TGCU_MEMLOG, TGCU_SYNC_EACH, TGCU_WAIT_S, TGCU_HANG_DUMP=2 (stacks only; =1 probes the card on a hang and can hang the
+# host); tgcu_api.py: the parameter decode printed on a GPU timeout.
+# Base: patches/shim/base/ (the host-tail shim, git 25ae464) + the earlier shim patches; `git apply -p1` in a directory that holds shim/<file>.
+
+diff --git a/shim/tgcu.py b/shim/tgcu.py
+--- a/shim/tgcu.py
++++ b/shim/tgcu.py
+@@ -2,11 +2,14 @@
+ # tinygrad boots the GPU (GSP, VA space, channels); this module loads nvcc cubins itself, builds QMDs, chains launches into
+ # batches and submits them on tinygrad's compute ring. Bulk copies go through tinygrad's USB copy path.
+ from __future__ import annotations
+-import struct, re, os, time, array
++import struct, re, os, time, array, sys
+ _WAIT_S = float(os.getenv("TGCU_WAIT_S", "0"))       # diagnostic: raise the GPU-wait timeout (the default is the caller's, 10 s)
++RING_HOOK = None                                    # set by tgcu_api under TGCU_LAUNCH_RING: prints the last eager launches with their device pointers resolved
+ HANG_HOOK = None                                    # set by tgcu_api: prints the handshake regions
+-_HANG_DUMP = os.getenv("TGCU_HANG_DUMP") == "1"      # diagnostic: dump every thread + a native `sample` 8 s into a GPU wait
++_HANG_DUMP = os.getenv("TGCU_HANG_DUMP") in ("1", "2")      # diagnostic: dump every thread + a native `sample` 8 s into a GPU wait
+ _FREE_DEFER = os.getenv("TGCU_FREE_DEFER", "0") != "0"   # cudaFree queues the pending work and hands the block back once it has completed, instead of a full synchronize per free (the lazy x shadows of the prompt lane: 6.9 ms x 1 per chunk-layer)
++_TOP_RESERVE = int(os.getenv("TGCU_TOP_RESERVE_MIB", "0")) << 20   # the top part of the physical pool the GPU cannot use: a memset of physical 24346..24410 MiB hung the 3090 (test_vram_top.py); the pool ends at 24512 MiB, so 167 MiB.  0 = off
++_BESTFIT = os.getenv("TGCU_BESTFIT", "0") != "0"       # malloc takes the smallest free hole that fits (first fit left no 112 MiB hole after a few prompts -> a new chunk every group)
+ from tinygrad.runtime.support import usb as _usbmod
+ from dataclasses import dataclass, field
+ from tinygrad import Device
+@@ -151,6 +154,16 @@
+ 
+ # *** context: memory, submission ***
+ 
++_MEMLOG = os.getenv("TGCU_MEMLOG", "0") != "0"
++def _memlog(ctx, ev:str, sz:int, extra:str=""):
++  # TGCU_MEMLOG=1: one stderr line per malloc/free >= 4 MiB and per new chunk: chunk bytes, free bytes inside chunks, deferred frees, physical free (tinygrad TLSF)
++  import sys
++  mm = ctx.iface.dev_impl.mm
++  def tl(a): return sum(v[0] for v in a.blocks.values() if v[3])
++  chb = sum(c["size"] + ctx.GUARD for c in ctx.chunks); frb = sum(n for c in ctx.chunks for _, n in c["free"]); lfb = max([n for c in ctx.chunks for _, n in c["free"]] or [0])
++  cv = mm.cpu_visible_pa_allocator
++  print(f"[tgcu-mem] {ev} {sz/1048576:.2f}MiB {extra} chunks={len(ctx.chunks)} chunkMiB={chb>>20} inchunkfreeMiB={frb>>20} largestFreeMiB={lfb>>20} deferred={len(ctx.deferred)} paFreeMiB={tl(mm.pa_allocator)>>20} cvFreeMiB={(tl(cv)>>20) if cv else -1} t={time.time():.1f}", file=sys.stderr, flush=True)
++
+ class Context:
+   CTRL_SIZE, CODE_SIZE, MAPPED_SIZE = 32 << 20, 256 << 20, 48 << 20   # BAR1-visible pool is small
+   TRANSIENT = int(os.getenv("TGCU_TRANSIENT_BYTES", str(CTRL_SIZE // 2)))   # the transient half of the control arena (test knob: a small ring wraps often)
+@@ -160,6 +173,7 @@
+     _ = self.dev.fifos  # brings up the compute and copy channels
+     self.fifo = self.dev.fifos["COMPUTE:0"]
+     self.iface = self.dev.iface
++    if _TOP_RESERVE: self._claim_top()
+     self.nvg = onv.nv_gpu
+     # cpu-visible control arena: queued QMDs + constant buffers, pushbuffers, semaphores
+     self.ctrl = self.iface.alloc(self.CTRL_SIZE, cpu_access=True)
+@@ -191,6 +205,7 @@
+   _enc_cache: dict = {}
+   def _release(self, va:int):
+     ch, sz = self.allocs.pop(va)
++    if _MEMLOG and sz >= (4 << 20): _memlog(self, "free", sz, f"chunk={self.chunks.index(ch)} off={(va-ch['base'])>>20}")
+     free, off = ch["free"], va - ch["base"]
+     free.append((off, sz)); free.sort()
+     merged = []
+@@ -207,30 +222,66 @@
+       if sem <= done: self._release(va)
+       else: keep.append((va, sem))
+     self.deferred = keep
+-  def malloc(self, size:int) -> int:
+-    sz = round_up(max(size, 1), self.ALIGN)
+-    if self.deferred: self._reap()
+-    for attempt in (0, 1):
+-      for ch in self.chunks:
+-        free = ch["free"]
+-        for i, (off, n) in enumerate(free):
+-          if n >= sz:
+-            if n == sz: free.pop(i)
+-            else: free[i] = (off + sz, n - sz)
+-            va = ch["base"] + off
+-            self.allocs[va] = (ch, sz)
+-            return va
+-      if attempt == 0 and self.deferred: self._reap(True)   # no room: wait for the freed blocks before a new chunk is carved
+-      else: break
++  def _fit(self, sz:int) -> int|None:
++    best = None   # (hole size, chunk, index, offset)
++    for ch in self.chunks:
++      for i, (off, n) in enumerate(ch["free"]):
++        if n >= sz:
++          if not _BESTFIT:
++            best = (n, ch, i, off); break
++          if best is None or n < best[0]:
++            best = (n, ch, i, off)
++            if n == sz: break
++      if best is not None and (not _BESTFIT or best[0] == sz): break
++    if best is None: return None
++    n, ch, i, off = best
++    free = ch["free"]
++    if n == sz: free.pop(i)
++    else: free[i] = (off + sz, n - sz)
++    va = ch["base"] + off
++    self.allocs[va] = (ch, sz)
++    if _MEMLOG and sz >= (4 << 20): _memlog(self, "malloc", sz, f"chunk={self.chunks.index(ch)} off={off>>20}")
++    return va
++  def _claim_top(self):
++    # The top _TOP_RESERVE bytes of the physical pool are not usable (a memset of physical 24346..24410 MiB hung the 3090: test_vram_top.py) and tinygrad's TLSF is a
++    # smallest-fit allocator, not a bottom-up one, so merely counting the free bytes does not keep a chunk out of them: take the highest free block's tail now, while
++    # the pool is pristine, and never give it back.
++    a = self.iface.dev_impl.mm.pa_allocator
++    start = max(s for s, v in a.blocks.items() if v[3])
++    size = a.blocks[start][0]
++    assert start + size == a.size and size >= _TOP_RESERVE, f"top free block {start:#x}+{size:#x} does not reach the pool end {a.size:#x} / is smaller than the reserve"
++    keep = size - _TOP_RESERVE
++    if keep: a._split_block(start, size, keep); start += keep
++    a._remove_block(start, _TOP_RESERVE)
++    self.top_claim = (start + a.base, _TOP_RESERVE)
++    print(f"[tgcu] top of the physical pool claimed: {(start + a.base) / 1048576:.0f}..{(start + a.base + _TOP_RESERVE) / 1048576:.0f} MiB, never used", file=sys.stderr, flush=True)
++  def _new_chunk(self, sz:int) -> int:
+     csize = max(self.CHUNK, round_up(sz, 2 << 20))
+-    st = self.iface.alloc(csize + self.GUARD)
++    if _TOP_RESERVE and sz >= (32 << 20): csize = round_up(sz, 2 << 20)   # a big request gets a chunk of exactly its size (a 256 MiB chunk for a 112 MiB buffer strands the tail)
++    if _MEMLOG: _memlog(self, "NEWCHUNK-begin", csize + self.GUARD, f"req={sz>>20}MiB")
++    try: st = self.iface.alloc(csize + self.GUARD)
++    except MemoryError:   # the pool is nearly full: a small request takes just what it needs
++      if csize == round_up(sz, 2 << 20): raise
++      csize = round_up(sz, 2 << 20)
++      st = self.iface.alloc(csize + self.GUARD)
+     # as from the CUDA driver, fresh device memory reads as zeros (kernels that reset their own counters rely on it)
+     # (finished before the block is handed out: copy-engine writes into it, e.g. a graph's launch chain, are not queued)
+     if self.zero_fn is not None: self.zero_fn(st.buf, csize + self.GUARD)
+     ch = {"st": st, "base": st.buf, "size": csize, "free": [(sz, csize - sz)] if csize > sz else []}
+     self.chunks.append(ch)
+     self.allocs[st.buf] = (ch, sz)
++    if _MEMLOG: _memlog(self, "NEWCHUNK-done", csize + self.GUARD, f"req={sz>>20}MiB")
+     return st.buf
++  def malloc(self, size:int) -> int:
++    sz = round_up(max(size, 1), self.ALIGN)
++    if self.deferred: self._reap()
++    va = self._fit(sz)
++    if va is not None: return va
++    if self.deferred:   # no room: wait for the freed blocks before a new chunk is carved
++      self._reap(True)
++      va = self._fit(sz)
++      if va is not None: return va
++    return self._new_chunk(sz)
+   def free(self, va:int):
+     if _FREE_DEFER:   # cudaFree without the stall: the work submitted so far is queued now, the block is reusable once it has completed
+       self.flush()
+@@ -478,6 +529,9 @@
+       ce = struct.unpack("<I", self.ace.mv[self.ace.sem_off:self.ace.sem_off + 4])[0]
+       print(f"[tgcu HANG] compute sem {struct.unpack('<Q', self.ctrl_mv[0:8])[0]} want {value} (submitted {self.sem_value}); CE sem {ce} (submitted {self.ace.sem_value}); last {self.last_launch}", file=sys.stderr, flush=True)
+     except Exception as e: print(f"[tgcu HANG] state read failed: {e}", file=sys.stderr, flush=True)
++    if os.getenv("TGCU_HANG_DUMP") == "2":   # light: semaphores + Python stacks only (no USB probes, no RM fault readout, no native sample): the full dump coincided with the mini dropping off the network
++      faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
++      return
+     try:
+       off = self.ace.ENTRIES * 8 + getattr(onv.nv_gpu.AmpereAControlGPFifo, 'GPGet').offset
+       print(f"[tgcu HANG] CE gpget {struct.unpack_from('<I', self.ace.mv, off)[0]} put {self.ace.put % self.ace.ENTRIES}", file=sys.stderr, flush=True)
+@@ -518,6 +572,9 @@
+         self._hang_dump(value)
+       if el > timeout_s:
+         report = ""
++        if RING_HOOK is not None:
++          try: RING_HOOK()
++          except Exception as e: print(f"[tgcu RING] dump failed: {e!r}", flush=True)
+         try: self.dev.on_device_hang()   # raises with the MMU fault / SM error report read through GSP
+         except Exception as e: report = str(e)
+         raise RuntimeError(f"GPU timeout waiting for semaphore {value} (last {self.last_launch}): {report}")
+diff --git a/shim/tgcu_api.py b/shim/tgcu_api.py
+--- a/shim/tgcu_api.py
++++ b/shim/tgcu_api.py
+@@ -1,6 +1,6 @@
+ # The Python half of libcudart-tgcu: every function here is called from tgcudart.cpp with plain ints and host addresses.
+ from __future__ import annotations
+-import ctypes, os, re, struct, sys, time
++import collections, ctypes, os, re, struct, sys, time
+ import numpy as np
+ import tgcu
+ 
+@@ -65,10 +65,13 @@
+   if dev_watch: _dev_forget(va)   # (before ctx.free: it needs the block's size)
+   ctx.free(va)
+   return 0
++MEMINFO_FIXED = int(os.getenv("TGCU_MEMINFO_FIXED_MIB", "1024")) << 20   # what cudaMemGetInfo subtracts for everything outside the chunks.  Measured: the pa pool is 23,903 MiB at start and its top 167 MiB cannot be used
++                                                                        # (test_vram_top.py), so the real figure is 24,576 - 23,903 + 167 = 840 MiB: TGCU_MEMINFO_FIXED_MIB=840 hands the engine ~184 MiB (~100 slots) more
++                                                                        # (only with TGCU_TOP_RESERVE_MIB, which keeps the chunks out of the dead top)
+ def mem_info() -> tuple[int, int]:
+   total = 24 << 30
+   used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"])
+-  return total - used - (1 << 30), total
++  return total - used - MEMINFO_FIXED, total
+ 
+ # TGCU_H2D_RELAX=1: a bulk host->device push (>= PIPE_MIN, the prompt lane's y rows) waits only for the launches that name its destination range as a kernel
+ # argument, not for the whole GPU (cudaMemcpy is stream-ordered, and the engine's lockstep keeps the next chunk's front running behind it).  A range pushed
+@@ -465,6 +468,22 @@
+   return next((v for n, v in g.items() if tgcu.canon(n) == key), (0, 0))
+ 
+ SYNC_EACH = os.getenv("TGCU_SYNC_EACH")   # debug: sync after every eager launch to find the one that hangs or faults
++RING_N = int(os.getenv("TGCU_LAUNCH_RING", "0"))   # keep the last N eager launches (name, grid, params); a GPU timeout prints them with every device-address parameter resolved to chunk + offset
++_ring: collections.deque = collections.deque(maxlen=max(RING_N, 1))
++def _ring_dump():
++  print(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}", flush=True)
++  for name, g, b, prm, sv in _ring:
++    print(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B", flush=True)
++    for i in range(0, len(prm) - 7, 8):
++      w = struct.unpack_from("<Q", prm, i)[0]
++      if w < 0x1000000000 or w >= 0x40000000000: continue
++      where = "OUTSIDE every chunk"
++      for ci, ch in enumerate(ctx.chunks):
++        if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD:
++          where = f"chunk {ci} (size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
++      print(f"[tgcu RING]     word@{i}: {w:#x} -> {where}", flush=True)
++    print(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}", flush=True)
++if RING_N: tgcu.RING_HOOK = _ring_dump
+ _bad_launch: set = set()
+ def _check_launch(k, g, b, shmem) -> str:
+   # the checks the CUDA driver makes before a launch (it fails those with an error; the GPU would misbehave silently)
+@@ -483,6 +502,7 @@
+       print(f"[tgcu] invalid launch (CUDA would refuse it): {k.name[:100]}: {why}", flush=True)
+     return 1
+   prm = bytes(_mv(params, psize)) if psize else b""
++  if RING_N: _ring.append((k.name, (gx, gy, gz), (bx, by, bz), prm, ctx.sem_value + len(ctx.pending) + 1))
+   if coop:
+     if gx * gy * gz > ctx.coresident_blocks(k, bx * by * bz, shmem): return 2
+     if not hasattr(ctx, "grid_ws"): flush()   # encode_cooperative zeroes the workspace with a GPU-ordered write
+@@ -494,6 +514,16 @@
+     except RuntimeError:
+       print(f"[tgcu] SYNC_EACH: kernel did not finish: {k.name} grid {(gx, gy, gz)} block {(bx, by, bz)} shmem {shmem} "
+             f"regs {k.regs} stack {k.stack} params {psize}", flush=True)
++      try:   # every 8-byte parameter word that looks like a device address: which chunk it is in (offset) or OUTSIDE
++        for i in range(0, len(prm) - 7, 8):
++          w = struct.unpack_from("<Q", prm, i)[0]
++          if w < 0x1000000000 or w >= 0x40000000000: continue
++          where = "OUTSIDE every chunk"
++          for ci, ch in enumerate(ctx.chunks):
++            if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD: where = f"chunk {ci} (base {ch['base']:#x}, size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
++          print(f"[tgcu]   param word @{i}: {w:#x} -> {where}", flush=True)
++        print(f"[tgcu]   params as ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 16), len(prm) - 7, 8)]}", flush=True)
++      except Exception as e: print(f"[tgcu]   param decode failed: {e!r}", flush=True)
+       raise
+   return 0
+ 

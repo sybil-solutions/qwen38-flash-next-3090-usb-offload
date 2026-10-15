@@ -1,6 +1,6 @@
 # The Python half of libcudart-tgcu: every function here is called from tgcudart.cpp with plain ints and host addresses.
 from __future__ import annotations
-import ctypes, os, re, struct, sys, time
+import collections, ctypes, os, re, struct, sys, time
 import numpy as np
 import tgcu
 
@@ -60,15 +60,60 @@ def _zero(va:int, n:int):
   saved, ctx.pending = ctx.pending, [ctx.encode(builtin["tgcu_memset32"], _grid(n // 4), (256, 1, 1), 0, struct.pack("<QIIQ", va, 0, 0, n // 4))]
   try: ctx.flush(); ctx._wait(ctx.sem_value)
   finally: ctx.pending = saved + ctx.pending
+CENSUS = os.getenv("TGCU_CENSUS", "0") != "0"   # Decode15: VRAM census (allocation log with call sites + on-demand census dumps; see census() below)
+_atag: dict = {}     # va -> (seq, size, call site)
+_aseq = [0]
+_alog = None
 def malloc(size:int) -> int: return ctx.malloc(size)
+def malloc_tag(size:int, tag:str) -> int:
+  global _alog
+  va = ctx.malloc(size)
+  _aseq[0] += 1
+  if va > 0:
+    _atag[va] = (_aseq[0], ((size + 255) & ~255), tag)
+    if _alog is None: _alog = open(os.getenv("TGCU_ALLOCLOG", "/tmp/tgcu_alloc.log"), "a", buffering=1)
+    _alog.write(f"{time.time():.3f} M {_aseq[0]} {va:#x} {size} {tag}\n")
+  return va
 def free(va:int) -> int:
   if dev_watch: _dev_forget(va)   # (before ctx.free: it needs the block's size)
+  if CENSUS:
+    t = _atag.pop(va, None)
+    if _alog is not None: _alog.write(f"{time.time():.3f} F {t[0] if t else 0} {va:#x} {t[1] if t else 0}\n")
   ctx.free(va)
   return 0
+MEMINFO_FIXED = int(os.getenv("TGCU_MEMINFO_FIXED_MIB", "1024")) << 20   # what cudaMemGetInfo subtracts for everything outside the chunks.  Measured: the pa pool is 23,903 MiB at start and its top 167 MiB cannot be used
+                                                                        # (test_vram_top.py), so the real figure is 24,576 - 23,903 + 167 = 840 MiB: TGCU_MEMINFO_FIXED_MIB=840 hands the engine ~184 MiB (~100 slots) more
+                                                                        # (only with TGCU_TOP_RESERVE_MIB, which keeps the chunks out of the dead top)
 def mem_info() -> tuple[int, int]:
   total = 24 << 30
-  used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"])
-  return total - used - (1 << 30), total
+  used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"]) + ctx.vmm_phys   # + the VMM chunks (cuMemCreate)
+  return max(total - used - MEMINFO_FIXED, 0), total   # (Decode15: never negative: a small TGCU_MEMINFO_FIXED_MIB can overshoot by a few MiB)
+# CUDA virtual memory (tgcudart's cuMem* entry points): vmm_reserve / vmm_create return an address / handle (0 = failure), the others 0 = success
+VMM_LOG = os.getenv("TGCU_VMM_LOG", "0") != "0"
+def vmm_reserve(size:int) -> int:
+  try: va = ctx.vmm_reserve(size)
+  except Exception as e: print(f"[tgcu] vmm_reserve({size}) failed: {type(e).__name__}: {e}", flush=True); return 0
+  if VMM_LOG: print(f"[tgcu vmm] reserve {size >> 20} MiB -> {va:#x}", flush=True)
+  return va
+def vmm_free_va(va:int, size:int) -> int:
+  ctx.vmm_free_va(va)
+  if VMM_LOG: print(f"[tgcu vmm] free range {va:#x} ({size >> 20} MiB)", flush=True)
+  return 0
+def vmm_create() -> int: return ctx.vmm_create()
+def vmm_release(h:int) -> int:
+  ctx.vmm_release(h); return 0
+def vmm_map(va:int, h:int) -> int:
+  try: ctx.vmm_map(va, h)
+  except Exception as e: print(f"[tgcu] vmm_map({va:#x}) failed: {type(e).__name__}: {e}", flush=True); return 1
+  return 0
+def vmm_commit() -> int:   # cuMemSetAccess: the queued maps / unmaps go to the page tables now
+  try: ctx.vmm_flush()
+  except Exception as e: print(f"[tgcu] vmm_commit failed: {type(e).__name__}: {e}", flush=True); return 1
+  return 0
+def vmm_unmap(va:int) -> int:
+  try: ctx.vmm_unmap(va)
+  except Exception as e: print(f"[tgcu] vmm_unmap({va:#x}) failed: {type(e).__name__}: {e}", flush=True); return 1
+  return 0
 
 # TGCU_H2D_RELAX=1: a bulk host->device push (>= PIPE_MIN, the prompt lane's y rows) waits only for the launches that name its destination range as a kernel
 # argument, not for the whole GPU (cudaMemcpy is stream-ordered, and the engine's lockstep keeps the next chunk's front running behind it).  A range pushed
@@ -319,8 +364,18 @@ _hs = {}
 def _seg(b:int, off:int, n:int) -> tuple[int, int, int]:   # (region base, aligned start, aligned end) of a host range
     size = mapped[b][1]
     return b, off & ~3, min(size, (off + n + 3) & ~3)
+_PULL_PACK = int(os.getenv("TGCU_PULL_PACK", "0"))   # 1: the pull gathers only the ring's segments (x rows, ids, w) into the staging SRAM back to back (one CE copy each) instead of the contiguous arena span between them
+def _pull_parts(ss:list):   # [(device va, nbytes)] of the segments, their total
+    parts = [(ctx.mapped_va + mapped[b][2] + a, e - a) for b, a, e in ss]
+    return parts, sum(n for _, n in parts)
 def hs_arm(segs:list, gb:int, goff:int, want:int) -> int:
     ss = [_seg(*s) for s in segs]
+    if _PULL_PACK:
+        parts, tot = _pull_parts(ss)
+        if tot > ctx.ace.CHUNK: return -2
+        ctx.ace.d2h_arm(parts, tot, mapped[gb][0] + goff, want)
+        _hs["rd"] = (None, ss)
+        return 0
     lo = min(mapped[b][2] + a for b, a, e in ss); hi = max(mapped[b][2] + e for b, a, e in ss)
     if hi - lo > ctx.ace.CHUNK: return -2
     ctx.ace.d2h_arm(ctx.mapped_va + lo, hi - lo, mapped[gb][0] + goff, want)
@@ -331,6 +386,10 @@ def hs_wait(timeout_ms:int) -> int:
     try: data = ctx.ace.d2h_collect(timeout_ms)
     except Exception as e:
         print(f"[tgcu] hs_wait failed: {e!r}", file=sys.stderr, flush=True); return -1
+    if lo is None:
+        pos = 0
+        for b, a, e in ss: _mv(b + a, e - a)[:] = data[pos:pos + e - a]; pos += e - a
+        return 0
     for b, a, e in ss: _mv(b + a, e - a)[:] = data[mapped[b][2] + a - lo:mapped[b][2] + e - lo]
     return 0
 def hs_push_pre(segs:list) -> int:
@@ -341,6 +400,12 @@ def hs_push_pre(segs:list) -> int:
 def hs_push_pre_next(segs:list, nsegs:list, gb:int, goff:int, want:int) -> int:
     # the rows + flag job AND the next ring's pull (held until hs_release), in one submission
     ss = [_seg(*s) for s in segs]; ns = [_seg(*s) for s in nsegs]
+    if _PULL_PACK:
+        parts, tot = _pull_parts(ns)
+        if tot > ctx.ace.CHUNK: return -2
+        ctx.ace.h2d_pre([(mapped[b][0] + a_, e - a_) for b, a_, e in ss], (parts, tot, mapped[gb][0] + goff, want))
+        _hs["wr"] = ss; _hs["rd"] = (None, ns)
+        return 0
     lo = min(mapped[b][2] + a_ for b, a_, e in ns); hi = max(mapped[b][2] + e for b, a_, e in ns)
     if hi - lo > ctx.ace.CHUNK: return -2
     ctx.ace.h2d_pre([(mapped[b][0] + a_, e - a_) for b, a_, e in ss], (ctx.mapped_va + lo, hi - lo, mapped[gb][0] + goff, want))
@@ -465,6 +530,22 @@ def symbol(mod:int, name:str) -> tuple[int, int]:
   return next((v for n, v in g.items() if tgcu.canon(n) == key), (0, 0))
 
 SYNC_EACH = os.getenv("TGCU_SYNC_EACH")   # debug: sync after every eager launch to find the one that hangs or faults
+RING_N = int(os.getenv("TGCU_LAUNCH_RING", "0"))   # keep the last N eager launches (name, grid, params); a GPU timeout prints them with every device-address parameter resolved to chunk + offset
+_ring: collections.deque = collections.deque(maxlen=max(RING_N, 1))
+def _ring_dump():
+  print(f"[tgcu RING] last {len(_ring)} eager launches (sem value ~ submission), oldest first; chunks = {len(ctx.chunks)}", flush=True)
+  for name, g, b, prm, sv in _ring:
+    print(f"[tgcu RING] ~{sv} {re.sub(r'_GLOBAL__N__\w+?_cu_\w{8}', '', name)[:80]} grid {g} block {b} params {len(prm)} B", flush=True)
+    for i in range(0, len(prm) - 7, 8):
+      w = struct.unpack_from("<Q", prm, i)[0]
+      if w < 0x1000000000 or w >= 0x40000000000: continue
+      where = "OUTSIDE every chunk"
+      for ci, ch in enumerate(ctx.chunks):
+        if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD:
+          where = f"chunk {ci} (size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
+      print(f"[tgcu RING]     word@{i}: {w:#x} -> {where}", flush=True)
+    print(f"[tgcu RING]     tail ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 24), len(prm) - 7, 8)]}", flush=True)
+if RING_N: tgcu.RING_HOOK = _ring_dump
 _bad_launch: set = set()
 def _check_launch(k, g, b, shmem) -> str:
   # the checks the CUDA driver makes before a launch (it fails those with an error; the GPU would misbehave silently)
@@ -483,6 +564,7 @@ def launch(kid:int, gx:int, gy:int, gz:int, bx:int, by:int, bz:int, shmem:int, p
       print(f"[tgcu] invalid launch (CUDA would refuse it): {k.name[:100]}: {why}", flush=True)
     return 1
   prm = bytes(_mv(params, psize)) if psize else b""
+  if RING_N: _ring.append((k.name, (gx, gy, gz), (bx, by, bz), prm, ctx.sem_value + len(ctx.pending) + 1))
   if coop:
     if gx * gy * gz > ctx.coresident_blocks(k, bx * by * bz, shmem): return 2
     if not hasattr(ctx, "grid_ws"): flush()   # encode_cooperative zeroes the workspace with a GPU-ordered write
@@ -494,6 +576,16 @@ def launch(kid:int, gx:int, gy:int, gz:int, bx:int, by:int, bz:int, shmem:int, p
     except RuntimeError:
       print(f"[tgcu] SYNC_EACH: kernel did not finish: {k.name} grid {(gx, gy, gz)} block {(bx, by, bz)} shmem {shmem} "
             f"regs {k.regs} stack {k.stack} params {psize}", flush=True)
+      try:   # every 8-byte parameter word that looks like a device address: which chunk it is in (offset) or OUTSIDE
+        for i in range(0, len(prm) - 7, 8):
+          w = struct.unpack_from("<Q", prm, i)[0]
+          if w < 0x1000000000 or w >= 0x40000000000: continue
+          where = "OUTSIDE every chunk"
+          for ci, ch in enumerate(ctx.chunks):
+            if ch["base"] <= w < ch["base"] + ch["size"] + ctx.GUARD: where = f"chunk {ci} (base {ch['base']:#x}, size {ch['size'] >> 20} MiB) + {(w - ch['base']) / 1048576:.2f} MiB" + (" IN GUARD" if w >= ch["base"] + ch["size"] else ""); break
+          print(f"[tgcu]   param word @{i}: {w:#x} -> {where}", flush=True)
+        print(f"[tgcu]   params as ints: {[struct.unpack_from('<q', prm, i)[0] for i in range(max(0, len(prm) - 16), len(prm) - 7, 8)]}", flush=True)
+      except Exception as e: print(f"[tgcu]   param decode failed: {e!r}", flush=True)
       raise
   return 0
 
@@ -602,3 +694,64 @@ if os.getenv("TGCU_PROF"):
   import tgcu_prof
   tgcu_prof.install(globals(), tgcu)
   prof_reset = tgcu_prof.reset
+
+
+# *** Decode15 VRAM census (TGCU_CENSUS=1): `echo <label> > /tmp/tgcu_census_req` makes a watcher thread print one census block (to stdout = the engine log) ***
+def census(label:str="") -> None:
+  import collections as _c
+  M = 1 << 20
+  mm = ctx.iface.dev_impl.mm
+  pa = mm.pa_allocator
+  blocks = dict(pa.blocks)
+  used_blocks = sorted((a, v[0]) for a, v in blocks.items() if not v[3])
+  free_b = sum(v[0] for v in blocks.values() if v[3])
+  chunks = list(ctx.chunks); allocs = list(_atag.items())
+  hist = _c.Counter(); histb = _c.Counter()
+  for a, n in used_blocks: hist[n] += 1
+  out = [f"[census] ===== {label} t={time.time():.1f} ====="]
+  out.append(f"[census] physical pool: total {pa.size / M:.1f} MiB, used {(pa.size - free_b) / M:.1f}, free {free_b / M:.1f} (largest free {max([v[0] for v in blocks.values() if v[3]] or [0]) / M:.1f}); top claim {getattr(ctx, 'top_claim', (0, 0))[1] >> 20} MiB")
+  out.append("[census] physical used blocks by size (MiB: count): " + ", ".join(f"{n / M:g}:{c}" for n, c in sorted(hist.items(), key=lambda x: -x[0] * x[1])[:14]))
+  chb = sum(c["size"] + ctx.GUARD for c in chunks)
+  frb = sum(n for c in chunks for _, n in c["free"])
+  out.append(f"[census] tgcu: ctrl {ctx.CTRL_SIZE / M:g} code {ctx.CODE_SIZE / M:g} mapped {ctx.MAPPED_SIZE / M:g}; chunks {len(chunks)} = {chb / M:.1f} MiB (guard {len(chunks) * ctx.GUARD / M:g}), free inside chunks {frb / M:.2f}, largest hole {max([n for c in chunks for _, n in c['free']] or [0]) / M:.2f}; vmm_phys {ctx.vmm_phys / M:.1f} MiB ({ctx.vmm_phys // ctx.VMM_GRAN} chunks, mapped {len(ctx.vmm_maps)}); deferred frees {len(ctx.deferred)}")
+  for i, c in enumerate(chunks):
+    held = sum(sz for va, (ch, sz) in ctx.allocs.items() if ch is c)
+    out.append(f"[census] chunk {i}: {c['size'] / M:.0f} MiB, allocated {held / M:.2f}, free {sum(n for _, n in c['free']) / M:.2f}, holes {len(c['free'])} largest {max([n for _, n in c['free']] or [0]) / M:.2f}")
+  tot = 0
+  groups = _c.defaultdict(lambda: [0, 0, []])
+  for va, (seq, sz, tag) in allocs:
+    g = groups[tag.split(",")[0] if tag else "?"]; g[0] += 1; g[1] += sz; g[2].append(sz); tot += sz
+  out.append(f"[census] cudaMalloc live: {len(allocs)} allocations, {tot / M:.1f} MiB; by innermost call site:")
+  for k, (n, b, szs) in sorted(groups.items(), key=lambda x: -x[1][1]):
+    if b >= (1 << 20) or n > 20: out.append(f"[census]   {k:>10}: n={n:5d} {b / M:9.2f} MiB   sizes(MiB) max {max(szs) / M:.2f} min {min(szs) / M:.4f}")
+  out.append("[census] live cudaMalloc >= 30 MiB (seq, MiB, site chain):")
+  for va, (seq, sz, tag) in sorted(allocs, key=lambda x: -x[1][1]):
+    if sz >= (30 << 20): out.append(f"[census]   #{seq} {sz / M:9.2f} {tag}")
+  un = [(sz, va) for va, (ch, sz) in list(ctx.allocs.items()) if va not in _atag and not any(va == c["base"] and False for c in chunks)]
+  unb = sum(sz for sz, _ in un)
+  out.append(f"[census] allocations NOT from cudaMalloc (static mirrors, staging ring, graph chains, lazy D2H shadows, shim internals): {len(un)} blocks, {unb / M:.1f} MiB; >= 1 MiB (MiB, va):")
+  for sz, va in sorted(un, reverse=True):
+    if sz >= (1 << 20): out.append(f"[census]   {sz / M:9.2f} {va:#x}" + (" (static mirror)" if any(m[0] == va for m in static_mirrors.values()) else ""))
+  d = ctx.dev
+  slm = getattr(d, "shader_local_mem", None)
+  out.append(f"[census] arenas used: code {ctx.code_head / M:.1f} of {ctx.CODE_SIZE / M:g} MiB; mapped {ctx.mapped_head / M:.2f} of {ctx.MAPPED_SIZE / M:g}; ctrl head {ctx.ctrl_head / M:.2f} persist {getattr(ctx, 'persist_head', 0) / M:.2f} of {ctx.CTRL_SIZE / M:g}; vring head {getattr(ctx, 'vring_head', 0) / M:.1f} peak {ctx.vring_peak / M:.2f} of {ctx.VRING_SIZE / M:g} MiB, {ctx.vring_wraps} wraps, {ctx.vring_bytes / M:.0f} MiB launched; stage ring {'yes' if _stg else 'no'}; shader local memory {getattr(slm, 'nbytes', getattr(slm, 'size', 0)) / M:.1f} MiB (slm_per_thread {getattr(d, 'slm_per_thread', 0)})")
+  mi = mem_info()
+  out.append(f"[census] engine view: cudaMemGetInfo free {mi[0] / M:.1f} MiB (fixed {MEMINFO_FIXED >> 20})")
+  txt = "\n".join(out)
+  print(txt, file=sys.stderr, flush=True)
+  with open(os.getenv("TGCU_CENSUS_OUT", "/tmp/tgcu_census.out"), "a") as f: f.write(txt + "\n")
+
+def _census_watch():
+  import threading
+  req = os.getenv("TGCU_CENSUS_REQ", "/tmp/tgcu_census_req")
+  def loop():
+    while True:
+      time.sleep(0.2)
+      try:
+        if os.path.exists(req):
+          label = open(req).read().strip() or "census"; os.remove(req)
+          census(label)
+      except Exception as e:
+        import traceback; print(f"[census] failed: {type(e).__name__}: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+  threading.Thread(target=loop, daemon=True, name="census").start()
+if CENSUS: _census_watch()

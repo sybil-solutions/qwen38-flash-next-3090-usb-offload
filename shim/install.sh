@@ -5,7 +5,7 @@ set -e
 cd ${0:A:h}
 DEST=${1:-$HOME/shim}; mkdir -p $DEST
 cp tgcu.py tgcu_api.py tgcu_prof.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h tgcu_builtin.cu tgcu_libc.ptx \
-   run-strata.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh $DEST/
+   run-strata.sh run-d7.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh $DEST/
 cp prebuilt/tgcu_builtin.fatbin prebuilt/tgcu_libc.cubin $DEST/
 cp -R include x86compat $DEST/
 chmod +x $DEST/*.sh

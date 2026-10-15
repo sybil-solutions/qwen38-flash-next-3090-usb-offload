@@ -1,0 +1,218 @@
+# Decode15 (2026-10-14/15): VRAM-census knobs: TGCU_CODE_MIB (code arena), TGCU_MAPPED_MIB, TGCU_VRING_MIB,
+# TGCU_NO_MIRROR_HOSTALLOC_MIB=lo:hi (RAM-tier mirror off, locked pageable memory instead), TGCU_LMEM_STACK (shader
+# local-memory stack), TGCU_MEMINFO_FIXED_MIB, TGCU_LAZY_D2H_MB, eager shadow free, mem_info clamp, TGCU_CENSUS;
+# tgcudart.cpp: the matching C-side knobs. Config C sets TGCU_CODE_MIB 32, TGCU_MAPPED_MIB 16,
+# TGCU_NO_MIRROR_HOSTALLOC_MIB 150:260, TGCU_LAZY_D2H_MB 128, TGCU_LMEM_STACK 480, TGCU_MEMINFO_FIXED_MIB 742.
+# Base: patches/shim/base/ (the host-tail shim, git 25ae464) + the earlier shim patches; `git apply -p1` in a directory that holds shim/<file>.
+
+diff --git a/shim/tgcu.py b/shim/tgcu.py
+--- a/shim/tgcu.py
++++ b/shim/tgcu.py
+@@ -165,7 +165,8 @@
+   print(f"[tgcu-mem] {ev} {sz/1048576:.2f}MiB {extra} chunks={len(ctx.chunks)} chunkMiB={chb>>20} inchunkfreeMiB={frb>>20} largestFreeMiB={lfb>>20} deferred={len(ctx.deferred)} paFreeMiB={tl(mm.pa_allocator)>>20} cvFreeMiB={(tl(cv)>>20) if cv else -1} t={time.time():.1f}", file=sys.stderr, flush=True)
+ 
+ class Context:
+-  CTRL_SIZE, CODE_SIZE, MAPPED_SIZE = 32 << 20, 256 << 20, 48 << 20   # BAR1-visible pool is small
++  # Decode15: the code and mapped arenas were 256 / 48 MiB but hold 3.3 / 1.3 MiB (census); TGCU_CODE_MIB / TGCU_MAPPED_MIB size them, VRAM the expert cache gets
++  CTRL_SIZE, CODE_SIZE, MAPPED_SIZE = 32 << 20, int(os.getenv("TGCU_CODE_MIB", "256")) << 20, int(os.getenv("TGCU_MAPPED_MIB", "48")) << 20   # BAR1-visible pool is small
+   TRANSIENT = int(os.getenv("TGCU_TRANSIENT_BYTES", str(CTRL_SIZE // 2)))   # the transient half of the control arena (test knob: a small ring wraps often)
+ 
+   def __init__(self):
+@@ -174,6 +175,10 @@
+     self.fifo = self.dev.fifos["COMPUTE:0"]
+     self.iface = self.dev.iface
+     if _TOP_RESERVE: self._claim_top()
++    # Decode15: tinygrad sizes the shader local memory (per thread x 96 warps x 41 TPCs) for the largest stack seen so far and allocates a NEW buffer each time it grows: 73 MiB at boot, 115 MiB once the
++    # first attention kernel (384 B of stack) launches, mid-request.  TGCU_LMEM_STACK=N sizes it for N bytes of stack now, so the allocation happens once, before the expert cache takes the VRAM
++    # (a late growth needs the new buffer while the old one is still alive, the free VRAM that a small reserve no longer has)
++    if (_lm := int(os.getenv("TGCU_LMEM_STACK", "0"))): self.dev._ensure_has_local_memory(_lm + 0x240)
+     self.nvg = onv.nv_gpu
+     # cpu-visible control arena: queued QMDs + constant buffers, pushbuffers, semaphores
+     self.ctrl = self.iface.alloc(self.CTRL_SIZE, cpu_access=True)
+@@ -481,14 +486,17 @@
+       off += size
+     return bytes(blob)
+ 
+-  VRING_SIZE, BAR_BATCH = 64 << 20, 4096
++  VRING_SIZE, BAR_BATCH = int(os.getenv("TGCU_VRING_MIB", "64")) << 20, 4096
++  vring_peak, vring_wraps, vring_bytes = 0, 0, 0   # census: the high-water mark, the wraps (each waits for everything submitted) and the bytes launched through it
+   def _vring_alloc(self, size:int) -> int:
+     # VRAM ring for eager launch batches too big for BAR writes; wrapping waits for everything submitted
+     if not hasattr(self, "vring_va"): self.vring_va, self.vring_head = self.malloc(self.VRING_SIZE), 0
+     if self.vring_head + size > self.VRING_SIZE:
+       self._wait(self.sem_value)
+       self.vring_head = 0
++      self.vring_wraps += 1
+     off, self.vring_head = self.vring_head, round_up(self.vring_head + size, 0x100)
++    self.vring_peak = max(self.vring_peak, self.vring_head); self.vring_bytes += size
+     return self.vring_va + off
+ 
+   def alloc_ctrl(self, size:int) -> int:
+diff --git a/shim/tgcu_api.py b/shim/tgcu_api.py
+--- a/shim/tgcu_api.py
++++ b/shim/tgcu_api.py
+@@ -60,9 +60,25 @@
+   saved, ctx.pending = ctx.pending, [ctx.encode(builtin["tgcu_memset32"], _grid(n // 4), (256, 1, 1), 0, struct.pack("<QIIQ", va, 0, 0, n // 4))]
+   try: ctx.flush(); ctx._wait(ctx.sem_value)
+   finally: ctx.pending = saved + ctx.pending
++CENSUS = os.getenv("TGCU_CENSUS", "0") != "0"   # Decode15: VRAM census (allocation log with call sites + on-demand census dumps; see census() below)
++_atag: dict = {}     # va -> (seq, size, call site)
++_aseq = [0]
++_alog = None
+ def malloc(size:int) -> int: return ctx.malloc(size)
++def malloc_tag(size:int, tag:str) -> int:
++  global _alog
++  va = ctx.malloc(size)
++  _aseq[0] += 1
++  if va > 0:
++    _atag[va] = (_aseq[0], ((size + 255) & ~255), tag)
++    if _alog is None: _alog = open(os.getenv("TGCU_ALLOCLOG", "/tmp/tgcu_alloc.log"), "a", buffering=1)
++    _alog.write(f"{time.time():.3f} M {_aseq[0]} {va:#x} {size} {tag}\n")
++  return va
+ def free(va:int) -> int:
+   if dev_watch: _dev_forget(va)   # (before ctx.free: it needs the block's size)
++  if CENSUS:
++    t = _atag.pop(va, None)
++    if _alog is not None: _alog.write(f"{time.time():.3f} F {t[0] if t else 0} {va:#x} {t[1] if t else 0}\n")
+   ctx.free(va)
+   return 0
+ MEMINFO_FIXED = int(os.getenv("TGCU_MEMINFO_FIXED_MIB", "1024")) << 20   # what cudaMemGetInfo subtracts for everything outside the chunks.  Measured: the pa pool is 23,903 MiB at start and its top 167 MiB cannot be used
+@@ -71,7 +87,7 @@
+ def mem_info() -> tuple[int, int]:
+   total = 24 << 30
+   used = sum(ch["size"] + ctx.GUARD for ch in ctx.chunks) - sum(n for ch in ctx.chunks for _, n in ch["free"]) + ctx.vmm_phys   # + the VMM chunks (cuMemCreate)
+-  return total - used - MEMINFO_FIXED, total
++  return max(total - used - MEMINFO_FIXED, 0), total   # (Decode15: never negative: a small TGCU_MEMINFO_FIXED_MIB can overshoot by a few MiB)
+ # CUDA virtual memory (tgcudart's cuMem* entry points): vmm_reserve / vmm_create return an address / handle (0 = failure), the others 0 = success
+ VMM_LOG = os.getenv("TGCU_VMM_LOG", "0") != "0"
+ def vmm_reserve(size:int) -> int:
+@@ -678,3 +694,64 @@
+   import tgcu_prof
+   tgcu_prof.install(globals(), tgcu)
+   prof_reset = tgcu_prof.reset
++
++
++# *** Decode15 VRAM census (TGCU_CENSUS=1): `echo <label> > /tmp/tgcu_census_req` makes a watcher thread print one census block (to stdout = the engine log) ***
++def census(label:str="") -> None:
++  import collections as _c
++  M = 1 << 20
++  mm = ctx.iface.dev_impl.mm
++  pa = mm.pa_allocator
++  blocks = dict(pa.blocks)
++  used_blocks = sorted((a, v[0]) for a, v in blocks.items() if not v[3])
++  free_b = sum(v[0] for v in blocks.values() if v[3])
++  chunks = list(ctx.chunks); allocs = list(_atag.items())
++  hist = _c.Counter(); histb = _c.Counter()
++  for a, n in used_blocks: hist[n] += 1
++  out = [f"[census] ===== {label} t={time.time():.1f} ====="]
++  out.append(f"[census] physical pool: total {pa.size / M:.1f} MiB, used {(pa.size - free_b) / M:.1f}, free {free_b / M:.1f} (largest free {max([v[0] for v in blocks.values() if v[3]] or [0]) / M:.1f}); top claim {getattr(ctx, 'top_claim', (0, 0))[1] >> 20} MiB")
++  out.append("[census] physical used blocks by size (MiB: count): " + ", ".join(f"{n / M:g}:{c}" for n, c in sorted(hist.items(), key=lambda x: -x[0] * x[1])[:14]))
++  chb = sum(c["size"] + ctx.GUARD for c in chunks)
++  frb = sum(n for c in chunks for _, n in c["free"])
++  out.append(f"[census] tgcu: ctrl {ctx.CTRL_SIZE / M:g} code {ctx.CODE_SIZE / M:g} mapped {ctx.MAPPED_SIZE / M:g}; chunks {len(chunks)} = {chb / M:.1f} MiB (guard {len(chunks) * ctx.GUARD / M:g}), free inside chunks {frb / M:.2f}, largest hole {max([n for c in chunks for _, n in c['free']] or [0]) / M:.2f}; vmm_phys {ctx.vmm_phys / M:.1f} MiB ({ctx.vmm_phys // ctx.VMM_GRAN} chunks, mapped {len(ctx.vmm_maps)}); deferred frees {len(ctx.deferred)}")
++  for i, c in enumerate(chunks):
++    held = sum(sz for va, (ch, sz) in ctx.allocs.items() if ch is c)
++    out.append(f"[census] chunk {i}: {c['size'] / M:.0f} MiB, allocated {held / M:.2f}, free {sum(n for _, n in c['free']) / M:.2f}, holes {len(c['free'])} largest {max([n for _, n in c['free']] or [0]) / M:.2f}")
++  tot = 0
++  groups = _c.defaultdict(lambda: [0, 0, []])
++  for va, (seq, sz, tag) in allocs:
++    g = groups[tag.split(",")[0] if tag else "?"]; g[0] += 1; g[1] += sz; g[2].append(sz); tot += sz
++  out.append(f"[census] cudaMalloc live: {len(allocs)} allocations, {tot / M:.1f} MiB; by innermost call site:")
++  for k, (n, b, szs) in sorted(groups.items(), key=lambda x: -x[1][1]):
++    if b >= (1 << 20) or n > 20: out.append(f"[census]   {k:>10}: n={n:5d} {b / M:9.2f} MiB   sizes(MiB) max {max(szs) / M:.2f} min {min(szs) / M:.4f}")
++  out.append("[census] live cudaMalloc >= 30 MiB (seq, MiB, site chain):")
++  for va, (seq, sz, tag) in sorted(allocs, key=lambda x: -x[1][1]):
++    if sz >= (30 << 20): out.append(f"[census]   #{seq} {sz / M:9.2f} {tag}")
++  un = [(sz, va) for va, (ch, sz) in list(ctx.allocs.items()) if va not in _atag and not any(va == c["base"] and False for c in chunks)]
++  unb = sum(sz for sz, _ in un)
++  out.append(f"[census] allocations NOT from cudaMalloc (static mirrors, staging ring, graph chains, lazy D2H shadows, shim internals): {len(un)} blocks, {unb / M:.1f} MiB; >= 1 MiB (MiB, va):")
++  for sz, va in sorted(un, reverse=True):
++    if sz >= (1 << 20): out.append(f"[census]   {sz / M:9.2f} {va:#x}" + (" (static mirror)" if any(m[0] == va for m in static_mirrors.values()) else ""))
++  d = ctx.dev
++  slm = getattr(d, "shader_local_mem", None)
++  out.append(f"[census] arenas used: code {ctx.code_head / M:.1f} of {ctx.CODE_SIZE / M:g} MiB; mapped {ctx.mapped_head / M:.2f} of {ctx.MAPPED_SIZE / M:g}; ctrl head {ctx.ctrl_head / M:.2f} persist {getattr(ctx, 'persist_head', 0) / M:.2f} of {ctx.CTRL_SIZE / M:g}; vring head {getattr(ctx, 'vring_head', 0) / M:.1f} peak {ctx.vring_peak / M:.2f} of {ctx.VRING_SIZE / M:g} MiB, {ctx.vring_wraps} wraps, {ctx.vring_bytes / M:.0f} MiB launched; stage ring {'yes' if _stg else 'no'}; shader local memory {getattr(slm, 'nbytes', getattr(slm, 'size', 0)) / M:.1f} MiB (slm_per_thread {getattr(d, 'slm_per_thread', 0)})")
++  mi = mem_info()
++  out.append(f"[census] engine view: cudaMemGetInfo free {mi[0] / M:.1f} MiB (fixed {MEMINFO_FIXED >> 20})")
++  txt = "\n".join(out)
++  print(txt, file=sys.stderr, flush=True)
++  with open(os.getenv("TGCU_CENSUS_OUT", "/tmp/tgcu_census.out"), "a") as f: f.write(txt + "\n")
++
++def _census_watch():
++  import threading
++  req = os.getenv("TGCU_CENSUS_REQ", "/tmp/tgcu_census_req")
++  def loop():
++    while True:
++      time.sleep(0.2)
++      try:
++        if os.path.exists(req):
++          label = open(req).read().strip() or "census"; os.remove(req)
++          census(label)
++      except Exception as e:
++        import traceback; print(f"[census] failed: {type(e).__name__}: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
++  threading.Thread(target=loop, daemon=True, name="census").start()
++if CENSUS: _census_watch()
+diff --git a/shim/tgcudart.cpp b/shim/tgcudart.cpp
+--- a/shim/tgcudart.cpp
++++ b/shim/tgcudart.cpp
+@@ -19,6 +19,8 @@
+ #include <set>
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
++#include <execinfo.h>
++#include <dlfcn.h>
+ 
+ #define EXPORT extern "C" __attribute__((visibility("default")))
+ 
+@@ -412,9 +414,26 @@
+ }
+ 
+ // *** memory ***
++static const bool g_census = getenv("TGCU_CENSUS") != nullptr;
++// TGCU_CENSUS=1 (Decode15): every cudaMalloc carries the call site: image-relative return addresses of the first frames outside this library (resolve with nm -n on the engine binary)
++static std::string census_tag() {
++  void* fr[12]; int n = backtrace(fr, 12);
++  Dl_info self; dladdr((void*)&census_tag, &self);
++  std::string out;
++  int kept = 0;
++  for (int i = 1; i < n && kept < 7; i++) {
++    Dl_info di;
++    if (!dladdr(fr[i], &di) || !di.dli_fbase) continue;
++    if (di.dli_fbase == self.dli_fbase) continue;
++    char b[64]; snprintf(b, sizeof b, "%s%llx", kept ? "," : "", (unsigned long long)((uintptr_t)fr[i] - (uintptr_t)di.dli_fbase));
++    out += b; kept++;
++  }
++  return out;
++}
+ EXPORT cudaError_t cudaMalloc(void** p, size_t size) {
+   API_ENTER("cudaMalloc");
+-  long long va = call_i("malloc", "(K)", (unsigned long long)size);
++  long long va = g_census ? call_i("malloc_tag", "(Ks)", (unsigned long long)size, census_tag().c_str())
++                          : call_i("malloc", "(K)", (unsigned long long)size);
+   if (va <= 0) return fail(cudaErrorMemoryAllocation, "cudaMalloc");
+   g_dev[(uint64_t)va] = size;
+   *p = (void*)va;
+@@ -438,7 +457,15 @@
+   if (posix_memalign(&h, page, alloc)) return fail(cudaErrorMemoryAllocation, "host alloc");
+   memset(h, 0, alloc);
+   uint64_t mirror = 0;
+-  if (flags & cudaHostAllocMapped) {
++  // Decode15: TGCU_NO_MIRROR_HOSTALLOC_MIB=LO:HI: a mapped cudaHostAlloc of LO..HI MiB gets no VRAM mirror (cudaHostGetDevicePointer then fails and the engine keeps the bytes in
++  // locked pageable memory, its own fallback).  The 0.2 GiB resident RAM tier was a 204 MiB static mirror in VRAM that nothing reads with --pcie-frac 0 (the 322 MiB token embedding
++  // is a mapped table too and needs its mirror, hence the window).
++  static const std::pair<size_t, size_t> kNoMirror = [] {
++    const char* e = getenv("TGCU_NO_MIRROR_HOSTALLOC_MIB"); long long lo = 0, hi = 0;
++    if (e && sscanf(e, "%lld:%lld", &lo, &hi) == 2) return std::make_pair((size_t)lo << 20, (size_t)hi << 20);
++    return std::make_pair((size_t)1, (size_t)0);
++  }();
++  if ((flags & cudaHostAllocMapped) && !(size >= kNoMirror.first && size <= kNoMirror.second)) {
+     API_ENTER("cudaHostAlloc(mapped)");
+     const size_t msize = size > kMappedMax ? alloc : size;
+     mirror = (uint64_t)call_i("map_host", "(KK)", (unsigned long long)(uintptr_t)h, (unsigned long long)msize);
+@@ -596,6 +623,7 @@
+     for (auto it = g_lazy.begin(); it != g_lazy.end(); ++it) if (it->second.clock < old->second.clock) old = it;
+     lazy_release(old, true);
+   }
++  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget)
+   uint64_t shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
+   if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
+   const uint64_t s = (uint64_t)(uintptr_t)src;

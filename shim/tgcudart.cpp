@@ -19,6 +19,8 @@
 #include <set>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <execinfo.h>
+#include <dlfcn.h>
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -412,9 +414,26 @@ EXPORT cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3
 }
 
 // *** memory ***
+static const bool g_census = getenv("TGCU_CENSUS") != nullptr;
+// TGCU_CENSUS=1 (Decode15): every cudaMalloc carries the call site: image-relative return addresses of the first frames outside this library (resolve with nm -n on the engine binary)
+static std::string census_tag() {
+  void* fr[12]; int n = backtrace(fr, 12);
+  Dl_info self; dladdr((void*)&census_tag, &self);
+  std::string out;
+  int kept = 0;
+  for (int i = 1; i < n && kept < 7; i++) {
+    Dl_info di;
+    if (!dladdr(fr[i], &di) || !di.dli_fbase) continue;
+    if (di.dli_fbase == self.dli_fbase) continue;
+    char b[64]; snprintf(b, sizeof b, "%s%llx", kept ? "," : "", (unsigned long long)((uintptr_t)fr[i] - (uintptr_t)di.dli_fbase));
+    out += b; kept++;
+  }
+  return out;
+}
 EXPORT cudaError_t cudaMalloc(void** p, size_t size) {
   API_ENTER("cudaMalloc");
-  long long va = call_i("malloc", "(K)", (unsigned long long)size);
+  long long va = g_census ? call_i("malloc_tag", "(Ks)", (unsigned long long)size, census_tag().c_str())
+                          : call_i("malloc", "(K)", (unsigned long long)size);
   if (va <= 0) return fail(cudaErrorMemoryAllocation, "cudaMalloc");
   g_dev[(uint64_t)va] = size;
   *p = (void*)va;
@@ -438,7 +457,15 @@ static cudaError_t host_alloc(void** p, size_t size, unsigned flags) {
   if (posix_memalign(&h, page, alloc)) return fail(cudaErrorMemoryAllocation, "host alloc");
   memset(h, 0, alloc);
   uint64_t mirror = 0;
-  if (flags & cudaHostAllocMapped) {
+  // Decode15: TGCU_NO_MIRROR_HOSTALLOC_MIB=LO:HI: a mapped cudaHostAlloc of LO..HI MiB gets no VRAM mirror (cudaHostGetDevicePointer then fails and the engine keeps the bytes in
+  // locked pageable memory, its own fallback).  The 0.2 GiB resident RAM tier was a 204 MiB static mirror in VRAM that nothing reads with --pcie-frac 0 (the 322 MiB token embedding
+  // is a mapped table too and needs its mirror, hence the window).
+  static const std::pair<size_t, size_t> kNoMirror = [] {
+    const char* e = getenv("TGCU_NO_MIRROR_HOSTALLOC_MIB"); long long lo = 0, hi = 0;
+    if (e && sscanf(e, "%lld:%lld", &lo, &hi) == 2) return std::make_pair((size_t)lo << 20, (size_t)hi << 20);
+    return std::make_pair((size_t)1, (size_t)0);
+  }();
+  if ((flags & cudaHostAllocMapped) && !(size >= kNoMirror.first && size <= kNoMirror.second)) {
     API_ENTER("cudaHostAlloc(mapped)");
     const size_t msize = size > kMappedMax ? alloc : size;
     mirror = (uint64_t)call_i("map_host", "(KK)", (unsigned long long)(uintptr_t)h, (unsigned long long)msize);
@@ -516,7 +543,10 @@ std::map<uintptr_t, Lazy> g_lazy;   // by lo, under g_lock
 size_t g_lazy_bytes = 0;
 uint64_t g_lazy_clock = 0;
 const size_t kLazyBudget = [] { const char* e = getenv("TGCU_LAZY_D2H_MB"); return (size_t)(e ? atoll(e) : 768) << 20; }();
-const size_t kLazyMin = 1 << 20;
+// TGCU_LAZY_MIN_MB (default 1): the smallest device-to-host copy that is kept in VRAM and downloaded on first touch.  Prefill600: the prompt lane's 10 MB MoE-input
+// copy per chunk-layer was lazy too (a VRAM shadow malloc + d2d + submit before, a fault + free after: ~4 ms of the 88 ms chunk-layer period); a 16+ keeps the
+// 118 MB conversation checkpoints lazy and sends the lane's x straight down.
+const size_t kLazyMin = [] { const char* e = getenv("TGCU_LAZY_MIN_MB"); return (size_t)(e ? atoll(e) : 1) << 20; }();
 const bool g_lazy_verbose = getenv("TGCU_LAZY_VERBOSE") != nullptr;
 static bool lazy_still_protected(const Lazy& z) {   // a freed-and-reused range is mapped afresh: not ours any more
   mach_vm_address_t at = z.lo;                       // every VM entry over [lo, hi) must still be inaccessible
@@ -593,6 +623,7 @@ static bool lazy_d2h(void* dst, const void* src, size_t n) {
     for (auto it = g_lazy.begin(); it != g_lazy.end(); ++it) if (it->second.clock < old->second.clock) old = it;
     lazy_release(old, true);
   }
+  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget)
   uint64_t shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
   if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
   const uint64_t s = (uint64_t)(uintptr_t)src;
@@ -1006,12 +1037,86 @@ EXPORT cudaError_t cudaGetLastError() { cudaError_t e = t_last; t_last = cudaSuc
 EXPORT cudaError_t cudaPeekAtLastError() { return t_last; }
 EXPORT const char* cudaGetErrorString(cudaError_t e) { return err_name(e); }
 EXPORT const char* cudaGetErrorName(cudaError_t e) { return err_name(e); }
-// no driver API: VMM (cuMem*) users must fall back to cudaMalloc
-EXPORT cudaError_t cudaGetDriverEntryPoint(const char*, void** fn, unsigned long long, cudaDriverEntryPointQueryResult* st) {
-  *fn = nullptr; if (st) *st = cudaDriverEntryPointSymbolNotFound; return cudaErrorNotSupported;
+// *** CUDA virtual memory (cuMem*) ***
+// Strata's vmm.cpp resolves these through cudaGetDriverEntryPoint (the elastic K/V, --kv-grow): an address range reserved with no memory behind it, 2 MiB physical chunks created on
+// their own, mapped into / unmapped from the range.  The work is tgcu.Context.vmm_* (tinygrad's physical pool + GPU page tables); TGCU_VMM=0 hides the entry points again.
+// A reserved range is registered in g_dev, so memcpy kinds / pointer attributes see it as device memory.
+namespace {
+const size_t kVmmGran = 2u << 20;
+#define VMM_ENTER std::lock_guard<std::recursive_mutex> _lk(g_lock); \
+  if (!ensure_init()) return CUDA_ERROR_NOT_INITIALIZED; \
+  Gil _gil; \
+  flush_dirty(); \
+  lazy_reap();
+CUresult vmm_DeviceGetAttribute(int* v, CUdevice_attribute a, CUdevice) {
+  if (a != CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED) return CUDA_ERROR_NOT_SUPPORTED;
+  *v = 1;
+  return CUDA_SUCCESS;
 }
-EXPORT cudaError_t cudaGetDriverEntryPointByVersion(const char*, void** fn, unsigned, unsigned long long, cudaDriverEntryPointQueryResult* st) {
-  *fn = nullptr; if (st) *st = cudaDriverEntryPointSymbolNotFound; return cudaErrorNotSupported;
+CUresult vmm_GetAllocationGranularity(size_t* g, const CUmemAllocationProp*, CUmemAllocationGranularity_flags) { *g = kVmmGran; return CUDA_SUCCESS; }
+CUresult vmm_AddressReserve(CUdeviceptr* p, size_t size, size_t, CUdeviceptr addr, unsigned long long) {
+  if (addr != 0 || size == 0) return CUDA_ERROR_NOT_SUPPORTED;   // the range is 2 MiB aligned (ranges are TLSF blocks of at least that alignment)
+  VMM_ENTER
+  const size_t n = (size + kVmmGran - 1) / kVmmGran * kVmmGran;
+  long long va = call_i("vmm_reserve", "(K)", (unsigned long long)n);
+  if (va <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
+  g_dev[(uint64_t)va] = n;
+  *p = (CUdeviceptr)va;
+  return CUDA_SUCCESS;
+}
+CUresult vmm_AddressFree(CUdeviceptr p, size_t size) {
+  VMM_ENTER
+  if (!g_dev.erase((uint64_t)p)) return CUDA_ERROR_INVALID_VALUE;
+  call_i("vmm_free_va", "(KK)", (unsigned long long)p, (unsigned long long)size);
+  return CUDA_SUCCESS;
+}
+CUresult vmm_Create(CUmemGenericAllocationHandle* h, size_t size, const CUmemAllocationProp*, unsigned long long) {
+  if (size != kVmmGran) return CUDA_ERROR_INVALID_VALUE;
+  VMM_ENTER
+  long long r = call_i("vmm_create", nullptr);
+  if (r <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
+  *h = (CUmemGenericAllocationHandle)r;
+  return CUDA_SUCCESS;
+}
+CUresult vmm_Release(CUmemGenericAllocationHandle h) {
+  VMM_ENTER
+  call_i("vmm_release", "(K)", (unsigned long long)h);
+  return CUDA_SUCCESS;
+}
+CUresult vmm_Map(CUdeviceptr p, size_t size, size_t offset, CUmemGenericAllocationHandle h, unsigned long long) {
+  if (size != kVmmGran || offset != 0 || h == 0 || (p % kVmmGran)) return CUDA_ERROR_INVALID_VALUE;
+  VMM_ENTER
+  return call_i("vmm_map", "(KK)", (unsigned long long)p, (unsigned long long)h) == 0 ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY;
+}
+CUresult vmm_Unmap(CUdeviceptr p, size_t size) {
+  if (size != kVmmGran || (p % kVmmGran)) return CUDA_ERROR_INVALID_VALUE;
+  VMM_ENTER
+  return call_i("vmm_unmap", "(K)", (unsigned long long)p) == 0 ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+}
+CUresult vmm_SetAccess(CUdeviceptr, size_t, const CUmemAccessDesc*, size_t) {   // a mapped chunk is read/write for the one GPU; the queued maps are written to the page tables here
+  VMM_ENTER
+  return call_i("vmm_commit", nullptr) == 0 ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY;
+}
+void* vmm_entry(const char* n) {
+  static const bool off = [] { const char* e = getenv("TGCU_VMM"); return e && e[0] == '0'; }();
+  if (off) return nullptr;
+  struct E { const char* name; void* fn; };
+  static const E tab[] = {{"cuDeviceGetAttribute", (void*)vmm_DeviceGetAttribute}, {"cuMemGetAllocationGranularity", (void*)vmm_GetAllocationGranularity},
+    {"cuMemAddressReserve", (void*)vmm_AddressReserve}, {"cuMemAddressFree", (void*)vmm_AddressFree}, {"cuMemCreate", (void*)vmm_Create},
+    {"cuMemRelease", (void*)vmm_Release}, {"cuMemMap", (void*)vmm_Map}, {"cuMemUnmap", (void*)vmm_Unmap}, {"cuMemSetAccess", (void*)vmm_SetAccess}};
+  for (const E& e : tab) if (!strcmp(e.name, n)) return e.fn;
+  return nullptr;
+}
+}  // namespace
+EXPORT cudaError_t cudaGetDriverEntryPoint(const char* name, void** fn, unsigned long long, cudaDriverEntryPointQueryResult* st) {
+  *fn = vmm_entry(name);
+  if (st) *st = *fn ? cudaDriverEntryPointSuccess : cudaDriverEntryPointSymbolNotFound;
+  return *fn ? cudaSuccess : cudaErrorNotSupported;
+}
+EXPORT cudaError_t cudaGetDriverEntryPointByVersion(const char* name, void** fn, unsigned, unsigned long long, cudaDriverEntryPointQueryResult* st) {
+  *fn = vmm_entry(name);
+  if (st) *st = *fn ? cudaDriverEntryPointSuccess : cudaDriverEntryPointSymbolNotFound;
+  return *fn ? cudaSuccess : cudaErrorNotSupported;
 }
 
 // built-in kernels (memset, memcpy, cuBLAS stand-in) by name, with cudaLaunchKernel-style argument pointers

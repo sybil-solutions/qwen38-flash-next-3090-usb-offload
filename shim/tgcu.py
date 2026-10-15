@@ -2,11 +2,14 @@
 # tinygrad boots the GPU (GSP, VA space, channels); this module loads nvcc cubins itself, builds QMDs, chains launches into
 # batches and submits them on tinygrad's compute ring. Bulk copies go through tinygrad's USB copy path.
 from __future__ import annotations
-import struct, re, os, time, array
+import struct, re, os, time, array, sys
 _WAIT_S = float(os.getenv("TGCU_WAIT_S", "0"))       # diagnostic: raise the GPU-wait timeout (the default is the caller's, 10 s)
+RING_HOOK = None                                    # set by tgcu_api under TGCU_LAUNCH_RING: prints the last eager launches with their device pointers resolved
 HANG_HOOK = None                                    # set by tgcu_api: prints the handshake regions
-_HANG_DUMP = os.getenv("TGCU_HANG_DUMP") == "1"      # diagnostic: dump every thread + a native `sample` 8 s into a GPU wait
+_HANG_DUMP = os.getenv("TGCU_HANG_DUMP") in ("1", "2")      # diagnostic: dump every thread + a native `sample` 8 s into a GPU wait
 _FREE_DEFER = os.getenv("TGCU_FREE_DEFER", "0") != "0"   # cudaFree queues the pending work and hands the block back once it has completed, instead of a full synchronize per free (the lazy x shadows of the prompt lane: 6.9 ms x 1 per chunk-layer)
+_TOP_RESERVE = int(os.getenv("TGCU_TOP_RESERVE_MIB", "0")) << 20   # the top part of the physical pool the GPU cannot use: a memset of physical 24346..24410 MiB hung the 3090 (test_vram_top.py); the pool ends at 24512 MiB, so 167 MiB.  0 = off
+_BESTFIT = os.getenv("TGCU_BESTFIT", "0") != "0"       # malloc takes the smallest free hole that fits (first fit left no 112 MiB hole after a few prompts -> a new chunk every group)
 from tinygrad.runtime.support import usb as _usbmod
 from dataclasses import dataclass, field
 from tinygrad import Device
@@ -151,8 +154,19 @@ class Module:
 
 # *** context: memory, submission ***
 
+_MEMLOG = os.getenv("TGCU_MEMLOG", "0") != "0"
+def _memlog(ctx, ev:str, sz:int, extra:str=""):
+  # TGCU_MEMLOG=1: one stderr line per malloc/free >= 4 MiB and per new chunk: chunk bytes, free bytes inside chunks, deferred frees, physical free (tinygrad TLSF)
+  import sys
+  mm = ctx.iface.dev_impl.mm
+  def tl(a): return sum(v[0] for v in a.blocks.values() if v[3])
+  chb = sum(c["size"] + ctx.GUARD for c in ctx.chunks); frb = sum(n for c in ctx.chunks for _, n in c["free"]); lfb = max([n for c in ctx.chunks for _, n in c["free"]] or [0])
+  cv = mm.cpu_visible_pa_allocator
+  print(f"[tgcu-mem] {ev} {sz/1048576:.2f}MiB {extra} chunks={len(ctx.chunks)} chunkMiB={chb>>20} inchunkfreeMiB={frb>>20} largestFreeMiB={lfb>>20} deferred={len(ctx.deferred)} paFreeMiB={tl(mm.pa_allocator)>>20} cvFreeMiB={(tl(cv)>>20) if cv else -1} t={time.time():.1f}", file=sys.stderr, flush=True)
+
 class Context:
-  CTRL_SIZE, CODE_SIZE, MAPPED_SIZE = 32 << 20, 256 << 20, 48 << 20   # BAR1-visible pool is small
+  # Decode15: the code and mapped arenas were 256 / 48 MiB but hold 3.3 / 1.3 MiB (census); TGCU_CODE_MIB / TGCU_MAPPED_MIB size them, VRAM the expert cache gets
+  CTRL_SIZE, CODE_SIZE, MAPPED_SIZE = 32 << 20, int(os.getenv("TGCU_CODE_MIB", "256")) << 20, int(os.getenv("TGCU_MAPPED_MIB", "48")) << 20   # BAR1-visible pool is small
   TRANSIENT = int(os.getenv("TGCU_TRANSIENT_BYTES", str(CTRL_SIZE // 2)))   # the transient half of the control arena (test knob: a small ring wraps often)
 
   def __init__(self):
@@ -160,6 +174,11 @@ class Context:
     _ = self.dev.fifos  # brings up the compute and copy channels
     self.fifo = self.dev.fifos["COMPUTE:0"]
     self.iface = self.dev.iface
+    if _TOP_RESERVE: self._claim_top()
+    # Decode15: tinygrad sizes the shader local memory (per thread x 96 warps x 41 TPCs) for the largest stack seen so far and allocates a NEW buffer each time it grows: 73 MiB at boot, 115 MiB once the
+    # first attention kernel (384 B of stack) launches, mid-request.  TGCU_LMEM_STACK=N sizes it for N bytes of stack now, so the allocation happens once, before the expert cache takes the VRAM
+    # (a late growth needs the new buffer while the old one is still alive, the free VRAM that a small reserve no longer has)
+    if (_lm := int(os.getenv("TGCU_LMEM_STACK", "0"))): self.dev._ensure_has_local_memory(_lm + 0x240)
     self.nvg = onv.nv_gpu
     # cpu-visible control arena: queued QMDs + constant buffers, pushbuffers, semaphores
     self.ctrl = self.iface.alloc(self.CTRL_SIZE, cpu_access=True)
@@ -191,6 +210,7 @@ class Context:
   _enc_cache: dict = {}
   def _release(self, va:int):
     ch, sz = self.allocs.pop(va)
+    if _MEMLOG and sz >= (4 << 20): _memlog(self, "free", sz, f"chunk={self.chunks.index(ch)} off={(va-ch['base'])>>20}")
     free, off = ch["free"], va - ch["base"]
     free.append((off, sz)); free.sort()
     merged = []
@@ -207,30 +227,66 @@ class Context:
       if sem <= done: self._release(va)
       else: keep.append((va, sem))
     self.deferred = keep
-  def malloc(self, size:int) -> int:
-    sz = round_up(max(size, 1), self.ALIGN)
-    if self.deferred: self._reap()
-    for attempt in (0, 1):
-      for ch in self.chunks:
-        free = ch["free"]
-        for i, (off, n) in enumerate(free):
-          if n >= sz:
-            if n == sz: free.pop(i)
-            else: free[i] = (off + sz, n - sz)
-            va = ch["base"] + off
-            self.allocs[va] = (ch, sz)
-            return va
-      if attempt == 0 and self.deferred: self._reap(True)   # no room: wait for the freed blocks before a new chunk is carved
-      else: break
+  def _fit(self, sz:int) -> int|None:
+    best = None   # (hole size, chunk, index, offset)
+    for ch in self.chunks:
+      for i, (off, n) in enumerate(ch["free"]):
+        if n >= sz:
+          if not _BESTFIT:
+            best = (n, ch, i, off); break
+          if best is None or n < best[0]:
+            best = (n, ch, i, off)
+            if n == sz: break
+      if best is not None and (not _BESTFIT or best[0] == sz): break
+    if best is None: return None
+    n, ch, i, off = best
+    free = ch["free"]
+    if n == sz: free.pop(i)
+    else: free[i] = (off + sz, n - sz)
+    va = ch["base"] + off
+    self.allocs[va] = (ch, sz)
+    if _MEMLOG and sz >= (4 << 20): _memlog(self, "malloc", sz, f"chunk={self.chunks.index(ch)} off={off>>20}")
+    return va
+  def _claim_top(self):
+    # The top _TOP_RESERVE bytes of the physical pool are not usable (a memset of physical 24346..24410 MiB hung the 3090: test_vram_top.py) and tinygrad's TLSF is a
+    # smallest-fit allocator, not a bottom-up one, so merely counting the free bytes does not keep a chunk out of them: take the highest free block's tail now, while
+    # the pool is pristine, and never give it back.
+    a = self.iface.dev_impl.mm.pa_allocator
+    start = max(s for s, v in a.blocks.items() if v[3])
+    size = a.blocks[start][0]
+    assert start + size == a.size and size >= _TOP_RESERVE, f"top free block {start:#x}+{size:#x} does not reach the pool end {a.size:#x} / is smaller than the reserve"
+    keep = size - _TOP_RESERVE
+    if keep: a._split_block(start, size, keep); start += keep
+    a._remove_block(start, _TOP_RESERVE)
+    self.top_claim = (start + a.base, _TOP_RESERVE)
+    print(f"[tgcu] top of the physical pool claimed: {(start + a.base) / 1048576:.0f}..{(start + a.base + _TOP_RESERVE) / 1048576:.0f} MiB, never used", file=sys.stderr, flush=True)
+  def _new_chunk(self, sz:int) -> int:
     csize = max(self.CHUNK, round_up(sz, 2 << 20))
-    st = self.iface.alloc(csize + self.GUARD)
+    if _TOP_RESERVE and sz >= (32 << 20): csize = round_up(sz, 2 << 20)   # a big request gets a chunk of exactly its size (a 256 MiB chunk for a 112 MiB buffer strands the tail)
+    if _MEMLOG: _memlog(self, "NEWCHUNK-begin", csize + self.GUARD, f"req={sz>>20}MiB")
+    try: st = self.iface.alloc(csize + self.GUARD)
+    except MemoryError:   # the pool is nearly full: a small request takes just what it needs
+      if csize == round_up(sz, 2 << 20): raise
+      csize = round_up(sz, 2 << 20)
+      st = self.iface.alloc(csize + self.GUARD)
     # as from the CUDA driver, fresh device memory reads as zeros (kernels that reset their own counters rely on it)
     # (finished before the block is handed out: copy-engine writes into it, e.g. a graph's launch chain, are not queued)
     if self.zero_fn is not None: self.zero_fn(st.buf, csize + self.GUARD)
     ch = {"st": st, "base": st.buf, "size": csize, "free": [(sz, csize - sz)] if csize > sz else []}
     self.chunks.append(ch)
     self.allocs[st.buf] = (ch, sz)
+    if _MEMLOG: _memlog(self, "NEWCHUNK-done", csize + self.GUARD, f"req={sz>>20}MiB")
     return st.buf
+  def malloc(self, size:int) -> int:
+    sz = round_up(max(size, 1), self.ALIGN)
+    if self.deferred: self._reap()
+    va = self._fit(sz)
+    if va is not None: return va
+    if self.deferred:   # no room: wait for the freed blocks before a new chunk is carved
+      self._reap(True)
+      va = self._fit(sz)
+      if va is not None: return va
+    return self._new_chunk(sz)
   def free(self, va:int):
     if _FREE_DEFER:   # cudaFree without the stall: the work submitted so far is queued now, the block is reusable once it has completed
       self.flush()
@@ -239,6 +295,78 @@ class Context:
       return
     self.synchronize()   # cudaFree semantics: the block may be reused right away
     self._release(va)
+  # *** CUDA virtual memory (cuMem*; the engine's --kv-grow / vmm.hpp, reached through tgcudart's driver entry points): an address range is reserved with nothing behind it, 2 MiB
+  # physical chunks are created on their own and mapped into / unmapped from it by address.  The chunks come straight from tinygrad's physical pool (palloc) and the ranges from its
+  # VA allocator, so no tgcu chunk is involved; the chunks count in mem_info (vmm_phys).  A mapped chunk is not zeroed here (the cuMemCreate contract): the caller clears what it needs.
+  # PTE writes are batched: tinygrad's map_range / unmap_range cost 1.6 / 1.5 ms per 2 MiB chunk over the USB link (every PTE is read back and written alone), so cuMemMap / cuMemUnmap only
+  # queue, and the queue is written to the page tables as ONE bulk write per page-table page (512 chunks) when the caller commits (cuMemSetAccess) or touches the address space in another
+  # way (create / release / free / the next map or unmap): nothing can reach a queued mapping before cuMemSetAccess (the CUDA contract), and a queued unmap leaves the old page mapped
+  # until the flush, which is harmless to anything that no longer uses it.
+  VMM_GRAN = 2 << 20
+  vmm_phys, vmm_synced = 0, -1
+  vmm_maps: dict[int, int] = {}       # chunk address -> physical address, as written to the page tables
+  vmm_pend_map: dict[int, int] = {}   # chunk address -> physical address: maps not written yet
+  vmm_pend_unmap: list[int] = []      # chunk addresses to unmap at the next flush
+  def vmm_reserve(self, size:int) -> int:
+    return self.iface.dev_impl.mm.alloc_vaddr(round_up(size, self.VMM_GRAN), align=self.VMM_GRAN)
+  def vmm_free_va(self, va:int):
+    self.vmm_flush()
+    self.iface.dev_impl.mm.va_allocator.free(va)
+  def vmm_create(self) -> int:   # a handle (physical address + 1; 0 = out of memory)
+    try: pa = self.iface.dev_impl.mm.palloc(self.VMM_GRAN, align=self.VMM_GRAN, zero=False)
+    except MemoryError: return 0
+    self.vmm_phys += self.VMM_GRAN
+    return pa + 1
+  def vmm_release(self, h:int):
+    self.vmm_flush()   # a page that is still mapped must not go back to the pool
+    self.iface.dev_impl.mm.pfree(h - 1)
+    self.vmm_phys -= self.VMM_GRAN
+  def vmm_map(self, va:int, h:int):
+    if va in self.vmm_pend_map or (va in self.vmm_maps and va not in self.vmm_pend_unmap): raise AssertionError(f"vmm chunk {va:#x} is already mapped")
+    self.vmm_pend_map[va] = h - 1
+  def vmm_unmap(self, va:int):
+    if va in self.vmm_pend_map: del self.vmm_pend_map[va]; return   # never written
+    if va not in self.vmm_maps or va in self.vmm_pend_unmap: raise AssertionError(f"vmm chunk {va:#x} is not mapped")
+    self.vmm_pend_unmap.append(va)
+  def vmm_flush(self):
+    if not self.vmm_pend_unmap and not self.vmm_pend_map: return
+    if self.vmm_pend_unmap:
+      if self.pending or self.vmm_synced != self.sem_value:   # work queued so far must not run on a page that goes away (the engine quiesces first: this is then one cheap check)
+        self.flush(); self.synchronize(); self.vmm_synced = self.sem_value
+      vas = sorted(self.vmm_pend_unmap); self.vmm_pend_unmap = []
+      self._vmm_write(vas, None)
+      for va in vas: del self.vmm_maps[va]
+    if self.vmm_pend_map:
+      items = sorted(self.vmm_pend_map.items()); self.vmm_pend_map = {}
+      self._vmm_write([va for va, _ in items], [pa for _, pa in items])
+      self.vmm_maps.update(items)
+    self.iface.dev_impl.mm.on_range_mapped()   # one GPU TLB flush for the batch
+  def _vmm_write(self, vas:list[int], pas:list[int]|None):
+    # Page-table entries for the chunks `vas` (sorted, 2 MiB aligned): physical `pas` (pas None: invalid entries).  The entries of a run of chunks that share a page table are
+    # encoded by tinygrad's own set_entry (a stand-in page whose writes are collected) and go to VRAM in one bulk write.
+    import struct as _st
+    from tinygrad.runtime.support.memory import AddrSpace, PageTableTraverseContext
+    from tinygrad.runtime.support.nv.nvdev import NVPageTableEntry
+    dev = self.iface.dev_impl; mm = dev.mm; G = self.VMM_GRAN
+    class Cap:   # what set_entry stores, by entry index
+      def __init__(s, pt): s.nvdev, s.lv, s.entries = pt.nvdev, pt.lv, {}
+      def _is_dual_pde(s): return s.lv == s.nvdev.mm.level_cnt - 2
+    i = 0
+    while i < len(vas):
+      ctx = PageTableTraverseContext(dev, mm.root_page_table, vas[i], create_pts=pas is not None)
+      for _, pt, idx, _cnt, covers in ctx.next(G, paddr=pas[i] if pas is not None else None): break
+      assert covers == G, f"vmm chunk {vas[i]:#x}: the 2 MiB entry is at a page table level that covers {covers:#x}"
+      k = 1
+      while i + k < len(vas) and idx + k < mm.pte_cnt[pt.lv] and vas[i + k] == vas[i] + k * G: k += 1
+      cap = Cap(pt)
+      for j in range(k):
+        if pas is not None: NVPageTableEntry.set_entry(cap, idx + j, pas[i + j], uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=mm._frag_size(vas[i + j], G), valid=True)
+        else: NVPageTableEntry.set_entry(cap, idx + j, 0, valid=False)
+      w = 2 if cap._is_dual_pde() else 1
+      lo, n = w * idx, w * k
+      assert sorted(cap.entries) == list(range(lo, lo + n)), "vmm: the page-table writes are not one contiguous run"
+      pt.entries[lo:lo + n] = _st.pack(f"<{n}Q", *[cap.entries[lo + j] for j in range(n)])
+      i += k
   def mapped_alloc(self, size:int) -> tuple[int, int]:  # (device va, offset in the BAR-visible mapped arena)
     off = self.mapped_head
     self.mapped_head = round_up(off + size, 0x1000)
@@ -358,14 +486,17 @@ class Context:
       off += size
     return bytes(blob)
 
-  VRING_SIZE, BAR_BATCH = 64 << 20, 4096
+  VRING_SIZE, BAR_BATCH = int(os.getenv("TGCU_VRING_MIB", "64")) << 20, 4096
+  vring_peak, vring_wraps, vring_bytes = 0, 0, 0   # census: the high-water mark, the wraps (each waits for everything submitted) and the bytes launched through it
   def _vring_alloc(self, size:int) -> int:
     # VRAM ring for eager launch batches too big for BAR writes; wrapping waits for everything submitted
     if not hasattr(self, "vring_va"): self.vring_va, self.vring_head = self.malloc(self.VRING_SIZE), 0
     if self.vring_head + size > self.VRING_SIZE:
       self._wait(self.sem_value)
       self.vring_head = 0
+      self.vring_wraps += 1
     off, self.vring_head = self.vring_head, round_up(self.vring_head + size, 0x100)
+    self.vring_peak = max(self.vring_peak, self.vring_head); self.vring_bytes += size
     return self.vring_va + off
 
   def alloc_ctrl(self, size:int) -> int:
@@ -478,6 +609,9 @@ class Context:
       ce = struct.unpack("<I", self.ace.mv[self.ace.sem_off:self.ace.sem_off + 4])[0]
       print(f"[tgcu HANG] compute sem {struct.unpack('<Q', self.ctrl_mv[0:8])[0]} want {value} (submitted {self.sem_value}); CE sem {ce} (submitted {self.ace.sem_value}); last {self.last_launch}", file=sys.stderr, flush=True)
     except Exception as e: print(f"[tgcu HANG] state read failed: {e}", file=sys.stderr, flush=True)
+    if os.getenv("TGCU_HANG_DUMP") == "2":   # light: semaphores + Python stacks only (no USB probes, no RM fault readout, no native sample): the full dump coincided with the mini dropping off the network
+      faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+      return
     try:
       off = self.ace.ENTRIES * 8 + getattr(onv.nv_gpu.AmpereAControlGPFifo, 'GPGet').offset
       print(f"[tgcu HANG] CE gpget {struct.unpack_from('<I', self.ace.mv, off)[0]} put {self.ace.put % self.ace.ENTRIES}", file=sys.stderr, flush=True)
@@ -518,6 +652,9 @@ class Context:
         self._hang_dump(value)
       if el > timeout_s:
         report = ""
+        if RING_HOOK is not None:
+          try: RING_HOOK()
+          except Exception as e: print(f"[tgcu RING] dump failed: {e!r}", flush=True)
         try: self.dev.on_device_hang()   # raises with the MMU fault / SM error report read through GSP
         except Exception as e: report = str(e)
         raise RuntimeError(f"GPU timeout waiting for semaphore {value} (last {self.last_launch}): {report}")
@@ -596,6 +733,7 @@ def anon_key(mangled:str) -> str: return canon(mangled)
 # *** async copy engine: a channel group of its own, so copies run while a compute graph spins on a host flag ***
 
 _PROF = bool(os.getenv("TGCU_PROF"))
+_ARM_EARLY = int(os.getenv("TGCU_ARM_EARLY", "0"))   # decode ring (h2d_pre with a next pull): 1 = arm the bulk OUT in h2d_pre (off the critical path), 2 = IN arm then OUT arm, 3 = OUT arm then IN arm; the critical path keeps only the bulk OUT + the hold write
 _POKE1 = int(os.getenv("TGCU_POKE1", "0"))   # bit 0: GPPut, 1: doorbell, 2: hold word as ONE USB control transfer instead of control + bulk (the stream write)
 def _w32(mmio, off:int, val:int):
   a = mmio.addr + off
@@ -645,6 +783,7 @@ class AsyncCopy:
     self.sem_off = 0x8000                                   # semaphore word inside the same allocation
     self.sem_value = 0
     self.gate_seq = 0
+    self._rd_early = self._wr_early = False
     self.hold_va, self.hold_off, self.hold_tok = 0, 0, 0   # set by Context once its mapped arena exists
     self._submit(onv.nvm(4, nvg.NVC6C0_SET_OBJECT, iface.dma_class))
     # TGCU_TS_G / TGCU_TS_C (microseconds): the graphics/compute group's and the copy group's RM time slice (both 1024 by default).  A short compute slice lets the copy
@@ -858,7 +997,8 @@ class AsyncCopy:
   # ---- pre-armed handshake transfers (STRATA_HS_PRE): the copy engine pulls the doorbell payload the moment the GPU raises
   # the ring word, with no host poll / arm / submit after the ring; the y push + flag is one gated job submitted before the
   # CPU computes, so only the arm and the bulk OUT are left once the rows exist.
-  def _d2h_cmds(self, src:int, n:int, gate_va:int, want:int, hold:int|None=None) -> list[int]:
+  def _d2h_cmds(self, src, n:int, gate_va:int, want:int, hold:int|None=None) -> list[int]:
+    # src: a device VA (one copy of n bytes) or, with TGCU_PULL_PACK, a list of (va, nbytes) gathered back to back into the staging SRAM (n = their total)
     nvg, nvm = onv.nv_gpu, onv.nvm
     self.sem_value += 1
     sem = self.va + self.sem_off
@@ -869,10 +1009,13 @@ class AsyncCopy:
                   onv.nv_flags("NVC56F_SEM_EXECUTE", operation="acquire", payload_size="32bit"))
     cmds += nvm(0, nvg.NVC56F_SEM_ADDR_LO, gate_va & 0xffffffff, gate_va >> 32, want & 0xffffffff, 0,
                 onv.nv_flags("NVC56F_SEM_EXECUTE", operation="acq_strict_geq", payload_size="32bit"))
-    cmds += nvm(4, nvg.NVC6B5_OFFSET_IN_UPPER, src >> 32, src & 0xffffffff, self.sram_va >> 32, self.sram_va & 0xffffffff)
-    cmds += nvm(4, nvg.NVC6B5_LINE_LENGTH_IN, n)
-    cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", data_transfer_type="non_pipelined",
-                                                         src_memory_layout="pitch", dst_memory_layout="pitch"))
+    pos = 0
+    for sva, sn in (src if isinstance(src, list) else [(src, n)]):
+      dva = self.sram_va + pos; pos += sn
+      cmds += nvm(4, nvg.NVC6B5_OFFSET_IN_UPPER, sva >> 32, sva & 0xffffffff, dva >> 32, dva & 0xffffffff)
+      cmds += nvm(4, nvg.NVC6B5_LINE_LENGTH_IN, sn)
+      cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", data_transfer_type="non_pipelined",
+                                                           src_memory_layout="pitch", dst_memory_layout="pitch"))
     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, self.cq_va >> 32, self.cq_va & 0xffffffff, 0)
     cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, sem >> 32, sem & 0xffffffff, self.sem_value & 0xffffffff)
@@ -882,7 +1025,7 @@ class AsyncCopy:
   def _rd_arm(self, wire:int):
     self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
 
-  def d2h_arm(self, src:int, n:int, gate_va:int, want:int):
+  def d2h_arm(self, src, n:int, gate_va:int, want:int):
     assert n <= self.CHUNK
     wire = round_up(self.prefix + n, 512)
     self._rd_arm(wire)
@@ -892,7 +1035,8 @@ class AsyncCopy:
   def d2h_release(self):
     # arm the bulk IN, then open the hold word: the queued (deferred) pull may now ring the bridge
     wire, n = self._rd
-    self._rd_arm(wire)
+    if self._rd_early: self._rd_early = False
+    else: self._rd_arm(wire)
     self.hold_tok += 1
     if _POKE1 & 4: _w32(self.ctx.mapped_mv, self.hold_off, self.hold_tok)
     else: self.ctx.mapped_mv[self.hold_off:self.hold_off + 4] = struct.pack("<I", self.hold_tok)
@@ -900,6 +1044,10 @@ class AsyncCopy:
   def d2h_collect(self, timeout:int=20000) -> memoryview:
     wire, n = self._rd
     return self.usb.usb.bulk_read(wire, timeout=timeout)[self.prefix:self.prefix + n]   # a view of the USB buffer, valid until the next bulk transfer: the caller copies it out at once
+
+  def _wr_arm(self):
+    wire = self._wr[0]
+    self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
 
   def h2d_pre(self, dsts:list[tuple[int, int]], nxt:tuple|None=None) -> list[int]:
     # dsts = [(vram va, nbytes multiple of 4)]; the payload is their concatenation. Queue ONE gated job (acquire on the sentinel,
@@ -927,13 +1075,18 @@ class AsyncCopy:
         cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
     cmds += nvm(4, nvg.NVC6B5_SET_SEMAPHORE_A, sem >> 32, sem & 0xffffffff, self.sem_value & 0xffffffff)
     cmds += nvm(4, nvg.NVC6B5_LAUNCH_DMA, onv.nv_flags("NVC6B5_LAUNCH_DMA", flush_enable="true", semaphore_type="release_one_word_semaphore"))
-    if nxt is not None:   # (src va, nbytes, seq gate va, want): the next ring's pull, held until d2h_release()
+    if nxt is not None:   # (src va or [(va, nbytes)], nbytes, seq gate va, want): the next ring's pull, held until d2h_release()
       src, n, gva, want = nxt
       assert n <= self.CHUNK
       cmds += self._d2h_cmds(src, n, gva, want, hold=self.hold_tok + 1)
       self._rd = (round_up(self.prefix + n, 512), n)
     self._submit(cmds)
     self._wr = (wire, gate, o)
+    if _ARM_EARLY and nxt is not None:   # the arms need only the wire sizes: do them now, while the Mac computes
+      if _ARM_EARLY == 2: self._rd_arm(self._rd[0]); self._rd_early = True
+      self._wr_arm()
+      if _ARM_EARLY == 3: self._rd_arm(self._rd[0]); self._rd_early = True
+      self._wr_early = True
     return pos
 
   def h2d_go(self, parts:list[bytes]):
@@ -942,7 +1095,8 @@ class AsyncCopy:
     p = 0
     for b in parts: buf[p:p + len(b)] = b; p += len(b)
     buf[wire - 8:] = struct.pack("<Q", gate)
-    self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
+    if self._wr_early: self._wr_early = False
+    else: self._wr_arm()
     self.usb.usb.bulk_write(buf)   # a bytearray: bulk_write copies it into its C buffer, no extra bytes() copy
 
 # *** TGCU_HSPROF=1 (diagnostic, HostTailAndPrefill 2026-10-12): per-call wall time of the handshake path + USB transfer counts, printed every 480 rings ***
