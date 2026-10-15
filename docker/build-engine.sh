@@ -13,9 +13,9 @@ source)    # pristine tag, commit checked, then every patch in patches/strata (i
   for p in /patches/strata/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied $(basename $p)"; done
   git apply --check -p1 /patches/vision/0001-strata-vision-metal-macos.patch; git apply -p1 /patches/vision/0001-strata-vision-metal-macos.patch; echo "applied 0001-strata-vision-metal-macos.patch"
   rm -rf .git ;;
-configure) # same options as the deployed ~/strata-linux/CMakeCache.txt (read 2026-10-12)
+configure) # same options as the deployed ~/strata-linux/CMakeCache.txt (read 2026-10-12; STRATA_ISA_FLOOR=none and CMAKE_EXPORT_COMPILE_COMMANDS=ON added 2026-10-15: the engine built without the ISA floor differed from the deployed one in the CPU kernels' cpu_avxvnni_ok)
   cmake -S $R/strata -B $R/strata-linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
-    -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=$R/cuda-13.4/bin/nvcc -DCUDAToolkit_ROOT=$R/cuda-13.4 > $R/configure.log 2>&1 || { tail -40 $R/configure.log >&2; fail "cmake configure"; }
+    -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=$R/cuda-13.4/bin/nvcc -DCUDAToolkit_ROOT=$R/cuda-13.4 -DSTRATA_ISA_FLOOR=none -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > $R/configure.log 2>&1 || { tail -40 $R/configure.log >&2; fail "cmake configure"; }
   tail -3 $R/configure.log
   (cd $R/strata-linux && ninja -t commands strata > strata_cmds.txt)
   echo "compile commands: $(wc -l < $R/strata-linux/strata_cmds.txt) lines"
