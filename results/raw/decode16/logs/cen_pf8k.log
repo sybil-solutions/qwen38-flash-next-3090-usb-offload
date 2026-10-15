@@ -1,0 +1,5 @@
+{"tag": "cen15_8k", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 22172, "tok_s": 361.6, "wall_s": 22.25, "ts": "2026-10-15T01:11:08Z"}
+
+| target | run | prompt_n | ms | tok/s |
+|---|---|---|---|---|
+| 8000 | 1 | 8018 | 22172 | 361.6 |

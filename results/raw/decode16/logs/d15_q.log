@@ -1,0 +1,63 @@
+### deploy 20:07:36
+code-cpp: R1 {'prompt_n': 3610, 'cache_n': 0, 'prompt_ms': 16888}  R2 read 49 reused 3610 rows 48 OK  R3 read 49 reused 3659 rows 48 OK
+code-py: R1 {'prompt_n': 3003, 'cache_n': 0, 'prompt_ms': 17190}  R2 read 49 reused 3003 rows 48 OK  R3 read 49 reused 3052 rows 48 OK
+agentic: R1 {'prompt_n': 4236, 'cache_n': 0, 'prompt_ms': 17519}  R2 read 30 reused 4236 rows 29 OK  R3 read 49 reused 4266 rows 48 OK
+long-9K: R1 {'prompt_n': 9542, 'cache_n': 0, 'prompt_ms': 24574}  R2 read 30 reused 9542 rows 29 OK  R3 read 30 reused 9572 rows 29 OK
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 13555}  R2 read 49 reused 1388 rows 48 OK  R3 read 45 reused 1437 rows 44 OK
+math: R1 {'prompt_n': 1624, 'cache_n': 0, 'prompt_ms': 13880}  R2 read 48 reused 1624 rows 47 OK  R3 read 48 reused 1672 rows 47 OK
+code-cu: R1 {'prompt_n': 3552, 'cache_n': 0, 'prompt_ms': 16115}  R2 read 49 reused 3552 rows 48 OK  R3 read 49 reused 3601 rows 48 OK
+docs: R1 {'prompt_n': 3068, 'cache_n': 0, 'prompt_ms': 16438}  R2 read 49 reused 3068 rows 48 OK  R3 read 49 reused 3117 rows 48 OK
+-- prime (short)
+{"i": 0, "wall_s": 12.4, "prompt_n": 29, "prompt_ms": 1455.1, "predicted_n": 300, "predicted_ms": 10880.6, "tok_s": 27.6, "drafts": "212/260", "pageins_mib": 129, "pageouts_mib": 0, "head": "```python def is_prime(n: int) -> bool:     \"\"\"     Check whether a given integer n is a p"}
+{"i": 1, "wall_s": 11.0, "prompt_n": 35, "prompt_ms": 1663.8, "predicted_n": 248, "predicted_ms": 9281.1, "tok_s": 26.7, "drafts": "127/232", "pageins_mib": 58, "pageouts_mib": 0, "head": "At the core of a Mixture-of-Experts (MoE) architecture is a lightweight gating network, of"}
+{"i": 2, "wall_s": 13.4, "prompt_n": 29, "prompt_ms": 1397.9, "predicted_n": 285, "predicted_ms": 11994.7, "tok_s": 23.8, "drafts": "139/252", "pageins_mib": 7, "pageouts_mib": 0, "head": "Elias had not spoken a word in three years. The lighthouse, perched on the jagged teeth of"}
+-- prime (after lane)
+{"name": "d15cur", "prompt_n": 3620, "cache_n": 0, "prompt_ms": 15048, "head": "```python def is_prime(n: int) -> bool:     \"\"\"     Check whether a given integer is a prime number."}
+### SCORES
+== lpcmp p-off -> d15cur
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96   98.96  0.002127   0.03700
+code-py         96       96   97.92  0.003691   0.06382
+agentic         77       77   93.51  0.007313   0.09751
+long-9K         58       58   98.28  0.007768   0.14405
+chat            92       92   98.91  0.005738   0.08297
+math            94       94   98.94  0.003292   0.04636
+code-cu         96       96   98.96  0.002865   0.07606
+docs            96       96   97.92  0.002216   0.04356
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.01%, mean KL 0.004110 nats, p99 KL 0.058355 nats, mean |dlogp(target)| 0.06953  (KL = top-64-support estimate)
+GATE: PASS
+== lpcmp d13cur -> d15cur
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96   96.88  0.001702   0.04993
+code-py         96       96   97.92  0.002344   0.06059
+agentic         77       77   93.51  0.015264   0.16370
+long-9K         58       58  100.00  0.006017   0.10596
+chat            92       92   98.91  0.018203   0.08159
+math            94       94   95.74  0.009253   0.04912
+code-cu         96       96  100.00  0.003751   0.06263
+docs            96       96   97.92  0.003789   0.04304
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 97.59%, mean KL 0.007349 nats, p99 KL 0.104085 nats, mean |dlogp(target)| 0.07323  (KL = top-64-support estimate)
+GATE: FAIL: p99 KL 0.1041 >= 0.1
+== lpcmp d12cur -> d15cur
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96   95.83  0.002006   0.05308
+code-py         96       96   97.92  0.002669   0.04656
+agentic         77       77   96.10  0.011441   0.10566
+long-9K         58       58   98.28  0.010264   0.14825
+chat            92       92   97.83  0.005697   0.06194
+math            94       94   97.87  0.007097   0.04675
+code-cu         96       96  100.00  0.002137   0.03910
+docs            96       96   97.92  0.003187   0.03831
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 97.73%, mean KL 0.005145 nats, p99 KL 0.110972 nats, mean |dlogp(target)| 0.06216  (KL = top-64-support estimate)
+GATE: FAIL: p99 KL 0.1110 >= 0.1
+== text cmp d13cur d15cur
+code-cpp  (3610 tok): identical False, common prefix 25/28 words; d13cur: 'Based on the provided C++ source code, the last function sho'  d15cur: 'Based on the provided C++ source code, the last function sho'
+code-py   (3003 tok): identical True, common prefix 29/29 words; d13cur: 'Based on the provided Python code excerpt, there is **one** '  d15cur: 'Based on the provided Python code excerpt, there is **one** '
+agentic   (4236 tok): identical False, common prefix 4/6 words; d13cur: '{\n  "name": "read_file",\n  "path": "step_numbers_with_retry.'  d15cur: '{\n  "name": "read_file",\n  "path": "session_141473664.log"\n}'
+long-9K   (9542 tok): identical True, common prefix 6/6 words; d13cur: 'The secret code word is **amber-731**.'  d15cur: 'The secret code word is **amber-731**.'
+chat      (1388 tok): identical True, common prefix 42/42 words; d13cur: 'Strata optimizes large model inference by distributing the w'  d15cur: 'Strata optimizes large model inference by distributing the w'
+math      (1624 tok): identical False, common prefix 0/29 words; d13cur: 'Here is the step-by-step solution for **Problem 30**:\n\n**Pro'  d15cur: 'To solve Problem 30, we need to determine if and when the se'
+code-cu   (3552 tok): identical True, common prefix 35/35 words; d13cur: 'Based on the provided CUDA source excerpt, here is the analy'  d15cur: 'Based on the provided CUDA source excerpt, here is the analy'
+docs      (3068 tok): identical True, common prefix 34/34 words; d13cur: 'Strata is a local AI application that enables users to run l'  d15cur: 'Strata is a local AI application that enables users to run l'
+identical free-running replies: 5/8
+Q14DONE

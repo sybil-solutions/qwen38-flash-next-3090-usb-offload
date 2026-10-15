@@ -15,7 +15,113 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0. Latest configuration: `configs/strata-exl3-full512-final-g4-lru-ht.json.tmpl` (host-tail step)
+## 0. Latest configuration: `configs/strata-exl3-full512-c.json.tmpl` (config C, Decode16, 2026-10-15)
+
+= the host-tail configuration (section 0a) plus everything the campaign shipped after it, in this order (every item has its patch or file in this repo, see [patches/README.md](../patches/README.md)): the Mac lane takes every chunk (`0006`) and PLE rows are warmed ahead;
+prefix replay in the server (`0007`); int8 block-32 transport of the lane's rows and the pair job, G=6 (`0008`, `STRATA_PF_XPORT8=1`, `STRATA_PF_PAIR=1`, `STRATA_PF_GROUP=6`, `STRATA_PF_MIN_CHUNKS=6`); the borrow fix (`0009`) that turns the prefill borrow on (884 slots lent per prompt); tgcu allocator
+top reserve + best fit (`shim/0001`); `TGCU_ARM_EARLY` / `TGCU_PULL_PACK` (`shim/0003`); guided/staged refill of the lent slots and the `LRUMIB` vision hook (`0011`, `0012`, `STRATA_D7_MODE=7`); the placement profile with 4 whole-resident layers + staged startup fill (`exl3/placement/d8w4/profile.bin`, `0013`);
+4 KiB-aligned SSD reads (`0016`, `0017`, `STRATA_D11_ALIGN=1`, `STRATA_D12_PFALIGN=1`); the LRU at 6,400 slots (`STRATA_EXL3_METAL_SLOTS`, needs the raised wired limit); elastic K/V (`0018`, `shim/0004`, `STRATA_KV_GROW=1`, `STRATA_KV_GROW_RESIDENT=1`: the 200K K/V occupies only the cells in use); elastic indexer keys and
+the VRAM knobs (`0019`, `shim/0005`, `TGCU_CODE_MIB=32` ...). Host: `sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032385536 vm.user_wire_limit=15032385536` (set by the user on the mini, resets on reboot), `caffeinate -dimsu`.
+Same rig, method and prompt sets as the sections below unless stated: one request at a time, greedy, MTP spec 4, `--kv k8v4 --max-context 204800`, vision encoder configured, all 512 experts computed. Live config md5 `bc8450a1e583f2ba5b3f756832cc1f62`,
+engine `strata_d15a` md5 `fc6e4ddd2c9549d6c52a922ffb8ad718`, shim `tgcu.py d2692131`, `tgcu_api.py 9697e39c`, `libcudart.dylib ec0517ec`, Metal lib sha256 `e38a011c...`, server `serve/server.py 780aa4b1`. Raw logs and the tools that produced them:
+[`results/raw/decode16/`](../results/raw/decode16/) (`logs/` = the runs below, `tools/` = the scripts as run, `cfg/` = the configs of the arms, key redacted), [`results/raw/decode15/`](../results/raw/decode15/) (VRAM census, simulator).
+
+Start-up (from `logs/d15_final.log`, 2026-10-14 20:14 PDT, READY after 146 s): `expert cache auto: 17.79 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9958 slots`, 17.27 GiB of VRAM; staged profile fill 63.7 s (291 MB/s); `exl3-metal: lane ready (6400 slots of 1867776 B registered)`, LRU preloaded in 5.3 s (11.95 GB, F_NOCACHE);
+the prompt path borrows 884 cache slots (1.53 GiB); elastic K/V: 16,384 of 204,800 cells in VRAM (0.23 of 2.43 GiB); **190 MiB of VRAM free with everything loaded** (the engine warns `LOW`; no OOM in the ~110-request regression); kernel wired memory 12.4-12.9 GiB, swap used 118 MB at READY, 683 MB at the end of the regression.
+
+### 0.1 Decode, c1, MTP (tok/s)
+
+ABBA run (`ab15.sh`; fresh server restart per arm, 29 realistic prompts of 3.7-19.8K tokens + 12 probe requests per arm; control = the Decode14 config `live_d14.json` on the Decode15 shim with the new knobs unset; 2026-10-14 18:27-19:52 PDT (the mini's local clock, UTC-7; the prefill rows' own timestamps are UTC)), source `logs/ab15.out`, `ctlA/newA/newB/ctlB.out|jsonl|probe.log`:
+
+| arm | realistic 29 prompts (mean tok/s) | 12 probe requests (mean tok/s) | image request |
+|---|---|---|---|
+| ctlA (Decode14 config) | 30.24 | 26.03 | - |
+| newA (config C) | 31.28 | 26.58 | PASS |
+| newB (config C) | 30.79 | 27.09 | PASS |
+| ctlB (Decode14 config) | 30.27 | 26.00 | - |
+| **control -> config C** | 30.25 -> **31.03** (+2.59 %, 24 of 29 prompts faster, mean ratio 1.026, mean TTFT 24.27 -> 23.75 s) | 26.02 -> **26.84** (+3.1 %) | |
+
+Final regression of the config (`logs/d15_final.log`, 2026-10-14 20:14-20:55 PDT, one fresh start, ~110 requests): realistic 29 prompts mean **30.82** tok/s (TTFT mean 23.75 s; per prompt 28.2-34.0; the 126-token reply of p29 20.0); decode probes
+(prompt 1 code / 2 explanation / 3 story; `decode probes x2` = the sequence ran twice): first pass 29.9 / 25.7 / 23.7, then 27.0 / 29.6 / 23.3 and 27.0 / 31.1 / 23.6; second pass 26.3 / 26.9 / 23.5, then 26.9 / 29.8 / 23.4 and 26.9 / 28.6 / 24.7; after the whole regression 29.3 / 29.4 / 23.6 and 26.8 / 29.6 / 24.8.
+Time to first token of the 29-35 token prompts: 0.85-1.7 s.
+The earlier tables of this file use the same three probe prompts (sections 0a, 1, 3).
+
+### 0.2 Prefill and context, c1 (tok/s)
+
+| prompt tokens | prefill speed (run 1 / run 2) | decode over the answer | note | source |
+|---|---|---|---|---|
+| 2,565 | 176.1 / 176.7 | not measured | SSD-bound (477 MB of cold blobs per layer) | `d15_final.log` |
+| 8,018 / 8,017 | 383.0 / 417.8 | not measured | | same |
+| 18,330 / 18,329 | 445.9 / 470.1 | not measured | | same |
+| 33,842 / 33,841 | 555.4 / 584.2 | not measured | 5 successive 33K needles (depth 10 / 50 / 90 / 30 / 70 %): all found, 70 / 71 / 46 / 55 / 54 s | same |
+| 97,811 | 560.9 (TTFT 174.6 s) | 27.0 (300 tokens, MTP 171/266) | needle `meadow-copper-504` found; K/V grew to 98,304 cells (1.16 GiB), the cache lent 538 slots, trimmed back afterwards | `long_C.log` |
+| 189,481 | 548.1 (TTFT 345.9 s) | 24.2 (300 tokens, MTP 168/263) | needle found; K/V grew to 196,608 cells (2.30 GiB), 1,241 slots lent; probes afterwards 27.4 / 29.6 / 25.4 and 26.4 / 29.0 / 24.2 | same |
+| 189,450 | 360 s total | not measured | the 190K needle of the final regression: found | `d15_final.log` |
+
+Agent-turn pattern after a 3,073-token base prompt (`d15_final.log`): 30 new tokens 2.56 s, 100 new 6.14 s, 250 new 7.44 s, 1000 new 11.8 s wall. Tool-call reuse: turn 2 read 40 tokens and reused 3,379 of the 3,340-token turn 1 (2.8 s): PASS. Image: the NYT front page photo,
+`This is The New York Times, and its headline reads: "MEN WALK ON MOON ..."` (16.4 s, 329 prompt tokens): PASS. GPU timeouts in the whole regression: 0.
+
+### 0.3 Quality gate (teacher-forced)
+
+`logs/d15_q.log` (`q15.sh`): 8 prompts (code C++/Python/CUDA, agentic, 9K long context, chat, math, docs; 1.4-9.5K tokens), the engine logs the top-64 ids and log-probabilities of every position of a second turn read through the decode windows (`STRATA_LOGPOS`),
+scored against the saved replies of the baseline stack "p-off" (the config with the int8 prefill transport off, Decode5-era): **705 positions, coverage 100 %, top-1 agreement 98.01 %, mean KL 0.004110 nats, p99 KL 0.058355 nats, mean |dlogp(target)| 0.0695: GATE PASS**
+(gate: top-1 >= 97 %, mean KL < 0.01, p99 KL < 0.1, coverage >= 99 %; proposed by the builder of the transport, not a user number; KL is a top-64-support estimate because the server has no logprobs API). Per prompt top-1: 93.5-99.0 %. Comparisons with the previous stacks, which are not the gate:
+
+| compared pair | top-1 | mean KL | p99 KL |
+|---|---|---|---|
+| p-off -> config C | 98.01 % | 0.00411 | 0.0584 (PASS) |
+| Decode13 stack -> config C | 97.59 % | 0.00735 | 0.1041 |
+| Decode12 stack -> config C | 97.73 % | 0.00515 | 0.1110 |
+
+Free-running greedy replies of config C and the Decode13 stack are identical on 5 of 8 prompts. The mean |dlogp| gate originally proposed (< 0.03) is not met by any configuration of this campaign (an equivalent config with a different slot count or chunking moves it by ~0.07, the engine itself is bit-deterministic run to run); the gate that was applied is the one above.
+The reference is the campaign's own earlier greedy output, **not stock exllamav3**.
+
+### 0.4 Concurrency and the batch engine (not part of config C)
+
+One request at a time is how config C runs: the server queues the other requests (FIFO), `--batch` is off. Measured at `--max-context 40960` (the batch engine has no elastic K/V; each slot session carves all 40,960 cells, so expert slots shrink 9,983 -> 9,113 / 9,192 / 8,387 / 8,543 for batch2m / batch2 / batch4m / batch4;
+`m` = with the MTP draft), config C as the base, `logs/abconc_*`, tool `abconc15b.sh`/`abconc15c.sh`. Aggregate = generated tokens / wall span (TTFT included); per-request decode = tokens / (wall - TTFT) at the client; TTFT = mean.
+
+| 6-9K prompts, 300 tokens (aggregate tok/s / per-request decode tok/s / TTFT s) | c=1 | c=2 | c=4 |
+|---|---|---|---|
+| control (`--max-context 40960`, FIFO queue, 8 prompts) | 9.71 / 31.9 / 21.5 | 10.16 / 32.2 / 46.2 | 10.21 / 32.7 / 86.7 |
+| batch4m (8 prompts) | 5.42 / 28.3 / 44.7 | 2.17 / 1.4 / 63.0 | 2.01 / 0.6 / 104.8 |
+| batch2m | 5.11 / 29.2 / 48.4 | 2.42 / 1.8 / 70.8 | 2.36 / 1.7 / 211.1 |
+| batch4 (no draft) | 4.98 / 28.9 / 49.9 | 2.23 / 1.5 / 65.1 | 2.74 / 0.9 / 93.7 |
+| batch2 (no draft) | 5.22 / 30.7 / 47.7 | 2.40 / 1.7 / 65.4 | 2.38 / 1.7 / 209.0 |
+
+Short prompts (30 tokens, 8 x 300 tokens, isolates the batch decode rate): control 25.13 / 27.7 / 1.0 (c=1), 25.29 / 27.4 / 10.0 (c=2), 26.21 / 28.4 / 24.1 (c=4); batch4m 22.60 / 25.6 / 1.4, 2.04 / 1.1 / 2.2, 1.73 / 0.5 / 4.4; batch2m 23.39 / 26.8 / 1.5, 2.14 / 1.1 / 2.1, 2.36 / 1.9 / 195.0;
+batch4 23.25 / 25.7 / 1.2, 2.11 / 1.1 / 1.7, 1.67 / 0.45 / 2.9; batch2 24.37 / 26.7 / 1.0, 2.45 / 1.3 / 1.5, 2.48 / 1.3 / 167.4. **Finding:** a batch window averages 2-3.5 rows and takes 540-1,650 ms (GPU-reach wait 18-26 ms + CPU experts 513-1,628 ms, 3.8-12.6 CPU-computed experts per layer-window, `--pcie-frac 0`): the misses are computed on the generic CPU tier, not through the c=1 Metal lane / ring that gives ~100 ms windows;
+a 6-9K prompt is read in 3-4 parts with the other slots decoding for 11-19 s between them (prefill 100-120 tok/s against ~400). Aggregate is -80 % against the c=1 control, c=1 on a batch config -11 %; no fault, no GPU timeout, the engine stayed alive on every arm. The +20 % condition was not met, no per-slot elastic K/V was attempted in this step.
+Follow-up work (not in this repo, not promoted, config C unchanged): the campaign's later ledger rows record batch misses routed through the Metal lane and per-slot elastic K/V built and measured at 200K: short-prompt c=4 aggregate 24.9-26.5 tok/s against 25.3 for the solo control (+5 % best), real-prompt arms limited by the batch engine's chunk-by-chunk prompt read; engine work is still in progress
+(`results/campaign/ledger.jsonl`, 2026-10-15T10:50Z and T19:10Z rows).
+
+### 0.5 Where the decode window goes now (model, not a measurement of config C)
+
+The campaign fitted `W[ms/window] = 25.8 + 1.06 x (48 - k) + 0.0424 x N_in + 0.64 x M` (k = whole-resident layers, N_in = in-place cold experts per window, M = LRU misses per window) to the Decode7/8 stack (final fit: 25.8 fixed + 46.6 rings + 12.4 in-place Metal + 19.1 misses = 104.0 ms modelled, 100.7 measured). The elastic K/V and the VRAM knobs
+moved M and N_in (more VRAM slots: +1,074 slots in Decode14, +491 in Decode15; the simulator priced +1,000 slots at ~7 ms/window). Not re-fitted for config C. At the calibrated terms the exact stack tops out near 31 tok/s realistic / 27 probes; 33 would need about +1,000 more VRAM slots (+6.5 %) or a miss-free LRU
+(impossible on a 16 GB mini), neither available without touching the experts, the 200K context, vision or MTP (the Decode16 ledger row). Simulator and census: `results/raw/decode15/` (`sim15.py`, `table15_items.out`, `census.out`).
+
+### 0.6 Progression since the host-tail step
+
+Realistic = the 29-prompt set (or the 10-prompt subset where only that was run, marked); probes = the three probe prompts. Prefill = run 1 / run 2 at 2.5K / 8K / 18K / 33K tokens where the step measured them. Sources: the campaign log entries of that date in [`results/campaign/EXL3_PLAN-log.md`](../results/campaign/EXL3_PLAN-log.md) (each step's own arms were interleaved ABBA with a control;
+numbers of different steps were taken in different sessions and are not strictly comparable: the plan notes bimodal decode after the 2026-10-12 14:46 reboot until `caffeinate` was set at 19:36).
+
+| step (UTC) | what | decode | prefill 2.5K / 8K / 18K / 33K |
+|---|---|---|---|
+| 2026-10-12 07:35 | host-tail (section 0a) | probes 18.2 / 21.4 / 18.1 | - / 428 cold, 481 warm @7.9K / 407 @17.6K / 396 @33K |
+| 2026-10-12 13:15 | Prefill600: lane min 1 chunk, PLE warm-ahead (`0006`) | probes 18.6 / 21.8 / 19.1 and 18.3 / 22.6 / 17.1 | 225 / 227, 416 / 456, 433 / 435, 435 / 440 |
+| 2026-10-12 18:40 | x8 + pair job, G=6, reserve 700 (`0008`) | - | 216 / 218, 441 / 491, 470 / 506, 563 / 586 |
+| 2026-10-13 06:30 | Decode5: borrow fix (`0009`), reserve 600, 8,393 slots | probes 19.2 / 21.9 / 18.9 and 19.2 / 22.6 / 19.5 | 123 / 124, 301 / 323, 389 / 412, 506 / 524 |
+| 2026-10-13 10:10 | Decode6: ARM_EARLY + PULL_PACK (`shim/0003`) | probes 20.1 / 22.9 / 20.1 and 20.2 / 23.8 / 20.8 | 120 / 125, 301 / 326, 385 / 408, 508 / 525 |
+| 2026-10-13 14:10 | Decode7: guided/staged refill, LRU 6,000 (`0011`) | probes mean 21.66 (12 requests) | 156 / 156, 360 / 396, 433 / 453, 540 / 561 |
+| 2026-10-13 18:50 | Decode8: 4 whole layers + LRU 6,200 + staged fill (`0013`) | realistic 27.41, probes 23.77 | 156 / 157, 343 / 373, 413 / 428, 509 / 523 |
+| 2026-10-14 06:10 | Decode11: aligned SSD reads (`0016`) | +2.2 % realistic (10-prompt set), +3.5 % probes | 155 / 156, 344 / 376, 413 / 429, 501 / 523 |
+| 2026-10-14 10:05 | Decode12: aligned prefill reads (`0017`) | realistic 28.49 (10 prompts), probes 24.43 | 163 / 161, 348 / 384, 423 / 442, 524 / 541 |
+| 2026-10-14 16:40 | Decode13: LRU 6,400 slots (config only) | realistic 28.63, probes 24.8 | 161 / 162, 347 / 382, 423 / 442, 522 / 538 |
+| 2026-10-14 19:55 | Decode14: elastic K/V (`0018`, `shim/0004`) | realistic 30.30 (29 prompts), probes 26.06; 100K decode 24.8, 190K 23.5 | 174 / 176, 367 / 409, 446 / 468, 556 / 575 |
+| 2026-10-15 09:00 | **Decode16: config C** (`0019`, `shim/0005`) | **realistic 31.03 (ABBA; 30.82 final regression), probes 26.84; 100K 27.0, 190K 24.2** | **176 / 177, 383 / 418, 446 / 470, 555 / 584** |
+
+## 0a. Previous configuration: `configs/strata-exl3-full512-final-g4-lru-ht.json.tmpl` (host-tail step)
 
 = the configuration of section 1 plus `TGCU_POKE1=15` (GPPut / doorbell / hold-word as one control transfer), `TGCU_FREE_DEFER=1` (cudaFree hands the block back when its submission completed instead of a
 full synchronize per free), `TGCU_H2D_RELAX=1` (a bulk push waits only for the launches whose parameters fall inside its destination range), `TGCU_TS_G=150` (compute channel group time slice
@@ -25,7 +131,7 @@ full synchronize per free), `TGCU_H2D_RELAX=1` (a bulk push waits only for the l
 Run 2026-10-12 07:26:46Z to 07:34:39Z on a freshly restarted server, same weights/placement/memory layout as section 1 (7,400 VRAM slots, 716 MiB free, LRU 5,600 slots).
 Source: [`results/raw/hosttail/ht_final.log`](../results/raw/hosttail/ht_final.log) (`split_HF_{a,b,c}_{0,1,2}.txt` and `split_HT9_st_*.txt` in the same directory are the generated texts of the three decode probes of the tuning/instrumented runs, not timings).
 
-### 0.1 Decode, c1, MTP (tok/s)
+### 0a.1 Decode, c1, MTP (tok/s)
 
 | prompt | run 1 | run 2 | after the prefill rows + 32K needle | MTP drafts accepted/proposed (run 1) |
 |---|---|---|---|---|
@@ -36,7 +142,7 @@ Source: [`results/raw/hosttail/ht_final.log`](../results/raw/hosttail/ht_final.l
 Time to first token for these 29-35 token prompts is 2.1-2.5 s. (Section 1 was 16.8 / 19.0 / 16.3 and 16.6 / 19.0 / 16.0.) The stats-instrumented rerun of the same config
 ([`ht9_st.log`](../results/raw/hosttail/ht9_st.log), `STRATA_PF_MAC_STATS` + `STRATA_PF_MAC_RDSTATS` on): 18.6 / 21.4 / 17.9.
 
-### 0.2 Prefill and context, c1 (tok/s)
+### 0a.2 Prefill and context, c1 (tok/s)
 
 | prompt tokens | prefill speed | decode over the answer | note |
 |---|---|---|---|
@@ -220,21 +326,39 @@ Run by `scripts/verify-card-free.sh` on the mini; raw output in [`results/verifi
 | `tgcu_builtin.fatbin` / `tgcu_libc.cubin` rebuilt | **byte-identical** to `shim/prebuilt/` and the deployed files ([reproduce.md](reproduce.md#10-one-click-what-was-run)): `nvcc -std=c++17 -O3 -Xptxas -v --fatbin -arch=sm_86 -no-compress -x cu tgcu_builtin.cu` (an earlier try without `-Xptxas -v` differed only in the command line stored in the fatbin header, not in the path) and `ptxas -arch=sm_86 -c tgcu_libc.ptx` |
 | `libcudart.dylib` shim compiled from `shim/tgcudart.cpp` + `tgcublas.cpp` | compiles; exported symbols identical to the deployed one (136); 121,488 B vs 138,944 B (build flags not recorded; about 15 flag sets tried, none matched the size). The source is the `hs2` snapshot of `tgcudart.cpp`: the copy left in the mini's `~/shim` predates the pre-armed handshake and lacks six exported `tgcuHs*` symbols the deployed dylib has |
 | `strata-vision-metal` built from the public tag + `patches/vision` + llama.cpp `3cf03257f` (38 s) | builds; same size as the deployed binary (8,077,952 B), sha256 differs (signature); **not run** against the mmproj |
-| full engine rebuild (CMake configure in the container, `macbuild.py`, ninja) | device half re-run in the Docker container, host half on a driver Mac (not the mini); never run: see [reproduce.md section 10](reproduce.md#10-one-click-what-was-run) |
+| full engine rebuild (CMake configure in the container, `macbuild.py`, ninja) | device half re-run in the Docker container, host half on a driver Mac (not the mini); never run: see [reproduce.md section 10](reproduce.md#10-one-click-what-was-run). Redone for config C on the mini itself: section 8b |
 | Docker build bundle (`docker compose build --no-cache build`, 3 min 4 s, then `docker compose run --rm build`) | EXL3 fatbins + `tgcu_builtin.fatbin` + `tgcu_libc.cubin` byte-identical to the deployed files; Strata engine device code: 63 fatbins, 59 byte-identical to the deployed ones in every one of four builds, 4 vary run to run (nvcc anonymous-namespace ids) |
 | `scripts/test-gates.sh` | ALL GATES OK: wrong hash, corrupted byte, unknown command and a failing `verify-card-free.sh` step all exit nonzero (the old `pack_td.py verify` printed `VERIFY FAILED` and exited 0) |
 | `./run.sh --check` on a driver Mac (empty install root) | 53 ok, 13 warnings, 0 failures; engine host build with LLVM 22 only (Apple clang 17 fails) |
+
+### 8b. Config C: rebuilt from the repo's patches and compared with the deployed files (2026-10-15)
+
+Full record: [`results/verification/config-c-repro.md`](../results/verification/config-c-repro.md). Patches `0001`-`0019` applied to a pristine `v0.1.41`, the container build, then `./run.sh --check` with a scratch install root on the mini (Apple clang 21, SDK 26.5; the live trees and the server untouched) and on the driver Mac.
+
+| check | result |
+|---|---|
+| 20 source / shim / data files of config C (`config-c-sha256.txt`), `git apply` of 19 Strata + 5 shim patches | sha256 equal to the deployed sources (also `cmp`-ed against the mini's source trees); `patches/shim/base` + patches reproduce `tgcu.py`, `tgcu_api.py`, `tgcudart.cpp` |
+| `libcudart.dylib` rebuilt on the mini (`shim/build-libcudart.sh`) | **byte-identical** (sha256 `20e8167d271b...`, md5 `ec0517ec`) |
+| `libexl3cpu.dylib` on the mini / `libexl3metal.dylib` from `--build-metal` | **byte-identical** (`9fe9cab5491e...` / `e38a011c7993...`) |
+| `libstrata_exl3.dylib` on the mini | identical except 48 bytes (`LC_UUID`, code signature) |
+| Strata engine on the mini (scratch root `/tmp/recipe`, 135 host rules + link) vs the deployed `strata_d15a` (md5 `fc6e4ddd`) | all 9,372 symbols present with the same sizes; every data and text section identical except `__text` (70 of 1,111,789 words: `adrp`/`add` of globals that moved) and the embedded CUDA fatbins: 52 of 56 byte-identical; the other four (`kernels`, `fused_gr`, `sampler`, `moe_mmq`) are the fatbins nvcc names differently on every build (identical instruction streams except `sampler`: 3,970 of 16,416 differ in register allocation). **Not byte-identical as a file** (113,402,072 B vs 113,402,080 B) |
+| device code in the container | 5 of 5 EXL3 / shim blobs byte-identical; 59 of 63 engine fatbins identical to `~/strata-mac` (the four above) |
+| found and fixed | `docker/build-engine.sh` lacked `-DSTRATA_ISA_FLOOR=none` of the deployed CMake cache: without it `cpu_avxvnni_ok()` differed (56 vs 132 B) |
+| `./run.sh --check` on the mini | 59 ok, 8 warnings (no Metal compiler, no models, no comgr under the scratch root), 0 failures; the new prerequisite section reads the mini's real wired limits (14336 / 15032385536) and `caffeinate` |
+| `scripts/verify-card-free.sh patches`, `scripts/test-gates.sh` | pass |
+| not reproduced | the bytes of four nvcc fatbins; anything needing the card (no number was re-measured); a model fetch |
 
 ## 9. Exact, rounding-level, approximate
 
 - **Exact:** the weights (every routed expert of every layer: the checkpoint's trellis and scale tensors byte for byte, the three `mul1` scalars one common value (checked for all 73,728
   tensors); nothing pruned or masked); the GPU
   EXL3 kernels (bit-exact decode, GEMV/MoE within the gates in section 6); the NEON path; text parity between decode transport variants
-  (`HS_PRE`, `HS_DEFER`, `MAC_PULL`, early pull: byte-identical outputs on 6/6 requests, ledger rows 2026-10-11T18:55Z to 20:50Z).
-- **Rounding-level:** with `STRATA_EXL3_METAL_SPLIT=1` (in the final config) a layer's experts are summed as `y = A + B` in fp32, where the
-  in-place/miss partition depends on the LRU contents, so greedy text depends on LRU state. Final-config texts for the 3 probes diverge from
-  the previous config's at character 451 / 409 / 49 (the previous config diverges from itself run to run at 451 / 217 / 49); all coherent, same
+  (`HS_PRE`, `HS_DEFER`, `MAC_PULL`, early pull: byte-identical outputs on 6/6 requests, ledger rows 2026-10-11T18:55Z to 20:50Z); the elastic K/V, the aligned reads and the staged refills move the same bytes to other places (their only effect on text is the fp32 association below).
+- **Rounding-level:** with `STRATA_EXL3_METAL_SPLIT=1` (in every config since the split job) a layer's experts are summed as `y = A + B` in fp32, where the
+  in-place/miss partition depends on the LRU contents and the slot count, so greedy text depends on LRU state and every change of the slot count (Decode7 .. Decode16) moves it: the Decode13 6,400 vs 6,200 slot arms matched md5 on 1 of 10 prompts (same-config reruns 10 of 10), config C vs its predecessor on 5 of 8 teacher-forced prompts; all coherent, same
   acceptance. The variant without `SPLIT` is bit-exact and ~8-11 % slower. The Mac prefill lane returns fp16-rounded partial sums
   (`STRATA_PF_MAC_Y16=1`); an earlier A/B had the fp16 lane diverge from the fp32 lane at character 127 of a 48-token comparison.
-- **Not measured:** KL or top-1 agreement against stock exllamav3 for any of these configs; GPQA Diamond; tool-calling benchmarks; concurrency above 1;
-  the final config on the 190K needle; a vision run after the LRU change as a raw log.
+- **Approximate (config C):** `STRATA_PF_XPORT8=1` sends the lane's x and y rows as int8 + one fp16 scale per 32 values: rel RMS 0.55-0.65 % round trip on real MoE inputs, 0.80-0.83 % on the cold partial sum (Xport8 card-free tests, plan entry 2026-10-12T14:35Z). It is gated by the teacher-forced test of section 0.3 (top-1 98.01 %, mean KL 0.0041, p99 KL 0.058 against the
+  stack with it off). The lossy `STRATA_MISS_TOL` is in the engine source and off.
+- **Not measured:** KL or top-1 agreement against stock exllamav3 for any of these configs; GPQA Diamond; tool-calling benchmarks; concurrency above 1 with the shipped engine (section 0.4 measured the batch engine, which is slower); the host-tail config on the 190K needle
+  (config C: found, 189,481 tokens); a vision run after the LRU change of the host-tail step as a raw log (config C: image PASS in `d15_final.log`, `newA.image.log`, `newB.image.log`).

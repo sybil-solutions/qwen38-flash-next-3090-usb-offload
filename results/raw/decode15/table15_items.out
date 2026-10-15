@@ -1,0 +1,18 @@
+today (9467 slots): N=261.5 M=20.18 W=95.59 ms model 27.07 tok/s
+code arena 256->24 MiB                          232 MiB = + 130 slots -> 27.31 tok/s model (+0.91%)  W 94.72 ms
+mapped arena 48->16                              32 MiB = +  17 slots -> 27.10 tok/s model (+0.13%)  W 95.47 ms
+RAM-tier VRAM mirror 204 MiB                    204 MiB = + 114 slots -> 27.28 tok/s model (+0.79%)  W 94.83 ms
+vring 64->32                                     32 MiB = +  17 slots -> 27.10 tok/s model (+0.13%)  W 95.47 ms
+vring 64->16                                     48 MiB = +  26 slots -> 27.11 tok/s model (+0.18%)  W 95.42 ms
+reserve 600->500                                100 MiB = +  56 slots -> 27.17 tok/s model (+0.38%)  W 95.23 ms
+reserve 600->400                                200 MiB = + 112 slots -> 27.28 tok/s model (+0.78%)  W 94.85 ms
+reserve 600->300                                300 MiB = + 168 slots -> 27.38 tok/s model (+1.16%)  W 94.49 ms
+MEMINFO_FIXED 1024->920                         104 MiB = +  58 slots -> 27.17 tok/s model (+0.39%)  W 95.22 ms
+session pooled+rope elastic (322)               322 MiB = + 180 slots -> 27.40 tok/s model (+1.22%)  W 94.43 ms
+static mirror embedding (322, NOT feasible)     322 MiB = + 180 slots -> 27.40 tok/s model (+1.22%)  W 94.43 ms
+lazy shadow x1 (112)                            112 MiB = +  62 slots -> 27.18 tok/s model (+0.42%)  W 95.19 ms
+lazy shadow x6 (672)                            672 MiB = + 377 slots -> 27.73 tok/s model (+2.47%)  W 93.28 ms
+lmem 73 MiB                                      73 MiB = +  40 slots -> 27.14 tok/s model (+0.27%)  W 95.33 ms
+guard+frag chunks (65)                           65 MiB = +  36 slots -> 27.13 tok/s model (+0.24%)  W 95.36 ms
+MTP draft head 213                              213 MiB = + 119 slots -> 27.29 tok/s model (+0.83%)  W 94.80 ms
+1 GiB                                          1024 MiB = + 574 slots -> 28.05 tok/s model (+3.63%)  W 92.23 ms

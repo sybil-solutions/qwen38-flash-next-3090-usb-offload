@@ -1,0 +1,123 @@
+[census] ===== idle_after_start t=1792009789.3 =====
+[census] physical pool: total 24256.0 MiB, used 23272.0, free 984.0 (largest free 978.0); top claim 170 MiB
+[census] physical used blocks by size (MiB: count): 2:10783, 512:3, 170:1, 0.00390625:2
+[census] tgcu: ctrl 32 code 24 mapped 16; chunks 16 = 5954.0 MiB (guard 32), free inside chunks 247.64, largest hole 239.75; vmm_phys 17028.0 MiB (8514 chunks, mapped 8514); deferred frees 0
+[census] chunk 0: 324 MiB, allocated 323.79, free 0.21, holes 1 largest 0.21
+[census] chunk 1: 1468 MiB, allocated 1467.66, free 0.34, holes 1 largest 0.34
+[census] chunk 2: 256 MiB, allocated 255.94, free 0.06, holes 1 largest 0.06
+[census] chunk 3: 256 MiB, allocated 255.57, free 0.43, holes 1 largest 0.43
+[census] chunk 4: 256 MiB, allocated 255.30, free 0.70, holes 1 largest 0.70
+[census] chunk 5: 256 MiB, allocated 255.38, free 0.62, holes 1 largest 0.62
+[census] chunk 6: 256 MiB, allocated 255.81, free 0.19, holes 1 largest 0.19
+[census] chunk 7: 256 MiB, allocated 255.99, free 0.01, holes 1 largest 0.01
+[census] chunk 8: 256 MiB, allocated 256.00, free 0.00, holes 1 largest 0.00
+[census] chunk 9: 256 MiB, allocated 254.48, free 1.52, holes 1 largest 1.52
+[census] chunk 10: 476 MiB, allocated 474.21, free 1.79, holes 1 largest 1.79
+[census] chunk 11: 64 MiB, allocated 64.00, free 0.00, holes 0 largest 0.00
+[census] chunk 12: 112 MiB, allocated 110.72, free 1.28, holes 1 largest 1.28
+[census] chunk 13: 676 MiB, allocated 675.95, free 0.05, holes 1 largest 0.05
+[census] chunk 14: 256 MiB, allocated 16.25, free 239.75, holes 1 largest 239.75
+[census] chunk 15: 498 MiB, allocated 497.31, free 0.69, holes 1 largest 0.69
+[census] cudaMalloc live: 324 allocations, 5288.3 MiB; by innermost call site:
+[census]        bc978: n=  300   2018.88 MiB   sizes(MiB) max 24.61 min 0.6641
+[census]         8e38: n=    1   1466.78 MiB   sizes(MiB) max 1466.78 min 1466.7847
+[census]        e010c: n=    1    675.00 MiB   sizes(MiB) max 675.00 min 675.0000
+[census]        b8bb8: n=    1    497.31 MiB   sizes(MiB) max 497.31 min 497.3145
+[census]         c05c: n=    1    474.21 MiB   sizes(MiB) max 474.21 min 474.2078
+[census]        dff50: n=    1    110.72 MiB   sizes(MiB) max 110.72 min 110.7207
+[census]        dfd6c: n=    1     25.20 MiB   sizes(MiB) max 25.20 min 25.1987
+[census]        e06dc: n=    1     16.25 MiB   sizes(MiB) max 16.25 min 16.2520
+[census]         940c: n=    1      2.34 MiB   sizes(MiB) max 2.34 min 2.3445
+[census] live cudaMalloc >= 30 MiB (seq, MiB, site chain):
+[census]   #1   1466.78 8e38,204e4
+[census]   #309    675.00 e010c,d0f8,204e4
+[census]   #312    497.31 b8bb8,d2a0,204e4
+[census]   #307    474.21 c05c,204e4
+[census]   #308    110.72 dff50,d0f8,204e4
+[census] allocations NOT from cudaMalloc (static mirrors, staging ring, graph chains, lazy D2H shadows, shim internals): 2 blocks, 386.1 MiB; >= 1 MiB (MiB, va):
+[census]      322.08 0x1030000000 (static mirror)
+[census]       64.00 0x1048000000
+[census] arenas used: code 0.4 of 24 MiB; mapped 0.25 of 16; ctrl head 0.13 persist 0.00 of 32; vring head 0.1 peak 0.06 of 64 MiB, 0 wraps, 0 MiB launched; stage ring no; shader local memory 0.0 MiB (slm_per_thread 0)
+[census] engine view: cudaMemGetInfo free 817.6 MiB (fixed 1024)
+[census] ===== decode_mid_run1 t=1792009793.7 =====
+[census] physical pool: total 24256.0 MiB, used 23272.0, free 984.0 (largest free 978.0); top claim 170 MiB
+[census] physical used blocks by size (MiB: count): 2:10783, 512:3, 170:1, 0.00390625:2
+[census] tgcu: ctrl 32 code 24 mapped 16; chunks 16 = 5954.0 MiB (guard 32), free inside chunks 247.64, largest hole 239.75; vmm_phys 17028.0 MiB (8514 chunks, mapped 8514); deferred frees 0
+[census] chunk 0: 324 MiB, allocated 323.79, free 0.21, holes 1 largest 0.21
+[census] chunk 1: 1468 MiB, allocated 1467.66, free 0.34, holes 1 largest 0.34
+[census] chunk 2: 256 MiB, allocated 255.94, free 0.06, holes 1 largest 0.06
+[census] chunk 3: 256 MiB, allocated 255.57, free 0.43, holes 1 largest 0.43
+[census] chunk 4: 256 MiB, allocated 255.30, free 0.70, holes 1 largest 0.70
+[census] chunk 5: 256 MiB, allocated 255.38, free 0.62, holes 1 largest 0.62
+[census] chunk 6: 256 MiB, allocated 255.81, free 0.19, holes 1 largest 0.19
+[census] chunk 7: 256 MiB, allocated 255.99, free 0.01, holes 1 largest 0.01
+[census] chunk 8: 256 MiB, allocated 256.00, free 0.00, holes 1 largest 0.00
+[census] chunk 9: 256 MiB, allocated 254.48, free 1.52, holes 1 largest 1.52
+[census] chunk 10: 476 MiB, allocated 474.21, free 1.79, holes 1 largest 1.79
+[census] chunk 11: 64 MiB, allocated 64.00, free 0.00, holes 0 largest 0.00
+[census] chunk 12: 112 MiB, allocated 110.72, free 1.28, holes 1 largest 1.28
+[census] chunk 13: 676 MiB, allocated 675.95, free 0.05, holes 1 largest 0.05
+[census] chunk 14: 256 MiB, allocated 16.25, free 239.75, holes 1 largest 239.75
+[census] chunk 15: 498 MiB, allocated 497.31, free 0.69, holes 1 largest 0.69
+[census] cudaMalloc live: 324 allocations, 5288.3 MiB; by innermost call site:
+[census]        bc978: n=  300   2018.88 MiB   sizes(MiB) max 24.61 min 0.6641
+[census]         8e38: n=    1   1466.78 MiB   sizes(MiB) max 1466.78 min 1466.7847
+[census]        e010c: n=    1    675.00 MiB   sizes(MiB) max 675.00 min 675.0000
+[census]        b8bb8: n=    1    497.31 MiB   sizes(MiB) max 497.31 min 497.3145
+[census]         c05c: n=    1    474.21 MiB   sizes(MiB) max 474.21 min 474.2078
+[census]        dff50: n=    1    110.72 MiB   sizes(MiB) max 110.72 min 110.7207
+[census]        dfd6c: n=    1     25.20 MiB   sizes(MiB) max 25.20 min 25.1987
+[census]        e06dc: n=    1     16.25 MiB   sizes(MiB) max 16.25 min 16.2520
+[census]         940c: n=    1      2.34 MiB   sizes(MiB) max 2.34 min 2.3445
+[census] live cudaMalloc >= 30 MiB (seq, MiB, site chain):
+[census]   #1   1466.78 8e38,204e4
+[census]   #309    675.00 e010c,d0f8,204e4
+[census]   #312    497.31 b8bb8,d2a0,204e4
+[census]   #307    474.21 c05c,204e4
+[census]   #308    110.72 dff50,d0f8,204e4
+[census] allocations NOT from cudaMalloc (static mirrors, staging ring, graph chains, lazy D2H shadows, shim internals): 2 blocks, 386.1 MiB; >= 1 MiB (MiB, va):
+[census]      322.08 0x1030000000 (static mirror)
+[census]       64.00 0x1048000000
+[census] arenas used: code 0.4 of 24 MiB; mapped 0.25 of 16; ctrl head 0.13 persist 0.00 of 32; vring head 0.1 peak 0.06 of 64 MiB, 0 wraps, 0 MiB launched; stage ring no; shader local memory 0.0 MiB (slm_per_thread 0)
+[census] engine view: cudaMemGetInfo free 817.6 MiB (fixed 1024)
+[census] ===== idle_after_decode t=1792009793.9 =====
+[census] physical pool: total 24256.0 MiB, used 23272.0, free 984.0 (largest free 978.0); top claim 170 MiB
+[census] physical used blocks by size (MiB: count): 2:10783, 512:3, 170:1, 0.00390625:2
+[census] tgcu: ctrl 32 code 24 mapped 16; chunks 16 = 5954.0 MiB (guard 32), free inside chunks 247.64, largest hole 239.75; vmm_phys 17028.0 MiB (8514 chunks, mapped 8514); deferred frees 0
+[census] chunk 0: 324 MiB, allocated 323.79, free 0.21, holes 1 largest 0.21
+[census] chunk 1: 1468 MiB, allocated 1467.66, free 0.34, holes 1 largest 0.34
+[census] chunk 2: 256 MiB, allocated 255.94, free 0.06, holes 1 largest 0.06
+[census] chunk 3: 256 MiB, allocated 255.57, free 0.43, holes 1 largest 0.43
+[census] chunk 4: 256 MiB, allocated 255.30, free 0.70, holes 1 largest 0.70
+[census] chunk 5: 256 MiB, allocated 255.38, free 0.62, holes 1 largest 0.62
+[census] chunk 6: 256 MiB, allocated 255.81, free 0.19, holes 1 largest 0.19
+[census] chunk 7: 256 MiB, allocated 255.99, free 0.01, holes 1 largest 0.01
+[census] chunk 8: 256 MiB, allocated 256.00, free 0.00, holes 1 largest 0.00
+[census] chunk 9: 256 MiB, allocated 254.48, free 1.52, holes 1 largest 1.52
+[census] chunk 10: 476 MiB, allocated 474.21, free 1.79, holes 1 largest 1.79
+[census] chunk 11: 64 MiB, allocated 64.00, free 0.00, holes 0 largest 0.00
+[census] chunk 12: 112 MiB, allocated 110.72, free 1.28, holes 1 largest 1.28
+[census] chunk 13: 676 MiB, allocated 675.95, free 0.05, holes 1 largest 0.05
+[census] chunk 14: 256 MiB, allocated 16.25, free 239.75, holes 1 largest 239.75
+[census] chunk 15: 498 MiB, allocated 497.31, free 0.69, holes 1 largest 0.69
+[census] cudaMalloc live: 324 allocations, 5288.3 MiB; by innermost call site:
+[census]        bc978: n=  300   2018.88 MiB   sizes(MiB) max 24.61 min 0.6641
+[census]         8e38: n=    1   1466.78 MiB   sizes(MiB) max 1466.78 min 1466.7847
+[census]        e010c: n=    1    675.00 MiB   sizes(MiB) max 675.00 min 675.0000
+[census]        b8bb8: n=    1    497.31 MiB   sizes(MiB) max 497.31 min 497.3145
+[census]         c05c: n=    1    474.21 MiB   sizes(MiB) max 474.21 min 474.2078
+[census]        dff50: n=    1    110.72 MiB   sizes(MiB) max 110.72 min 110.7207
+[census]        dfd6c: n=    1     25.20 MiB   sizes(MiB) max 25.20 min 25.1987
+[census]        e06dc: n=    1     16.25 MiB   sizes(MiB) max 16.25 min 16.2520
+[census]         940c: n=    1      2.34 MiB   sizes(MiB) max 2.34 min 2.3445
+[census] live cudaMalloc >= 30 MiB (seq, MiB, site chain):
+[census]   #1   1466.78 8e38,204e4
+[census]   #309    675.00 e010c,d0f8,204e4
+[census]   #312    497.31 b8bb8,d2a0,204e4
+[census]   #307    474.21 c05c,204e4
+[census]   #308    110.72 dff50,d0f8,204e4
+[census] allocations NOT from cudaMalloc (static mirrors, staging ring, graph chains, lazy D2H shadows, shim internals): 2 blocks, 386.1 MiB; >= 1 MiB (MiB, va):
+[census]      322.08 0x1030000000 (static mirror)
+[census]       64.00 0x1048000000
+[census] arenas used: code 0.4 of 24 MiB; mapped 0.25 of 16; ctrl head 0.13 persist 0.00 of 32; vring head 0.1 peak 0.06 of 64 MiB, 0 wraps, 0 MiB launched; stage ring no; shader local memory 0.0 MiB (slm_per_thread 0)
+[census] engine view: cudaMemGetInfo free 817.6 MiB (fixed 1024)

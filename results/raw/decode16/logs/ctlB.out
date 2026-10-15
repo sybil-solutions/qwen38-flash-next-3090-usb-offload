@@ -1,0 +1,41 @@
+ready 19:33:49 wired_MiB 12359 swap: total = 1024.00M used = 136.12M free = 887.88M (encrypted) engine_swapped: 
+ready mem: swapins 290220. swapouts 911728. compr_occupied_pages 21619. free_pct 19%
+{"name": "p26", "flag": 7, "prompt_n": 8915, "ttft_s": 24.26, "n": 300, "tok_s": 29.9, "wall_s": 34.2, "md5": "26ae7f73"}
+{"name": "p22", "flag": 7, "prompt_n": 6429, "ttft_s": 20.88, "n": 300, "tok_s": 32.3, "wall_s": 30.1, "md5": "ff0a1235"}
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 23.82, "n": 300, "tok_s": 30.1, "wall_s": 33.7, "md5": "5901af16"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 24.97, "n": 300, "tok_s": 30.1, "wall_s": 34.9, "md5": "81fa8921"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 18.55, "n": 300, "tok_s": 29.4, "wall_s": 28.7, "md5": "1027471f"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 21.91, "n": 300, "tok_s": 27.2, "wall_s": 32.9, "md5": "93924cf5"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 21.86, "n": 300, "tok_s": 30.0, "wall_s": 31.8, "md5": "fb33c9bd"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 20.94, "n": 300, "tok_s": 32.0, "wall_s": 30.3, "md5": "c5b3c12f"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 24.18, "n": 300, "tok_s": 30.4, "wall_s": 34.0, "md5": "34fdca4f"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 22.35, "n": 300, "tok_s": 30.2, "wall_s": 32.2, "md5": "19944088"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 23.3, "n": 300, "tok_s": 30.9, "wall_s": 32.9, "md5": "bdf9a5c0"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 25.9, "n": 300, "tok_s": 33.3, "wall_s": 34.8, "md5": "b018641d"}
+{"name": "p27", "flag": 7, "prompt_n": 19770, "ttft_s": 45.89, "n": 300, "tok_s": 30.9, "wall_s": 55.5, "md5": "f0a07cc1"}
+{"name": "p25", "flag": 7, "prompt_n": 5691, "ttft_s": 20.22, "n": 300, "tok_s": 29.9, "wall_s": 30.2, "md5": "94b4d794"}
+{"name": "p04", "flag": 7, "prompt_n": 6357, "ttft_s": 22.03, "n": 300, "tok_s": 31.9, "wall_s": 31.4, "md5": "b7339943"}
+{"name": "p29", "flag": 7, "prompt_n": 16399, "ttft_s": 44.2, "n": 130, "tok_s": 18.6, "wall_s": 51.1, "md5": "e9578915"}
+{"name": "p09", "flag": 7, "prompt_n": 5936, "ttft_s": 22.57, "n": 300, "tok_s": 31.9, "wall_s": 31.9, "md5": "f3697138"}
+{"name": "p23", "flag": 7, "prompt_n": 4127, "ttft_s": 17.36, "n": 300, "tok_s": 34.2, "wall_s": 26.1, "md5": "d0f89d70"}
+{"name": "p01", "flag": 7, "prompt_n": 6023, "ttft_s": 21.52, "n": 300, "tok_s": 33.9, "wall_s": 30.3, "md5": "0a793caf"}
+{"name": "p03", "flag": 7, "prompt_n": 6679, "ttft_s": 22.11, "n": 300, "tok_s": 30.6, "wall_s": 31.9, "md5": "e5ca82c1"}
+{"name": "p28", "flag": 7, "prompt_n": 15379, "ttft_s": 44.34, "n": 300, "tok_s": 27.1, "wall_s": 55.4, "md5": "fea6cda2"}
+{"name": "p21", "flag": 7, "prompt_n": 6240, "ttft_s": 21.81, "n": 300, "tok_s": 28.5, "wall_s": 32.3, "md5": "dda7b146"}
+{"name": "p16", "flag": 7, "prompt_n": 6425, "ttft_s": 21.11, "n": 300, "tok_s": 30.0, "wall_s": 31.1, "md5": "e2cf511c"}
+{"name": "p20", "flag": 7, "prompt_n": 5856, "ttft_s": 20.73, "n": 300, "tok_s": 30.5, "wall_s": 30.5, "md5": "ffd66917"}
+{"name": "p12", "flag": 7, "prompt_n": 6264, "ttft_s": 21.75, "n": 300, "tok_s": 30.9, "wall_s": 31.4, "md5": "924c091f"}
+{"name": "p05", "flag": 7, "prompt_n": 6287, "ttft_s": 22.1, "n": 300, "tok_s": 34.0, "wall_s": 30.9, "md5": "441c5b55"}
+{"name": "p18", "flag": 7, "prompt_n": 6157, "ttft_s": 21.1, "n": 300, "tok_s": 29.8, "wall_s": 31.1, "md5": "234f08db"}
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 20.14, "n": 300, "tok_s": 30.4, "wall_s": 29.9, "md5": "f03ca40b"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 22.22, "n": 300, "tok_s": 28.8, "wall_s": 32.6, "md5": "28f19159"}
+after_seq 19:50:14 wired_MiB 12687 swap: total = 1024.00M used = 136.12M free = 887.88M (encrypted) engine_swapped: 
+after_seq mem: swapins 290431. swapouts 911728. compr_occupied_pages 98460. free_pct 10%
+after_probe 19:52:48 wired_MiB 12687 swap: total = 1024.00M used = 128.12M free = 895.88M (encrypted) engine_swapped: 
+after_probe mem: swapins 290462. swapouts 911728. compr_occupied_pages 96833. free_pct 10%
+ctlB done:       29 requests, probe mean 26.00 (12)
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 46 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 91 slots for it, 91 hotter experts moved to colder ones' slots (9376 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 91 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.21 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)

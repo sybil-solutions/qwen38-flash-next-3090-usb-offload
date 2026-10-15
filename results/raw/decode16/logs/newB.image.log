@@ -1,0 +1,3 @@
+~/strata-mac-vision/test-1.jpeg: 15.4s usage {"prompt_tokens": 329, "completion_tokens": 20, "total_tokens": 349, "prompt_tokens_details": {"cached_tokens": 0}}
+  reply: 'This is The New York Times, and its headline reads “MEN WALK ON MOON.”'
+RESULT: PASS

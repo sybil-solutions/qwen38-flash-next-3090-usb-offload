@@ -1,0 +1,41 @@
+### ctlS ctl40.json 00:56:20
+strata batch: slot 0 takes 23 tokens (copied in 347.3 ms)
+strata batch: slot 1 takes 22 tokens (copied in 350.4 ms)
+strata batch: 1078 windows, avg 1.97 rows, 791.06 ms/window = run 788.73 (CUDA0 GPU-reach wait 18.53 + CPU experts 768.42) + commit 2.32 + emit 0.02; per layer-window: CPU experts 7.93, VRAM hits 12.8
+strata generate: expert cache auto: 17.83 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9983 slots
+strata generate: expert cache 9983 slots, 17.32 GiB of VRAM; policy is
+strata generate: elastic K/V: 16384 of 40960 cells in VRAM (0.23 of 0.52 GiB); the expert cache (9983 slots) gives the K/V room below slot 9099 as the context grows
+[short]
+CONC c=1 requests=8 tokens=2122 span=84.5s aggregate=25.13 tok/s  per-request engine tok/s mean=27.50  ttft mean=1.0s  wall mean=10.6s  peak in flight=1
+[short]
+CONC c=2 requests=8 tokens=2121 span=83.9s aggregate=25.29 tok/s  per-request engine tok/s mean=27.24  ttft mean=10.0s  wall mean=19.6s  peak in flight=2
+[short]
+CONC c=4 requests=8 tokens=2128 span=81.2s aggregate=26.21 tok/s  per-request engine tok/s mean=28.30  ttft mean=24.1s  wall mean=33.4s  peak in flight=4
+decode tok/s 29.3 n 300 drafts 217/240 md5 f60e112b2b67
+decode tok/s 30.6 n 298 drafts 173/281 md5 da7ec6c11273
+decode tok/s 23.7 n 300 drafts 143/260 md5 98df591d17db
+decode tok/s 26.8 n 300 drafts 214/233 md5 a6e2bf7b9392
+decode tok/s 29.9 n 300 drafts 167/262 md5 6ae169bf039b
+decode tok/s 25.2 n 291 drafts 149/241 md5 801b4175951e
+GPU timeouts in log: 268
+### b4mS batch4m.json 01:03:53
+strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=0 kv_resident=0 profile=1 resident_cpu=1 expe
+strata generate: --batch: 4 slot sessions on CUDA0 (0.56 GiB each); 16.66 GiB free
+strata generate: --batch 4: the slot sessions take 2.24 GiB of VRAM on CUDA0 that the expert cache would otherwise hold
+strata generate: expert cache auto: 15.09 GiB free, 310 MiB reserved (+241 MiB for the draft head) -> 8387 slots
+strata generate: expert cache 8387 slots, 14.55 GiB of VRAM; policy is
+strata verify: batch windows of up to 4 sequences (layers [0, 48))
+[short]
+CONC c=1 requests=8 tokens=2128 span=94.1s aggregate=22.60 tok/s  per-request engine tok/s mean=25.49  ttft mean=1.4s  wall mean=11.8s  peak in flight=1
+[short]
+CONC c=2 requests=8 tokens=2115 span=1036.5s aggregate=2.04 tok/s  per-request engine tok/s mean=7.80  ttft mean=2.2s  wall mean=258.4s  peak in flight=2
+[short]
+CONC c=4 requests=8 tokens=2123 span=1226.4s aggregate=1.73 tok/s  per-request engine tok/s mean=5.17  ttft mean=4.4s  wall mean=579.7s  peak in flight=4
+decode tok/s 23.8 n 300 drafts 213/237 md5 a6e2bf7b9392
+decode tok/s 26.4 n 300 drafts 160/283 md5 9a2a46a4baeb
+decode tok/s 23.3 n 272 drafts 140/232 md5 163251b5008b
+decode tok/s 22.8 n 300 drafts 216/236 md5 f60e112b2b67
+decode tok/s 27.3 n 300 drafts 163/282 md5 88e8e55aaf4a
+decode tok/s 22.5 n 289 drafts 139/252 md5 af0083d62716
+GPU timeouts in log: 268
+ABCONC15CDONE

@@ -1,0 +1,139 @@
+config md5 bc8450a1e583f2ba5b3f756832cc1f62  binary md5 fc6e4ddd2c9549d6c52a922ffb8ad718
+### start 20:14:12
+[strata] 2026-10-14 20:14:37 engine started: $HOME/strata-decode7/run-d7.sh --serve --pack $HOME/exl3/pack_full512 --native $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --ple-gguf $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf --expert-profile $HOME/exl3/placement/d8w4/profile.bin --expert-cache auto --prefill 2048 --spec 4 --spec-min-p 0.5 --mtp $HOME/models/qwen38fn/mtp/rt --kv k8v4 --max-context 204800 --mmap-experts --pcie-frac 0 --adapt-every 0 --resident-budget-gib 0.2 --vram-reserve-mib 310 --vision
+strata generate: profile $HOME/exl3/placement/d8w4/profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: expert cache auto: 17.79 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9958 slots
+strata generate: expert cache 9958 slots, 17.27 GiB of VRAM; policy is
+strata generate: staged profile fill (STRATA_D8_FILL): 9958 slots staged + 0 plain in 63.7 s (1245 pieces of <= 8)
+strata generate: pre-filled 9958 of 9958 slots from the profile in 63.7 s (291 MB/s); slot 0 verified
+FileExpertSource: no device alias (cudaErrorInvalidValue); trying pageable memory
+FileExpertSource: locked resident cache complement ready: resident 0.20 GiB, pinned 0.00 GiB in 0 s; no device alias (cudaErrorInvalidValue); mlock
+strata exl3-metal: lane ready ($HOME/exl3/metal/libexl3metal.dylib; 6400 slots of 1867776 B registered)
+strata exl3-metal: LRU preloaded with 6400 of 6400 slots by profile rank in 5.3 s (11.95 GB, F_NOCACHE)
+strata serve: the prompt path borrows 884 CUDA0 cache slots (1.53 GiB)
+strata generate: elastic K/V: 16384 of 204800 cells in VRAM (0.23 of 2.43 GiB); the expert cache (9958 slots) gives the K/V room below slot 9074 as the context grows
+strata serve: 190 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 632 to the config's args (or lower --max-context)
+READY
+SWAP ready 20:16:38 wired_MiB 12570 swap: total = 1024.00M used = 118.19M free = 905.81M (encrypted) engine MALLOC_LARGE swapped: 
+### realistic decode set (29 prompts, 3.7-19.8K tokens, 300 tok) 20:16:38
+{"name": "p26", "flag": 7, "prompt_n": 8915, "ttft_s": 23.15, "n": 300, "tok_s": 30.1, "wall_s": 33.0, "md5": "284f6061"}
+{"name": "p22", "flag": 7, "prompt_n": 6429, "ttft_s": 20.38, "n": 300, "tok_s": 33.7, "wall_s": 29.2, "md5": "6a848e29"}
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 23.07, "n": 300, "tok_s": 30.3, "wall_s": 32.9, "md5": "207a1467"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 24.35, "n": 300, "tok_s": 30.9, "wall_s": 34.0, "md5": "665489bd"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 17.83, "n": 300, "tok_s": 31.0, "wall_s": 27.5, "md5": "8534d1c3"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 21.4, "n": 300, "tok_s": 28.6, "wall_s": 31.8, "md5": "abe296c6"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 21.19, "n": 300, "tok_s": 31.2, "wall_s": 30.8, "md5": "5c76e8c2"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 20.38, "n": 300, "tok_s": 33.6, "wall_s": 29.3, "md5": "bd34289c"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 23.32, "n": 300, "tok_s": 32.1, "wall_s": 32.6, "md5": "35553aef"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 21.65, "n": 300, "tok_s": 29.6, "wall_s": 31.7, "md5": "8afa6771"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 22.68, "n": 300, "tok_s": 31.7, "wall_s": 32.1, "md5": "16499628"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 25.23, "n": 300, "tok_s": 33.9, "wall_s": 34.0, "md5": "5067a2f1"}
+{"name": "p27", "flag": 7, "prompt_n": 19770, "ttft_s": 45.46, "n": 300, "tok_s": 30.1, "wall_s": 55.4, "md5": "f0b0080b"}
+{"name": "p25", "flag": 7, "prompt_n": 5691, "ttft_s": 20.59, "n": 300, "tok_s": 29.6, "wall_s": 30.7, "md5": "22cdcec8"}
+{"name": "p04", "flag": 7, "prompt_n": 6357, "ttft_s": 21.48, "n": 300, "tok_s": 33.9, "wall_s": 30.3, "md5": "643656de"}
+{"name": "p29", "flag": 7, "prompt_n": 16399, "ttft_s": 43.78, "n": 126, "tok_s": 20.0, "wall_s": 50.0, "md5": "4505ada0"}
+{"name": "p09", "flag": 7, "prompt_n": 5936, "ttft_s": 22.13, "n": 300, "tok_s": 32.5, "wall_s": 31.3, "md5": "cd5d8834"}
+{"name": "p23", "flag": 7, "prompt_n": 4127, "ttft_s": 17.02, "n": 300, "tok_s": 32.6, "wall_s": 26.2, "md5": "bda7715c"}
+{"name": "p01", "flag": 7, "prompt_n": 6023, "ttft_s": 21.33, "n": 300, "tok_s": 32.3, "wall_s": 30.6, "md5": "bffc7d6d"}
+{"name": "p03", "flag": 7, "prompt_n": 6679, "ttft_s": 21.49, "n": 300, "tok_s": 33.6, "wall_s": 30.4, "md5": "80fdd77b"}
+{"name": "p28", "flag": 7, "prompt_n": 15379, "ttft_s": 43.28, "n": 300, "tok_s": 29.7, "wall_s": 53.3, "md5": "c63a14a0"}
+{"name": "p21", "flag": 7, "prompt_n": 6240, "ttft_s": 21.31, "n": 300, "tok_s": 29.0, "wall_s": 31.6, "md5": "3ca2fbd4"}
+{"name": "p16", "flag": 7, "prompt_n": 6425, "ttft_s": 20.54, "n": 300, "tok_s": 31.7, "wall_s": 29.9, "md5": "8eb8b2d9"}
+{"name": "p20", "flag": 7, "prompt_n": 5856, "ttft_s": 20.26, "n": 300, "tok_s": 31.8, "wall_s": 29.6, "md5": "4db6dd99"}
+{"name": "p12", "flag": 7, "prompt_n": 6264, "ttft_s": 21.26, "n": 300, "tok_s": 30.6, "wall_s": 31.0, "md5": "8af93d2c"}
+{"name": "p05", "flag": 7, "prompt_n": 6287, "ttft_s": 21.63, "n": 300, "tok_s": 34.0, "wall_s": 30.5, "md5": "393f13d6"}
+{"name": "p18", "flag": 7, "prompt_n": 6157, "ttft_s": 20.59, "n": 300, "tok_s": 28.2, "wall_s": 31.2, "md5": "ebb63688"}
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 19.92, "n": 300, "tok_s": 28.9, "wall_s": 30.2, "md5": "22239427"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 22.0, "n": 300, "tok_s": 28.5, "wall_s": 32.5, "md5": "23dd1225"}
+REALISTIC29 requests 29 mean tok/s 30.82 ttft mean 23.75
+SWAP after_realistic 20:32:42 wired_MiB 12661 swap: total = 1024.00M used = 175.44M free = 848.56M (encrypted) engine MALLOC_LARGE swapped: 
+### decode probes x2 (12 requests) 20:32:42
+{"i": 0, "wall_s": 11.1, "prompt_n": 29, "prompt_ms": 1055.8, "predicted_n": 300, "predicted_ms": 10016.8, "tok_s": 29.9, "drafts": "212/253", "pageins_mib": 75, "pageouts_mib": 0, "head": "```python 
+{"i": 1, "wall_s": 11.2, "prompt_n": 35, "prompt_ms": 1701.0, "predicted_n": 245, "predicted_ms": 9523.1, "tok_s": 25.7, "drafts": "124/240", "pageins_mib": 30, "pageouts_mib": 0, "head": "At the core
+{"i": 2, "wall_s": 12.6, "prompt_n": 29, "prompt_ms": 1308.5, "predicted_n": 268, "predicted_ms": 11327.0, "tok_s": 23.7, "drafts": "133/241", "pageins_mib": 12, "pageouts_mib": 0, "head": "Elias had 
+decode tok/s 27.0 n 300 drafts 215/240 md5 f60e112b2b67
+decode tok/s 29.6 n 290 drafts 166/268 md5 a3f0811179cb
+decode tok/s 23.3 n 272 drafts 128/237 md5 22f04529709a
+decode tok/s 27.0 n 300 drafts 214/238 md5 a6e2bf7b9392
+decode tok/s 31.1 n 300 drafts 176/267 md5 756a1c534624
+decode tok/s 23.6 n 277 drafts 136/234 md5 71b9bdd2a276
+{"i": 0, "wall_s": 12.3, "prompt_n": 29, "prompt_ms": 851.1, "predicted_n": 300, "predicted_ms": 11420.8, "tok_s": 26.3, "drafts": "214/258", "pageins_mib": 3, "pageouts_mib": 0, "head": "```python de
+{"i": 1, "wall_s": 10.8, "prompt_n": 35, "prompt_ms": 1721.8, "predicted_n": 245, "predicted_ms": 9115.5, "tok_s": 26.9, "drafts": "129/224", "pageins_mib": 0, "pageouts_mib": 0, "head": "At the core 
+{"i": 2, "wall_s": 13.2, "prompt_n": 29, "prompt_ms": 1305.6, "predicted_n": 280, "predicted_ms": 11929.8, "tok_s": 23.5, "drafts": "138/248", "pageins_mib": 2, "pageouts_mib": 0, "head": "Elias had n
+decode tok/s 26.9 n 300 drafts 212/242 md5 a6e2bf7b9392
+decode tok/s 29.8 n 300 drafts 169/280 md5 f612d63cd035
+decode tok/s 23.4 n 285 drafts 142/257 md5 7027a930bee6
+decode tok/s 26.9 n 300 drafts 217/237 md5 f60e112b2b67
+decode tok/s 28.6 n 300 drafts 163/275 md5 f5c0cebef610
+decode tok/s 24.7 n 267 drafts 141/247 md5 e5decfc8df9c
+SWAP after_decode 20:36:21 wired_MiB 12859 swap: total = 1024.00M used = 167.44M free = 856.56M (encrypted) engine MALLOC_LARGE swapped: 
+### tool reuse / image 20:36:21
+turn 1: 20.1s read 3340 reused 0; tool_calls 1; content "I'll check the current weather in Lisbon for you."
+  call: get_weather {"city":"Lisbon"}
+turn 2: 2.8s read 40 reused 3379 (turn-1 prompt 3340); reply 'The current weather in Lisbon is **23°C with clear skies** — lovely conditions for being outdoors! ☀️'
+RESULT: PASS (prefix reused True, answer uses the tool result True)
+SWAP after_toolreuse 20:36:44 wired_MiB 12675 swap: total = 1024.00M used = 167.44M free = 856.56M (encrypted) engine MALLOC_LARGE swapped: 
+~/strata-mac-vision/test-1.jpeg: 16.4s usage {"prompt_tokens": 329, "completion_tokens": 40, "total_tokens": 369, "prompt_tokens_details": {"cached_tokens": 0}}
+  reply: 'This is The New York Times, and its headline reads: “MEN WALK ON MOON — ASTRONAUTS LAND ON PLAIN; COLLECT ROCKS, PLANT FLAG.”'
+RESULT: PASS
+SWAP after_image 20:37:01 wired_MiB 12412 swap: total = 1024.00M used = 167.44M free = 856.56M (encrypted) engine MALLOC_LARGE swapped: 
+### prefill rows 20:37:01
+{"tag": "d15_final", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 14569, "tok_s": 176.1, "wall_s": 14.69, "ts": "2026-10-15T03:37:15Z"}
+{"tag": "d15_final", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 14514, "tok_s": 176.7, "wall_s": 14.58, "ts": "2026-10-15T03:37:30Z"}
+{"tag": "d15_final", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 20934, "tok_s": 383.0, "wall_s": 21.01, "ts": "2026-10-15T03:37:51Z"}
+{"tag": "d15_final", "target": 8000, "run": 2, "prompt_n": 8017, "cache_n": 0, "prompt_ms": 19189, "tok_s": 417.8, "wall_s": 19.26, "ts": "2026-10-15T03:38:10Z"}
+{"tag": "d15_final", "target": 17000, "run": 1, "prompt_n": 18330, "cache_n": 0, "prompt_ms": 41104, "tok_s": 445.9, "wall_s": 41.18, "ts": "2026-10-15T03:38:51Z"}
+{"tag": "d15_final", "target": 17000, "run": 2, "prompt_n": 18329, "cache_n": 0, "prompt_ms": 38991, "tok_s": 470.1, "wall_s": 40.73, "ts": "2026-10-15T03:39:32Z"}
+{"tag": "d15_final", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 60931, "tok_s": 555.4, "wall_s": 61.03, "ts": "2026-10-15T03:40:33Z"}
+{"tag": "d15_final", "target": 33000, "run": 2, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 57922, "tok_s": 584.2, "wall_s": 57.94, "ts": "2026-10-15T03:41:31Z"}
+SWAP after_prefill 20:41:31 wired_MiB 12681 swap: total = 1024.00M used = 204.00M free = 820.00M (encrypted) engine MALLOC_LARGE swapped: 
+### needle ~190K 20:41:31
+ 190k depth  50%: FOUND  (189,450 prompt tokens, 360 s)
+1 of 1 found
+SWAP after_190k 20:47:31 wired_MiB 12683 swap: total = 1024.00M used = 634.88M free = 389.12M (encrypted) engine MALLOC_LARGE swapped: 
+### small (agent-turn pattern) 20:47:31
+base 3073 tokens 30025 ms
+{"tag": "d15_final", "want_new": 30, "read": 52, "cache_n": 3078, "prompt_ms": 2290, "wall_s": 2.56}
+{"tag": "d15_final", "want_new": 60, "read": 93, "cache_n": 3123, "prompt_ms": 4956, "wall_s": 5.17}
+{"tag": "d15_final", "want_new": 100, "read": 151, "cache_n": 3219, "prompt_ms": 5954, "wall_s": 6.14}
+{"tag": "d15_final", "want_new": 150, "read": 203, "cache_n": 3373, "prompt_ms": 6719, "wall_s": 6.91}
+{"tag": "d15_final", "want_new": 200, "read": 219, "cache_n": 3579, "prompt_ms": 7061, "wall_s": 7.29}
+{"tag": "d15_final", "want_new": 250, "read": 254, "cache_n": 3802, "prompt_ms": 7133, "wall_s": 7.44}
+{"tag": "d15_final", "want_new": 300, "read": 359, "cache_n": 4064, "prompt_ms": 8614, "wall_s": 8.78}
+{"tag": "d15_final", "want_new": 400, "read": 398, "cache_n": 4426, "prompt_ms": 8729, "wall_s": 8.89}
+{"tag": "d15_final", "want_new": 600, "read": 678, "cache_n": 4827, "prompt_ms": 11145, "wall_s": 11.3}
+{"tag": "d15_final", "want_new": 1000, "read": 1019, "cache_n": 5508, "prompt_ms": 11636, "wall_s": 11.8}
+### needle x5 20:49:18
+  32k depth  10%: FOUND  (33,286 prompt tokens, 70 s)
+1 of 1 found
+  32k depth  50%: FOUND  (33,286 prompt tokens, 71 s)
+1 of 1 found
+  32k depth  90%: FOUND  (33,286 prompt tokens, 46 s)
+1 of 1 found
+  32k depth  30%: FOUND  (33,286 prompt tokens, 55 s)
+1 of 1 found
+  32k depth  70%: FOUND  (33,286 prompt tokens, 54 s)
+1 of 1 found
+GPU timeouts in the whole regression: 0
+SWAP after_needles 20:54:21 wired_MiB 12561 swap: total = 1024.00M used = 682.75M free = 341.25M (encrypted) engine MALLOC_LARGE swapped: 
+-- decode probe after the regression
+decode tok/s 29.3 n 300 drafts 217/243 md5 f60e112b2b67
+decode tok/s 29.4 n 300 drafts 167/278 md5 f612d63cd035
+decode tok/s 23.6 n 281 drafts 134/263 md5 cfe72b587d4e
+decode tok/s 26.8 n 300 drafts 216/238 md5 f60e112b2b67
+decode tok/s 29.6 n 300 drafts 167/263 md5 65f3d1366a4c
+decode tok/s 24.8 n 269 drafts 126/236 md5 754265f83961
+SWAP end 20:55:36 wired_MiB 12705 swap: total = 1024.00M used = 682.75M free = 341.25M (encrypted) engine MALLOC_LARGE swapped: 
+FINAL14DONE
+-- elastic K/V events
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 60 slots for it, 60 hotter experts moved to colder ones' slots (9898 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 60 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 60 slots for it, 60 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V grown to 40960 cells (0.52 GiB); the expert cache gave 104 slots for it, 104 hotter experts moved to colder ones' slots (9748 of 9958 slots hold experts)
+strata: K/V grown to 196608 cells (2.30 GiB); the expert cache gave 1031 slots for it, 884 hotter experts moved to colder ones' slots (8717 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 1241 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 40960 cells (0.52 GiB); the expert cache gave 210 slots for it, 210 hotter experts moved to colder ones' slots (9748 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 210 slots back to the expert cache, refilled from the profile

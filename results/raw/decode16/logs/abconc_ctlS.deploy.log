@@ -1,0 +1,14 @@
+[strata] 2026-10-15 00:56:24 engine started: $HOME/strata-decode7/run-d7.sh --serve --pack $HOME/exl3/pack_full512 --native $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --ple-gguf $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf --expert-profile $HOME/exl3/placement/d8w4/profile.bin --expert-cache auto --prefill 2048 --spec 4 --spec-min-p 0.5 --mtp $HOME/models/qwen38fn/mtp/rt --kv k8v4 --max-context 40960 --mmap-experts --pcie-frac 0 --adapt-every 0 --resident-budget-gib 0.2 --vram-reserve-mib 310 --vision
+strata generate: profile $HOME/exl3/placement/d8w4/profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: expert cache auto: 17.83 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9983 slots
+strata generate: expert cache 9983 slots, 17.32 GiB of VRAM; policy is
+strata generate: staged profile fill (STRATA_D8_FILL): 9983 slots staged + 0 plain in 64.0 s (1248 pieces of <= 8)
+strata generate: pre-filled 9983 of 9983 slots from the profile in 64.0 s (290 MB/s); slot 0 verified
+FileExpertSource: no device alias (cudaErrorInvalidValue); trying pageable memory
+FileExpertSource: locked resident cache complement ready: resident 0.20 GiB, pinned 0.00 GiB in 0 s; no device alias (cudaErrorInvalidValue); mlock
+strata exl3-metal: lane ready ($HOME/exl3/metal/libexl3metal.dylib; 6400 slots of 1867776 B registered)
+strata exl3-metal: LRU preloaded with 6400 of 6400 slots by profile rank in 5.3 s (11.95 GB, F_NOCACHE)
+strata serve: the prompt path borrows 884 CUDA0 cache slots (1.53 GiB)
+strata generate: elastic K/V: 16384 of 40960 cells in VRAM (0.23 of 0.52 GiB); the expert cache (9983 slots) gives the K/V room below slot 9099 as the context grows
+strata serve: 191 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 631 to the config's args (or lower --max-context)
+READY

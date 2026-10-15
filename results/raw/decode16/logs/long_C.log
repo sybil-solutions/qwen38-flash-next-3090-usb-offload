@@ -1,0 +1,41 @@
+### 100K 19:55:31
+{"length": "100k", "depth": 50, "prompt_n": 97811, "found": true, "ttft_s": 174.6, "wall_s": 185.6, "n": 300, "decode_tok_s": 27.0, "prefill_tok_s": 560.9, "md5": "c54e5ff71790", "head": "meadow-copper-504\n\nThe text provided is a comprehensive coll"}
+### probe after 100K 19:58:36
+decode tok/s 27.4 n 300 drafts 217/241 md5 8af670adc70a
+decode tok/s 30.2 n 300 drafts 172/284 md5 861bf9137879
+decode tok/s 22.2 n 289 drafts 129/262 md5 d41949ff393b
+decode tok/s 26.5 n 300 drafts 216/240 md5 f60e112b2b67
+decode tok/s 28.5 n 300 drafts 160/277 md5 8897aa5660d5
+decode tok/s 23.3 n 272 drafts 129/229 md5 866b5989f032
+### 190K 19:59:59
+{"length": "190k", "depth": 50, "prompt_n": 189481, "found": true, "ttft_s": 345.9, "wall_s": 358.3, "n": 300, "decode_tok_s": 24.2, "prefill_tok_s": 548.1, "md5": "9ab12f0af6a0", "head": "meadow-copper-504\n\nThe text provided contains a diverse arra"}
+### probe after 190K 20:05:57
+decode tok/s 27.4 n 300 drafts 216/233 md5 a6e2bf7b9392
+decode tok/s 29.6 n 300 drafts 162/272 md5 a9a451fef33b
+decode tok/s 25.4 n 288 drafts 135/248 md5 fffbf8818c2c
+decode tok/s 26.4 n 300 drafts 215/236 md5 f60e112b2b67
+decode tok/s 29.0 n 300 drafts 165/283 md5 78a04a772894
+decode tok/s 24.2 n 272 drafts 127/237 md5 6a1ea6e215b0
+strata: K/V grown to 98304 cells (1.16 GiB); the expert cache gave 538 slots for it, 538 hotter experts moved to colder ones' slots (9420 of 9958 slots hold experts)
+strata d7: loan region slots 9074..9957 (884), uniform blobs yes, weights prompt 0.075/0.000/0.000 prior 1.00, ema beta 0.15 init 0.050 shape 1.00/2000, min tokens 512, piece 8 slots
+strata d7: req 1 flags 7: guided refill of 884 slots (329 changed) from 97804 prompt tokens; copies 884 staged + 0 plain; warm 809 of 4096 candidates in 795 ms; refill 5114 ms
+strata: K/V trimmed to 8192 cells; 538 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 196608 cells (2.30 GiB); the expert cache gave 1241 slots for it, 884 hotter experts moved to colder ones' slots (8717 of 9958 slots hold experts)
+strata d7: req 8 flags 7: guided refill of 884 slots (810 changed) from 189474 prompt tokens; copies 884 staged + 0 plain; warm 1696 of 4096 candidates in 1661 ms; refill 5146 ms
+strata: K/V trimmed to 8192 cells; 1241 slots back to the expert cache, refilled from the profile
+strata serve: prompt 97811 tokens = 0 reused + 97811 read in 174394 ms (560.9 tok/s), 300 generated in 11093 ms (27.0 tok/s), drafts accepted 171 of 266, 6 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 7769 ms (4.4 tok/s), 300 generated in 10947 ms (27.4 tok/s), drafts accepted 217 of 241, 1 checkpoints
+strata serve: prompt 33 tokens = 0 reused + 33 read in 1554 ms (21.2 tok/s), 300 generated in 9940 ms (30.2 tok/s), drafts accepted 172 of 284, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1445 ms (23.5 tok/s), 289 generated in 13000 ms (22.2 tok/s), drafts accepted 129 of 262, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1055 ms (32.2 tok/s), 300 generated in 11305 ms (26.5 tok/s), drafts accepted 216 of 240, 1 checkpoints
+strata serve: prompt 33 tokens = 0 reused + 33 read in 1526 ms (21.6 tok/s), 300 generated in 10525 ms (28.5 tok/s), drafts accepted 160 of 277, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1407 ms (24.2 tok/s), 272 generated in 11679 ms (23.3 tok/s), drafts accepted 129 of 229, 1 checkpoints
+strata serve: prompt 189481 tokens = 0 reused + 189481 read in 345685 ms (548.1 tok/s), 300 generated in 12422 ms (24.2 tok/s), drafts accepted 168 of 263, 6 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 14722 ms (2.3 tok/s), 300 generated in 10958 ms (27.4 tok/s), drafts accepted 216 of 233, 1 checkpoints
+strata serve: prompt 33 tokens = 0 reused + 33 read in 1591 ms (20.7 tok/s), 300 generated in 10146 ms (29.6 tok/s), drafts accepted 162 of 272, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1243 ms (27.3 tok/s), 288 generated in 11342 ms (25.4 tok/s), drafts accepted 135 of 248, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1042 ms (32.6 tok/s), 300 generated in 11382 ms (26.4 tok/s), drafts accepted 215 of 236, 1 checkpoints
+strata serve: prompt 33 tokens = 0 reused + 33 read in 1667 ms (19.8 tok/s), 300 generated in 10342 ms (29.0 tok/s), drafts accepted 165 of 283, 1 checkpoints
+strata serve: prompt 34 tokens = 0 reused + 34 read in 1198 ms (28.4 tok/s), 272 generated in 11246 ms (24.2 tok/s), drafts accepted 127 of 237, 1 checkpoints
+wired 12591 MiB swap: total = 1024.00M used = 573.69M free = 450.31M (encrypted)
+LONGDONE

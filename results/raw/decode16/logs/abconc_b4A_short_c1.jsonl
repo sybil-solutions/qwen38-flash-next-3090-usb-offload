@@ -1,0 +1,8 @@
+{"name": "Write a Python function that checks whether a number is prime.", "t0": 1792045265.043774, "t1": 1792045274.671701, "prompt_n": 24, "ttft_s": 1.23, "n": 178, "tok_s": 21.1, "wall_s": 9.6, "md5": "b4cd5a06"}
+{"name": "Explain how a mixture of experts gating network routes tokens.", "t0": 1792045274.671967, "t1": 1792045287.147108, "prompt_n": 24, "ttft_s": 1.63, "n": 300, "tok_s": 27.5, "wall_s": 12.5, "md5": "136c1c27"}
+{"name": "Write a short story about a lighthouse keeper who stops speaking.", "t0": 1792045287.1473541, "t1": 1792045301.702306, "prompt_n": 25, "ttft_s": 1.48, "n": 300, "tok_s": 22.9, "wall_s": 14.6, "md5": "65efe1d2"}
+{"name": "Describe how a hash table handles collisions.", "t0": 1792045301.7030988, "t1": 1792045313.29157, "prompt_n": 20, "ttft_s": 1.32, "n": 300, "tok_s": 29.1, "wall_s": 11.6, "md5": "3e9a0130"}
+{"name": "Give a detailed summary of how TCP congestion control works.", "t0": 1792045313.291774, "t1": 1792045324.918663, "prompt_n": 23, "ttft_s": 0.66, "n": 300, "tok_s": 27.2, "wall_s": 11.6, "md5": "b851f083"}
+{"name": "Write a poem about the sea at night in four stanzas.", "t0": 1792045324.9189792, "t1": 1792045333.822873, "prompt_n": 25, "ttft_s": 1.76, "n": 144, "tok_s": 20.0, "wall_s": 8.9, "md5": "eb096ed2"}
+{"name": "Explain the difference between a process and a thread.", "t0": 1792045333.823056, "t1": 1792045344.6875598, "prompt_n": 23, "ttft_s": 0.77, "n": 300, "tok_s": 29.6, "wall_s": 10.9, "md5": "2e60af42"}
+{"name": "List and describe the layers of the OSI model.", "t0": 1792045344.687776, "t1": 1792045356.321514, "prompt_n": 22, "ttft_s": 0.74, "n": 300, "tok_s": 27.4, "wall_s": 11.6, "md5": "7663bbec"}

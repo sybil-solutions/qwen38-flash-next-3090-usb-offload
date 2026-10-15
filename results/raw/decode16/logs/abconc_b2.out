@@ -1,0 +1,79 @@
+### b2mA batch2m.json 22:01:33
+strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=0 kv_resident=0 profile=1 resident_cpu=1 expe
+strata generate: --batch: 2 slot sessions on CUDA0 (0.56 GiB each); 17.78 GiB free
+strata generate: --batch 2: the slot sessions take 1.12 GiB of VRAM on CUDA0 that the expert cache would otherwise hold
+strata generate: expert cache auto: 16.34 GiB free, 310 MiB reserved (+230 MiB for the draft head) -> 9113 slots
+strata generate: expert cache 9113 slots, 15.81 GiB of VRAM; policy is
+strata verify: batch windows of up to 2 sequences (layers [0, 48))
+[real]
+CONC c=1 requests=4 tokens=1200 span=234.9s aggregate=5.11 tok/s  per-request engine tok/s mean=29.07  ttft mean=48.4s  wall mean=58.7s  peak in flight=1
+[real]
+CONC c=2 requests=4 tokens=1200 span=496.4s aggregate=2.42 tok/s  per-request engine tok/s mean=8.20  ttft mean=70.8s  wall mean=247.2s  peak in flight=2
+[real]
+CONC c=4 requests=4 tokens=1200 span=508.1s aggregate=2.36 tok/s  per-request engine tok/s mean=8.70  ttft mean=211.1s  wall mean=393.0s  peak in flight=4
+[short]
+CONC c=1 requests=8 tokens=2128 span=91.0s aggregate=23.39 tok/s  per-request engine tok/s mean=26.61  ttft mean=1.5s  wall mean=11.4s  peak in flight=1
+[short]
+CONC c=2 requests=8 tokens=2115 span=990.0s aggregate=2.14 tok/s  per-request engine tok/s mean=8.30  ttft mean=2.1s  wall mean=246.9s  peak in flight=2
+[short]
+CONC c=4 requests=8 tokens=2135 span=905.5s aggregate=2.36 tok/s  per-request engine tok/s mean=9.18  ttft mean=195.0s  wall mean=417.9s  peak in flight=4
+decode tok/s 27.4 n 300 drafts 216/243 md5 f60e112b2b67
+decode tok/s 29.0 n 300 drafts 168/283 md5 a57a726bbe06
+decode tok/s 23.1 n 294 drafts 149/261 md5 fe2a563dbb00
+decode tok/s 25.7 n 300 drafts 216/237 md5 f60e112b2b67
+decode tok/s 28.7 n 300 drafts 166/285 md5 aed4fe5f964b
+decode tok/s 22.9 n 288 drafts 134/235 md5 016ef24bd044
+GPU timeouts in log: 268
+### b4A batch4.json 22:58:46
+strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=0 kv_resident=0 profile=1 resident_cpu=1 expe
+strata generate: --batch: 4 slot sessions on CUDA0 (0.56 GiB each); 16.66 GiB free
+strata generate: --batch 4: the slot sessions take 2.24 GiB of VRAM on CUDA0 that the expert cache would otherwise hold
+strata generate: expert cache auto: 15.34 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 8543 slots
+strata generate: expert cache 8543 slots, 14.82 GiB of VRAM; policy is
+strata verify: batch windows of up to 4 sequences (layers [0, 48))
+[real]
+CONC c=1 requests=4 tokens=1200 span=241.1s aggregate=4.98 tok/s  per-request engine tok/s mean=28.70  ttft mean=49.9s  wall mean=60.2s  peak in flight=1
+[real]
+CONC c=2 requests=4 tokens=1200 span=538.4s aggregate=2.23 tok/s  per-request engine tok/s mean=8.53  ttft mean=65.1s  wall mean=268.4s  peak in flight=2
+[real]
+CONC c=4 requests=4 tokens=1200 span=438.3s aggregate=2.74 tok/s  per-request engine tok/s mean=0.93  ttft mean=93.7s  wall mean=421.8s  peak in flight=4
+[short]
+CONC c=1 requests=8 tokens=2122 span=91.3s aggregate=23.25 tok/s  per-request engine tok/s mean=25.60  ttft mean=1.2s  wall mean=11.4s  peak in flight=1
+[short]
+CONC c=2 requests=8 tokens=2128 span=1010.6s aggregate=2.11 tok/s  per-request engine tok/s mean=5.02  ttft mean=1.7s  wall mean=250.8s  peak in flight=2
+[short]
+CONC c=4 requests=8 tokens=2122 span=1268.7s aggregate=1.67 tok/s  per-request engine tok/s mean=5.36  ttft mean=2.9s  wall mean=602.8s  peak in flight=4
+decode tok/s 24.6 n 300 drafts 216/237 md5 f60e112b2b67
+decode tok/s 27.3 n 300 drafts 164/277 md5 db718a251883
+decode tok/s 22.0 n 274 drafts 139/245 md5 ed4d0d2ec7bb
+decode tok/s 24.4 n 300 drafts 214/233 md5 a6e2bf7b9392
+decode tok/s 28.6 n 300 drafts 166/267 md5 c3e3075c1247
+decode tok/s 22.2 n 290 drafts 133/241 md5 925f9deb051e
+GPU timeouts in log: 268
+### b2A batch2.json 00:02:00
+strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=0 kv_resident=0 profile=1 resident_cpu=1 expe
+strata generate: --batch: 2 slot sessions on CUDA0 (0.56 GiB each); 17.78 GiB free
+strata generate: --batch 2: the slot sessions take 1.12 GiB of VRAM on CUDA0 that the expert cache would otherwise hold
+strata generate: expert cache auto: 16.46 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9192 slots
+strata generate: expert cache 9192 slots, 15.94 GiB of VRAM; policy is
+strata verify: batch windows of up to 2 sequences (layers [0, 48))
+[real]
+CONC c=1 requests=4 tokens=1200 span=230.0s aggregate=5.22 tok/s  per-request engine tok/s mean=30.50  ttft mean=47.7s  wall mean=57.5s  peak in flight=1
+[real]
+CONC c=2 requests=4 tokens=1200 span=501.0s aggregate=2.40 tok/s  per-request engine tok/s mean=1.75  ttft mean=65.4s  wall mean=249.2s  peak in flight=2
+[real]
+CONC c=4 requests=4 tokens=1200 span=504.2s aggregate=2.38 tok/s  per-request engine tok/s mean=7.38  ttft mean=209.0s  wall mean=390.7s  peak in flight=4
+[short]
+CONC c=1 requests=8 tokens=2115 span=86.8s aggregate=24.37 tok/s  per-request engine tok/s mean=26.58  ttft mean=1.0s  wall mean=10.8s  peak in flight=1
+[short]
+CONC c=2 requests=8 tokens=2127 span=869.5s aggregate=2.45 tok/s  per-request engine tok/s mean=6.02  ttft mean=1.5s  wall mean=215.6s  peak in flight=2
+[short]
+CONC c=4 requests=8 tokens=2137 span=861.3s aggregate=2.48 tok/s  per-request engine tok/s mean=6.14  ttft mean=167.4s  wall mean=380.3s  peak in flight=4
+decode tok/s 26.1 n 300 drafts 216/236 md5 f60e112b2b67
+decode tok/s 28.9 n 300 drafts 165/262 md5 47b91bc60089
+decode tok/s 23.2 n 285 drafts 137/242 md5 f24d2cc34a8f
+decode tok/s 25.8 n 300 drafts 213/236 md5 a6e2bf7b9392
+decode tok/s 27.2 n 300 drafts 158/275 md5 123714744a11
+decode tok/s 22.6 n 292 drafts 139/252 md5 50c592cff07a
+GPU timeouts in log: 268
+ABCONC15CDONE

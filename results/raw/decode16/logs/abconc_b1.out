@@ -1,0 +1,48 @@
+### ctlA ctl40.json 20:56:15
+strata generate: elastic K/V: 16384 of 204800 cells in VRAM (0.23 of 2.43 GiB); the expert cache (9958 slots) gives the K/V room below slot 9074 as the context grows
+strata serve: 190 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 632 to the config's args (or lower --max-context)
+strata verify: capturing the 6-token window (73 MiB of VRAM free)
+strata verify: capturing the 1-token window (71 MiB of VRAM free)
+strata verify: capturing the 4-token window (69 MiB of VRAM free)
+strata verify: capturing the 2-token window (67 MiB of VRAM free)
+strata verify: capturing the 3-token window (65 MiB of VRAM free)
+strata verify: capturing the 5-token window (64 MiB of VRAM free)
+strata generate: expert cache auto: 17.83 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9983 slots
+strata generate: expert cache 9983 slots, 17.32 GiB of VRAM; policy is
+strata generate: elastic K/V: 16384 of 40960 cells in VRAM (0.23 of 0.52 GiB); the expert cache (9983 slots) gives the K/V room below slot 9099 as the context grows
+strata serve: 191 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 631 to the config's args (or lower --max-context)
+CONC c=1 requests=8 tokens=2400 span=247.1s aggregate=9.71 tok/s  per-request engine tok/s mean=31.75  ttft mean=21.5s  wall mean=30.9s  peak in flight=1
+CONC c=2 requests=8 tokens=2400 span=236.2s aggregate=10.16 tok/s  per-request engine tok/s mean=32.04  ttft mean=46.2s  wall mean=55.6s  peak in flight=2
+CONC c=4 requests=8 tokens=2400 span=235.1s aggregate=10.21 tok/s  per-request engine tok/s mean=32.45  ttft mean=86.7s  wall mean=95.9s  peak in flight=4
+decode tok/s 30.2 n 300 drafts 217/240 md5 f60e112b2b67
+decode tok/s 29.8 n 300 drafts 167/271 md5 722ba7d1c1f4
+decode tok/s 23.5 n 290 drafts 142/262 md5 7206635bf667
+decode tok/s 27.0 n 300 drafts 213/243 md5 a6e2bf7b9392
+decode tok/s 29.8 n 300 drafts 166/271 md5 5ac743ab4958
+decode tok/s 22.6 n 271 drafts 126/253 md5 9b8aeb9c58f5
+GPU timeouts in log: 268
+### b4mA batch4m.json 21:11:59
+strata verify: capturing the 4-token window (70 MiB of VRAM free)
+strata verify: capturing the 2-token window (69 MiB of VRAM free)
+strata verify: capturing the 3-token window (67 MiB of VRAM free)
+strata verify: capturing the 5-token window (65 MiB of VRAM free)
+[strata] 2026-10-14 21:12:24 engine started: $HOME/strata-decode7/run-d7.sh --serve --pack $HOME/exl3/pack_full512 --native $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-000
+strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM, no --batch, --vram-elastic or --peer-device) [multi_gpu=0 kv_resident=0 profile=1 resident_cpu=1 expe
+strata generate: --batch: 4 slot sessions on CUDA0 (0.56 GiB each); 16.66 GiB free
+strata generate: --batch 4: the slot sessions take 2.24 GiB of VRAM on CUDA0 that the expert cache would otherwise hold
+strata generate: expert cache auto: 15.09 GiB free, 310 MiB reserved (+241 MiB for the draft head) -> 8387 slots
+strata generate: expert cache 8387 slots, 14.55 GiB of VRAM; policy is
+strata verify: batch windows of up to 4 sequences (layers [0, 48))
+strata serve: 174 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 648 to the config's args (or lower --max-context)
+CONC c=1 requests=8 tokens=2400 span=443.0s aggregate=5.42 tok/s  per-request engine tok/s mean=28.14  ttft mean=44.7s  wall mean=55.4s  peak in flight=1
+CONC c=2 requests=8 tokens=2400 span=1108.5s aggregate=2.17 tok/s  per-request engine tok/s mean=4.95  ttft mean=63.0s  wall mean=276.5s  peak in flight=2
+CONC c=4 requests=8 tokens=2400 span=1193.1s aggregate=2.01 tok/s  per-request engine tok/s mean=5.06  ttft mean=104.8s  wall mean=585.4s  peak in flight=4
+decode tok/s 24.8 n 300 drafts 216/239 md5 f60e112b2b67
+decode tok/s 27.9 n 300 drafts 165/263 md5 cf15a69f93b6
+decode tok/s 22.5 n 300 drafts 152/259 md5 8b6412851df2
+decode tok/s 22.6 n 300 drafts 213/241 md5 a6e2bf7b9392
+decode tok/s 26.5 n 300 drafts 160/285 md5 dcd626c85f29
+decode tok/s 21.7 n 276 drafts 132/244 md5 90362f6cdd7d
+GPU timeouts in log: 268
+### b2mA batch2m.json 22:01:31
+b1 stopped after b4mA 22:01:33

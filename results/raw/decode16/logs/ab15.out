@@ -1,0 +1,57 @@
+### ctlA $HOME/strata-decode15/cfg/live_d14.json 18:27:27
+ctlA done:       29 requests, probe mean 26.03 (12)
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 20.29, "n": 300, "tok_s": 29.7, "wall_s": 30.3, "md5": "72e700da"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 22.41, "n": 300, "tok_s": 29.2, "wall_s": 32.6, "md5": "14b514fb"}
+after_seq 18:46:19 wired_MiB 12695 swap: total = 1024.00M used = 120.00M free = 904.00M (encrypted) engine_swapped: 
+after_seq mem: swapins 288687. swapouts 909160. compr_occupied_pages 94650. free_pct 10%
+after_probe 18:48:54 wired_MiB 12687 swap: total = 1024.00M used = 120.00M free = 904.00M (encrypted) engine_swapped: 
+after_probe mem: swapins 288816. swapouts 909160. compr_occupied_pages 96066. free_pct 10%
+ctlA done:       29 requests, probe mean 26.03 (12)
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 46 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 91 slots for it, 91 hotter experts moved to colder ones' slots (9376 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 91 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.21 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)
+### newA $HOME/strata-decode15/cfg/cfgC.json 18:48:55
+newA done:       29 requests, probe mean 26.58 (12)
+after_seq 19:07:23 wired_MiB 12694 swap: total = 1024.00M used = 112.00M free = 912.00M (encrypted) engine_swapped: 
+after_seq mem: swapins 289078. swapouts 909160. compr_occupied_pages 108028. free_pct 9%
+after_probe 19:09:53 wired_MiB 12697 swap: total = 1024.00M used = 112.00M free = 912.00M (encrypted) engine_swapped: 
+after_probe mem: swapins 289378. swapouts 909160. compr_occupied_pages 104748. free_pct 9%
+after_image 19:10:09 wired_MiB 12294 swap: total = 1024.00M used = 112.00M free = 912.00M (encrypted) engine_swapped: 
+after_image mem: swapins 289382. swapouts 909160. compr_occupied_pages 96343. free_pct 12%
+newA done:       29 requests, probe mean 26.58 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 60 slots for it, 60 hotter experts moved to colder ones' slots (9898 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 60 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### newB $HOME/strata-decode15/cfg/cfgC.json 19:10:10
+newB done:       29 requests, probe mean 27.09 (12)
+after_seq 19:28:39 wired_MiB 12858 swap: total = 1024.00M used = 144.12M free = 879.88M (encrypted) engine_swapped: 
+after_seq mem: swapins 289774. swapouts 911728. compr_occupied_pages 106630. free_pct 8%
+after_probe 19:31:07 wired_MiB 12688 swap: total = 1024.00M used = 136.12M free = 887.88M (encrypted) engine_swapped: 
+after_probe mem: swapins 290060. swapouts 911728. compr_occupied_pages 102190. free_pct 9%
+after_image 19:31:22 wired_MiB 12286 swap: total = 1024.00M used = 136.12M free = 887.88M (encrypted) engine_swapped: 
+after_image mem: swapins 290132. swapouts 911728. compr_occupied_pages 90765. free_pct 13%
+newB done:       29 requests, probe mean 27.09 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 60 slots for it, 60 hotter experts moved to colder ones' slots (9898 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 60 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### ctlB $HOME/strata-decode15/cfg/live_d14.json 19:31:23
+ctlB done:       29 requests, probe mean 26.00 (12)
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 20.14, "n": 300, "tok_s": 30.4, "wall_s": 29.9, "md5": "f03ca40b"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 22.22, "n": 300, "tok_s": 28.8, "wall_s": 32.6, "md5": "28f19159"}
+after_seq 19:50:14 wired_MiB 12687 swap: total = 1024.00M used = 136.12M free = 887.88M (encrypted) engine_swapped: 
+after_seq mem: swapins 290431. swapouts 911728. compr_occupied_pages 98460. free_pct 10%
+after_probe 19:52:48 wired_MiB 12687 swap: total = 1024.00M used = 128.12M free = 895.88M (encrypted) engine_swapped: 
+after_probe mem: swapins 290462. swapouts 911728. compr_occupied_pages 96833. free_pct 10%
+ctlB done:       29 requests, probe mean 26.00 (12)
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 46 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 24576 cells (0.29 GiB); the expert cache gave 91 slots for it, 91 hotter experts moved to colder ones' slots (9376 of 9467 slots hold experts)
+strata: K/V trimmed to 8192 cells; 91 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.21 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9421 of 9467 slots hold experts)
+AB15DONE

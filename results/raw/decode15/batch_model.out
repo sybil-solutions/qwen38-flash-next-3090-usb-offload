@@ -1,0 +1,16 @@
+solo MTP spec 4 (the live c=1 path): model per-request tok/s with tau=2.59:
+  W 99.93 ms N 356.6 M 20.71 -> 25.92 tok/s
+  c=1 no draft  slots 9467: W 85.2 ms N 109 M 13.7  per-request 11.7 tok/s  aggregate 11.7 tok/s
+  c=2 no draft  slots 8625: W 102.7 ms N 288 M 30.2  per-request 9.7 tok/s  aggregate 19.5 tok/s
+  c=4 no draft  slots 7976: W 141.0 ms N 663 M 67.7  per-request 7.1 tok/s  aggregate 28.4 tok/s
+  c=8 no draft  slots 6676: W 266.9 ms N 1701 M 204.8  per-request 3.7 tok/s  aggregate 30.0 tok/s
+  c=2 batch-mtp slots 8579: W 121.1 ms N 541 M 43.1  per-request 12.7 tok/s  aggregate 25.4 tok/s
+  c=4 batch-mtp slots 7883: W 188.8 ms N 1251 M 106.0  per-request 8.2 tok/s  aggregate 32.6 tok/s
+  c=8 batch-mtp slots 6491: W 418.0 ms N 3246 M 347.9  per-request 3.7 tok/s  aggregate 29.5 tok/s
+rows per solo window (first 10 windows of every request): {1: 2496, 4: 9216, 2: 1200, 3: 1008}  mean ids per layer-window solo: 22.0
+c=1 on the solo MTP path (the server runs a lone request solo) with the slot-session VRAM taken from the cache:
+  ctl (no batch, elastic 200K)         slots 9467: W 99.93 ms -> 25.92 tok/s (model)
+  batch2  (-2x577 MiB, -340 main)      slots 8625: W 106.38 ms -> 24.35 tok/s (model)
+  batch4  (-4x577 MiB, -340 main)      slots 7976: W 111.93 ms -> 23.14 tok/s (model)
+  batch2m (-2x618, -340)               slots 8579: W 106.79 ms -> 24.25 tok/s (model)
+  batch4m (-4x618, -340)               slots 7883: W 112.76 ms -> 22.97 tok/s (model)
