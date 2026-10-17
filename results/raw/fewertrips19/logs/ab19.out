@@ -1,0 +1,32 @@
+### cA /Users/sero/strata-fewertrips19/cfg/configC.json 18:20:53
+cA done:       29 requests, probe mean 26.83 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### dA /Users/sero/strata-fewertrips19/cfg/configD.json 18:41:47
+dA done:       29 requests, probe mean 26.26 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### hA /Users/sero/strata-fewertrips19/cfg/hoistc.json 19:01:20
+hA done:       29 requests, probe mean 26.71 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### hB /Users/sero/strata-fewertrips19/cfg/hoistc.json 19:20:53
+hB done:       29 requests, probe mean 26.23 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### dB /Users/sero/strata-fewertrips19/cfg/configD.json 19:40:31
+dB done:       29 requests, probe mean 26.28 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+### cB /Users/sero/strata-fewertrips19/cfg/configC.json 20:00:05
+cB done:       29 requests, probe mean 26.93 (12)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 106 slots for it, 106 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata: K/V trimmed to 8192 cells; 106 slots back to the expert cache, refilled from the profile
+strata: K/V grown to 16384 cells (0.23 GiB); the expert cache gave 46 slots for it, 46 hotter experts moved to colder ones' slots (9912 of 9958 slots hold experts)
+restored live md5 b481bfe4dd4f299be24c59c70f4e12cc
+AB19DONE

@@ -1,0 +1,2 @@
+config A(Decode14 9467): windows 3421 N 261.5 M 20.18 zero-cold rings/window 1.76 W 95.59 ms  model 27.10 tok/s
+config C/D 9958: windows 3421 N 234.1 M 17.21 zero-cold rings/window 2.27 W 92.65 ms  model 27.96 tok/s

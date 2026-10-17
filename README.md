@@ -34,7 +34,7 @@ docker compose --profile fetch run --rm fetch all    # optional, ~130 GB: expert
 ./run.sh --config final-g4-lru-ht  # an older config (fallbacks, see below)
 ```
 
-(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config D** (config C = `--config c`, best decode; D adds the lazy refill, patch 0020) (`configs/strata-exl3-full512-c.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
+(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config E** (config D = `--config d`, config C = `--config c`, best decode without the hoist; E adds the decode hoist, patch 0021, to D's lazy refill, patch 0020) (`configs/strata-exl3-full512-e.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
 (nothing is stored, no password is asked for):
 
 ```sh
@@ -47,7 +47,15 @@ The serving runtime is native macOS (the engine drives the 3090 over USB through
 USB passthrough of this dock, so Docker makes the build and the model download one command but cannot run the server; `./run.sh` is the one native step. Two Metal binaries need Xcode's Metal toolchain,
 which the mini's Command Line Tools lack: `./run.sh --build-metal` builds them on any Mac that has it (into `./out/metal`; copy that directory to the mini). What was run and what was not: [docs/reproduce.md](docs/reproduce.md#10-one-click-what-was-run) and [section 11](docs/reproduce.md#11-config-c-what-was-reproduced).
 
-## Results: config D (default) and config C (best decode)
+## Results: config E (default), config D and config C
+
+Config E = config D + the decode hoist (`patches/strata/0021`, `STRATA_D19_HOIST=1`; template `configs/strata-exl3-full512-e.json.tmpl`, live config md5 `078235c5`, engine `strata_d19b` md5 `8b11081b`).
+In the EXL3 doorbell graph the shared-expert combine and the resident experts' down-projection kernel used to run after the wait for the mini's cold-expert rows although they do not depend on them; they now run before it, so only one add stays on the card's critical path between the y push and the next ring (HS_TRACE wait-for-ring 0.317 -> 0.282 ms per ring, 44 rings per window). Same arithmetic, the fp32 association of the layer output changes (as with any slot-count change). Prefill and the 200K / vision / MTP / all-512-expert stack are unchanged.
+Measured 2026-10-16/17 on the mini (FewerTrips19), ABBA with a fresh restart per arm (C D E E D C; 29 realistic prompts, 300 tokens, + 12 probes per arm): **decode 29.81 (D) -> 30.94 tok/s (+3.8 %, paired 24/29 prompts faster, se 0.8 %)**, config C 31.14 (E -0.5 % vs C; probes 26.47 vs D 26.27 vs C 26.88), TTFT unchanged vs D (20.2 s vs C 23.8 s), image PASS on both E arms. Full regression on the final config (~110 requests): realistic 30.85 tok/s, prefill 2,565 / 8,018 / 18,330 / 33,842 tokens 230 / 224, 459 / 512, 491 / 520, 588 / 621 tok/s, tool reuse PASS, image PASS, 190K needle found (356 s), 5 x 32K needles found, 0 GPU timeouts; quality gate vs the saved baseline (705 positions): top-1 97.73 %, mean KL 0.005474, p99 KL 0.0817 (PASS; against the config D run p99 0.1267, informational as before).
+Not shipped, measured / simulated in the same campaign ([`results/raw/fewertrips19/`](results/raw/fewertrips19/), tables in `sim/`): card-only self-speculative drafting (the card-only pass agrees with the exact model on 92.3 % of top-1 tokens but costs ~25 ms per token: break-even needs <= 16-18 ms), mini-side layer blocks (dense weights 70 MiB/layer cannot beat the 1.36 ms a block saves), dynamic zero-cold ring skip (+2.7 % at best, 5 % of rings), `--spec 5/6` (no gain).
+Raw logs and tools: [`results/raw/fewertrips19/`](results/raw/fewertrips19/).
+
+## Results: config D
 
 Config D = config C + the lazy loan refill (`patches/strata/0020`, `STRATA_D7_MODE=15`, `STRATA_D18_K=300`; template `configs/strata-exl3-full512-d.json.tmpl`, live config md5 `b481bfe4`, engine `strata_d18d` md5 `b5b0e1bc`).
 After a prompt only 300 of the 884 prefill-lent VRAM slots are refilled before the first token; the other 584 are served by the mini LRU (exact) and copied while the server waits for the next request.

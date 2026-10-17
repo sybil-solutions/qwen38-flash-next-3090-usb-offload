@@ -15,6 +15,14 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
+## 0.00 Latest configuration: `configs/strata-exl3-full512-e.json.tmpl` (config E, FewerTrips19, 2026-10-17)
+
+= config D (section 0.0) + patch `strata/0021` (`STRATA_D19_HOIST=1`). Live config md5 `078235c5bfec8bac85dc0a39d562485d`, engine `strata_d19b` md5 `8b11081ba95a61982e5247e7e09c4aa9`; shim, Metal library and every other knob as config D. Raw: [`results/raw/fewertrips19/`](../results/raw/fewertrips19/).
+ABBA (C D E E D C, fresh restart per arm, 29 realistic prompts + 12 probes): decode realistic C 31.03 / 31.24, D 29.83 / 29.80, E 31.00 / 30.88 tok/s (E vs D +3.84 %, paired 24/29 faster, se 0.78 %; E vs C -0.52 %); probes C 26.83 / 26.93, D 26.26 / 26.28, E 26.71 / 26.23; TTFT D 20.2 s, E 20.2 s, C 23.8 s.
+USB / ring time per window (config D, `STRATA_HS_TRACE`, per cold ring, 44 rings per window): wait-for-ring 0.319 -> 0.282 ms with E, x pull 0.036, y push 0.247, flag push 0.020, pool (Metal job + SSD reads) 1.21 ms, host busy 1.47 ms: ~27 ms of a ~80-90 ms window is USB + card chain, ~53 ms is the mini's pool.
+Regression (final config, ~110 requests): realistic 30.85 tok/s (TTFT 20.2 s), prefill 230 / 224, 459 / 512, 491 / 520, 588 / 621 tok/s (2.5K / 8K / 18K / 33K), tool reuse PASS (3,379 reused), image PASS, ~190K needle FOUND (356 s), agent turns 2.7-9.4 s, 5 x 32K needles FOUND, 0 GPU timeouts. Quality gate (teacher-forced, 705 positions) vs the saved baseline: top-1 97.73 %, mean KL 0.005474, p99 KL 0.0817 (PASS); vs the config D run: p99 KL 0.1267 (informational).
+Negative / not built (simulations on the Decode7 routing dump, `results/raw/fewertrips19/sim/table19_*.out`): mini-side layer blocks -0.6..-11 %; dynamic zero-cold ring skip +2.7 % at best; card-only self-speculation (teacher-forced top-1 agreement 92.3 % with the cold experts skipped, 88.2 % with `STRATA_EXL3_RESIDENT_ONLY` routing; one card-only token costs 22-25 ms, break-even <= 16-18 ms); prefetch from the card-only routing (recall 0.87 of the exact experts, -70 % misses) cannot pay for the card-only pass; `--spec 5/6` 30.63 / 29.67 vs 29.82 on 10 prompts (no gain).
+
 ## 0.0 Latest configuration: `configs/strata-exl3-full512-d.json.tmpl` (config D, Prefill18, 2026-10-15)
 
 = config C (section 0) + patch `strata/0020` (lazy loan refill; `STRATA_D7_MODE=15`, `STRATA_D18_K=300`). Live config md5 `b481bfe4dd4f299be24c59c70f4e12cc`, engine `strata_d18d` md5 `b5b0e1bcc566424353e37625aba1c7d8`; shim and Metal library as config C. Raw: [`results/raw/prefill18/`](../results/raw/prefill18/).

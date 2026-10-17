@@ -1,0 +1,3 @@
+segments 25 windows 157
+none     : misses/window 32.90  cold in place/window  380.6  speculative SSD reads/window  0.00   (window = 4-6 rows teacher-forced)
+prefetch : misses/window 10.01  cold in place/window  380.6  speculative SSD reads/window 30.15   (window = 4-6 rows teacher-forced)

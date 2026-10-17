@@ -1,0 +1,13 @@
+C1  dynamic zero-cold skip (ideal: skipped ring costs 0; ring=1.06 ms), config C/D slots 9,958, tau 2.59
+ k whole | N_in  M    zero-cold rings/win | W no-skip | W skip | tok/s no-skip | tok/s skip | skip gain
+  4      | 234.1 17.21  2.27               |   92.65  |  90.24 |  27.96        |  28.70     | +2.67%
+  6      | 254.5 17.76  1.66               |   91.73  |  89.97 |  28.24        |  28.79     | +1.95%
+  8      | 276.4 18.67  1.17               |   91.08  |  89.84 |  28.44        |  28.83     | +1.38%
+ 10      | 303.2 19.89  0.79               |   90.82  |  89.98 |  28.52        |  28.78     | +0.93%
+ 12      | 338.5 21.34  0.45               |   91.06  |  90.58 |  28.44        |  28.59     | +0.53%
+
+C1b zero-cold fraction by rows in the window (current placement, k=4): rows 1/2/3/4
+  rows 1: zero-cold rings/window 7.02 of 44 = 16.0%
+  rows 2: zero-cold rings/window 2.56 of 44 = 5.8%
+  rows 3: zero-cold rings/window 1.18 of 44 = 2.7%
+  rows 4: zero-cold rings/window 0.63 of 44 = 1.4%
