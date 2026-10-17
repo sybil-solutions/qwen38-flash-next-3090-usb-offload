@@ -25,6 +25,7 @@ Apply order matters. Base for every `strata/` patch: Strata **v0.1.41**, commit 
 | `strata/0018-decode14-kv-grow-resident-gate.patch` | Decode14: `STRATA_KV_GROW_RESIDENT=1` lets the elastic K/V (`--kv-grow` VMM pools) run in the resident-RAM mode (needs the VMM shim, `shim/0004`) | `generate.cpp` |
 | `strata/0019-decode15-elastic-pooled-keys.patch` | Decode15: the indexer's pooled keys grow with the context (`STRATA_KV_GROW_POOLED=0` = off) | `layer.cpp` |
 | `strata/0020-prefill18-lazy-loan-refill.patch` | Prefill18 (config D): `STRATA_D7_MODE=15` = the guided refill of the prefill-lent VRAM slots no longer blocks the first token: `STRATA_D18_K` (config D: 300) of the lent slots are refilled before it (unset: all but `STRATA_D18_PEND`, 300), the rest (their experts are served by the mini LRU, exact) are copied in the engine's idle wait (`STRATA_D18_IDLE`), optionally between decode windows (`STRATA_D18_PHI`, off: it only moves the stall into decode); knobs file `STRATA_D18_CFG` for A/B | `generate.cpp` |
+| `strata/0021-fewertrips19-hoist-skipcold.patch` | FewerTrips19 (config E): `STRATA_D19_HOIST=1` = in the EXL3 slim doorbell graph the shared-expert combine and the resident experts' kernel B are captured BEFORE the wait for the host's CPU rows (they do not depend on them), only the add of the host-reduced rows stays after it: the y-push -> next-ring chain shortens (wait-for-ring 0.317 -> 0.282 ms/ring), decode +3.8 % realistic, exact up to fp32 association; also `STRATA_D19_SKIPCOLD=1` (RESEARCH, LOSSY, off, not in config E: cold experts are not computed, the quality probe of a card-only pass) | `verify.cpp` |
 | `tinygrad/0001-tg-strata-nv-usb-fixes.patch` | on top of tinygrad `e765a2abf` (PR #17369 head, `bounty/nv-usb3-wip`, merged with master `7d2420e`): compile-server short reads, NV reloc fields, PROM read stability after a killed session | 3 files |
 | `vision/0001-strata-vision-metal-macos.patch` | Strata `tools/vision`: `STRATA_VISION_METAL` CMake option (ggml-metal, Accelerate, no OpenMP), no `posix_fadvise` on macOS | 2 files |
 
@@ -35,6 +36,8 @@ unchanged at that point, checked with `cmp`); `0005` brings `prefill.cpp` to the
 `scripts/verify-card-free.sh patches` re-runs the apply check.
 
 **Config D (`0020`).** Config C + one patch to `generate.cpp` (diff of the end state of `0019` against the Prefill18 source, sha256 in [`results/verification/config-d-sha256.txt`](../results/verification/config-d-sha256.txt)); the config template differs from C by `STRATA_D7_MODE=15` and `STRATA_D18_K=300`.
+
+**Config E (`0021`).** Config D + one patch to `verify.cpp` (diff of the end state of `0020` against the FewerTrips19 source, sha256 in [`results/verification/config-e-sha256.txt`](../results/verification/config-e-sha256.txt)); the config template differs from D by `STRATA_D19_HOIST=1`.
 
 **Config C (`0006`-`0019`, `shim/0001`-`0005`).** Base: `0006` applies to the tree after `0005`; every later patch applies to the tree after the one before it. They were made as the differences between the successive states of the files
 the live engine `strata_d15a` was compiled from (the per-step source copies of the campaign: `runs/prefill600`, `runs/xport8` + the xport8 tree, `runs/decode5`..`decode15`; the server files from `~/strata-prefix-fix` and the deployed `~/strata/serve`), not

@@ -1,0 +1,91 @@
+# FewerTrips19 (2026-10-16, config E = config D + this patch): STRATA_D19_HOIST=1. In the EXL3 slim doorbell graph the shared-expert combine and the resident experts' kernel B
+# (exl3_moe_coop B, bo as its shared term) used to run AFTER the wait for the host's CPU rows although they do not depend on them. With the knob they are captured BEFORE the wait; only the add of the
+# host-reduced rows (add_inplace + zero of the mirror) stays after it, so the y-push -> next-ring chain is shorter (HS_TRACE wait-for-ring 0.317 -> 0.282 ms per ring). Same arithmetic,
+# the fp32 association of bo changes ((shared + resident) + cpu instead of (shared + cpu) + resident), the same class as every slot-count change.
+# Also STRATA_D19_SKIPCOLD=1 (RESEARCH, LOSSY, off, not in config E): the cold experts are not computed (rows zero): the quality probe of a card-only pass (top-1 92.3% vs the exact model).
+# Measured (ABBA, 29 realistic prompts + 12 probes, fresh restart per arm): decode 29.81 (D) -> 30.94 tok/s (+3.8%, paired 24/29 faster), probes 26.27 -> 26.47, TTFT unchanged (20.2 s).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0020, applied in order with `git apply -p1`.
+
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -1563,6 +1563,9 @@
+         return true;
+     };
+ 
++    // FewerTrips19 STRATA_D19_HOIST=1: EXL3 slim doorbell layers run the shared-expert combine and the resident experts' kernel B BEFORE the wait for the host's CPU rows (they do not depend on them);
++    // only the add of the host-reduced rows stays after the wait.  Same arithmetic, fp32 association of bo changes ((shared + resident) + cpu instead of (shared + cpu) + resident).
++    static const bool d19_hoist = [] { const char* e = std::getenv("STRATA_D19_HOIST"); return e && e[0] == '1'; }();
+     // ---------------------------------------------------------------- post(l, group): experts, combine
+     static const bool fuse_head_gr_env = [] {
+         const char* e = std::getenv("STRATA_FUSE_HEAD_GR");
+@@ -1608,8 +1611,10 @@
+             grouped(p_ptr, p_start, p_counts, 0, parts_out);
+             stamp(l, 20, grp);
+         } else if (slim) {   // EXL3 slim doorbell: no plan / flag A / flag B; the host's reduced CPU rows come in one block
+-            wait_flag_ge(m_flag_, ring + fo, cs);
+-            stamp(l, 23, grp);
++            if (!(d19_hoist && lay.exl3)) {
++                wait_flag_ge(m_flag_, ring + fo, cs);
++                stamp(l, 23, grp);
++            }
+             cudaMemsetAsync(parts_out, 0, (size_t) n * K * N * sizeof(float), cs);   // the combine then adds the shared expert only
+         } else {
+             if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
+@@ -1673,6 +1678,17 @@
+             mb.weights = w_ + t * K; mb.shared = shared_ + t * N;
+             if (!moe_combine_parts(g, l, K, mb, parts_ + (size_t) t * K * N, bo_ + t * N, cs, err)) return false;
+         }
++        if (d19_hoist && slim && !ar_l(l) && lay.exl3) {   // resident experts first (bo = shared + resident), then the host's rows
++            Exl3Gpu* xg = exl3_gpu(err);
++            if (xg == nullptr || xg->post(xg->ctx, grp, bo_ + tb * N, (int) N, n, cs) != 0) {
++                if (err.empty()) err = "verify: EXL3 decode MoE (post) failed at layer " + std::to_string(l);
++                return false;
++            }
++            wait_flag_ge(m_flag_, ring + fo, cs);
++            stamp(l, 23, grp);
++            add_inplace(bo_ + tb * N, m_yred_ + tb * N, (int64_t) n * N, cs);
++            cudaMemsetAsync(m_yred_ + tb * N, 0, (size_t) n * N * sizeof(float), cs);
++        } else {
+         if (slim && !ar_l(l)) {   // the CPU experts' routing-weighted sum (host reduced), then the mirror is zero again
+             add_inplace(bo_ + tb * N, m_yred_ + tb * N, (int64_t) n * N, cs);
+             cudaMemsetAsync(m_yred_ + tb * N, 0, (size_t) n * N * sizeof(float), cs);
+@@ -1684,6 +1700,7 @@
+                 return false;
+             }
+         }
++        }
+         if (remote_opt_) remote_opt_->combine(bo_ + tb * N, y_dummy_ + tb * N, tb, n,
+                               device_plan_ ? skip_ + grp : nullptr, ring, cs);
+         stamp(l, 24, grp);
+@@ -2312,7 +2329,9 @@
+             double hs2 = hs1b, hs3 = hs1b, hs4 = hs1b, hs5x = hs1b;
+             bool hs_merged = false, hs_next_q = false;
+             static const bool pull_early = std::getenv("STRATA_MAC_PULL_EARLY") != nullptr && std::atoi(std::getenv("STRATA_MAC_PULL_EARLY")) != 0;   // measured slower (+9 ms/window: the pull threads compete with the USB thread)
+-            if (r0 >= 0 && hs_pre && pull_early) {   // STRATA_MAC_PULL: start reading this layer's cold experts now, while the CE push is queued below
++            // FewerTrips19 STRATA_D19_SKIPCOLD=1 (RESEARCH, LOSSY, default off): the cold experts are not computed (their rows are zero): route normally, compute only the VRAM-resident experts, no renormalisation
++            static const bool d19_skip = std::getenv("STRATA_D19_SKIPCOLD") != nullptr && std::atoi(std::getenv("STRATA_D19_SKIPCOLD")) != 0;
++            if (r0 >= 0 && hs_pre && pull_early && !d19_skip) {   // STRATA_MAC_PULL: start reading this layer's cold experts now, while the CE push is queued below
+                 int64_t cold[kVerifyMaxT * 16]; int nc = 0;
+                 for (int t = r0; t <= r1 && nc + (int) K_ <= (int) (sizeof cold / sizeof cold[0]); ++t)
+                     for (int64_t j = 0; j < K_; ++j) {
+@@ -2345,14 +2364,18 @@
+                     hs_merged = strata::tgcu::hs_push_pre(ps, ns, 2) == 0;
+                 }
+                 progress_at("verify window: the CPU experts of layer", l);
++                if (d19_skip) {
++                    std::memset(h_yred_ + (size_t) (tb + r0) * N_, 0, (size_t) (r1 - r0 + 1) * N_ * sizeof(float));
++                } else {
+                 strata_exl3_metal_arm(wsrc, h_yred_ + (size_t) tb * N_);
+                 if (pool != nullptr)
+                     pool(user, h_x_ + (size_t) tb * N_, ids, n, ss.k, h_ymiss_ + (size_t) tb * K_ * N_, l);
++                }
+                 if (d9_pre_th.joinable()) d9_pre_th.join();
+                 progress_tick();
+                 hs3 = hs_now();
+                 std::atomic_thread_fence(std::memory_order_seq_cst);
+-                const bool metal_rows = strata_exl3_metal_taken() != 0;
++                const bool metal_rows = d19_skip || strata_exl3_metal_taken() != 0;
+                 for (int t = r0; !metal_rows && t <= r1; ++t) {   // the routing-weighted sum of this row's CPU experts (the Metal lane did it itself)
+                     float* acc = h_yred_ + (size_t) (tb + t) * N_;
+                     bool first = true;

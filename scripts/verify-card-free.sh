@@ -37,8 +37,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
   for p in $REPO/patches/strata/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied $(basename $p)"; done
   rm -rf $WORK/vis && mkdir -p $WORK/vis/tools && cp -r $WORK/strata/tools/vision $WORK/vis/tools/ && cd $WORK/vis && git init -q . 2>/dev/null
   git apply --check $REPO/patches/vision/0001-strata-vision-metal-macos.patch; echo "vision patch applies to tools/vision"
-  # config D (Prefill18 = config C + patch 0020): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
-  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-d-sha256.txt; config-c-sha256.txt is the manifest before 0020)
+  # config E (FewerTrips19 = config D + patch 0021): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
+  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-e-sha256.txt; config-d-sha256.txt is the manifest before 0021, config-c-sha256.txt before 0020)
   rm -rf $WORK/shimchk && mkdir -p $WORK/shimchk/shim && cp $REPO/patches/shim/base/* $WORK/shimchk/shim/ && cd $WORK/shimchk && git init -q . 2>/dev/null || true
   for p in $REPO/patches/shim/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied shim/$(basename $p)"; done
   for f in tgcu.py tgcu_api.py tgcudart.cpp; do cmp $WORK/shimchk/shim/$f $REPO/shim/$f || fail "patches/shim/base + 0*.patch differ from shim/$f"; done
@@ -48,8 +48,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
     case $h in ""|\#*) continue;; esac
     case $f in shim/*|exl3/*) f=$REPO/$f;; *) f=$WORK/strata/$f;; esac
     expect_sha $f $h "${f#$REPO/}"; n=$((n + 1))
-  done < $REPO/results/verification/config-d-sha256.txt
-  echo "$n files of config D match results/verification/config-d-sha256.txt"
+  done < $REPO/results/verification/config-e-sha256.txt
+  echo "$n files of config E match results/verification/config-e-sha256.txt"
   logged profile-d8w4 1 env STRATA_TOOLS=$WORK/strata/tools python3 $REPO/exl3/make_profile_wholelayers.py $WORK/d8w4 0,1,2,6
   [ "$(md5 -q $WORK/d8w4/profile.bin)" = 2ac3b7e1436c1720487993969c651c5c ] && echo "exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH" || fail "d8w4 profile does not reproduce"
 }
