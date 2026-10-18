@@ -93,8 +93,7 @@
  "host": "0.0.0.0",
  "api_key": "REDACTED",
  "allowed_hosts": [
-  "192.168.1.84",
-  "macmini"
+  "REDACTED"
  ],
  "prefix_replay": true,
  "prefix_pin_min": 2048

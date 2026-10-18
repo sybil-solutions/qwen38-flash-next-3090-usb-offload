@@ -1,0 +1,10 @@
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 19.42, "n": 300, "tok_s": 33.4, "wall_s": 28.4, "md5": "eeeb8c87"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 20.52, "n": 300, "tok_s": 33.6, "wall_s": 29.4, "md5": "8003bda8"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 14.13, "n": 300, "tok_s": 33.6, "wall_s": 23.0, "md5": "5a59c118"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 17.54, "n": 300, "tok_s": 31.8, "wall_s": 26.9, "md5": "4635a121"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 17.44, "n": 300, "tok_s": 32.7, "wall_s": 26.5, "md5": "5c76e8c2"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 16.45, "n": 300, "tok_s": 35.3, "wall_s": 24.9, "md5": "242fd5cc"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 19.57, "n": 300, "tok_s": 37.5, "wall_s": 27.5, "md5": "c31f8e56"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 17.88, "n": 300, "tok_s": 35.3, "wall_s": 26.3, "md5": "c29d3abe"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 18.88, "n": 299, "tok_s": 31.5, "wall_s": 28.3, "md5": "20dbde4b"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 21.5, "n": 300, "tok_s": 37.8, "wall_s": 29.4, "md5": "8fe456a0"}

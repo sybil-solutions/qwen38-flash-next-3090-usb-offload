@@ -5,6 +5,8 @@ results (2026-10-12). Anything marked **not pinned** could not be recovered from
 reconstructed from build files and logs but not executed again for this repo. Steps that were re-run card-free are listed in
 [results.md](results.md) section 8 and are runnable with `scripts/verify-card-free.sh`.
 
+**Config G (2026-10-18):** the recommended recipe is `configs/strata-exl3-full512-g.json.tmpl` (= config F + patch `strata/0024`, `exl3/exl3_o23.cu` -> `libstrata_o23.dylib`, and the fused-decode Metal library; what was rebuilt and compared with the live files: [`results/verification/config-g-repro.md`](../results/verification/config-g-repro.md)). Earlier configs stay selectable with `./run.sh --config f|e|d|c`.
+
 **Config C (2026-10-15):** the recommended recipe is `configs/strata-exl3-full512-c.json.tmpl` (patches `strata/0001`-`0019`, `shim/`, `exl3/placement/d8w4/profile.bin`); sections 1-10 were written for the host-tail step and still describe the toolchain; what changes for config C is in [section 11](#11-config-c-what-was-reproduced).
 
 **Automated path:** `docker compose run --rm build` (the Linux/CUDA half, pinned) followed by `./run.sh` on the Mac does sections 2-6 below in one go; what was run and what was not is in [section 10](#10-one-click-what-was-run).
@@ -283,6 +285,8 @@ otherwise download them) and 1-2 GB of disk. Everything it does is `nice`d; it t
 | engine wrapper | `~/strata-decode7/run-d7.sh` | md5 `11d7d6f3` | `shim/run-d7.sh` (byte-identical) |
 | shim | `~/shim/tgcu.py`, `tgcu_api.py` | md5 `d2692131`, `9697e39c` | `shim/` (byte-identical), `patches/shim/` |
 | CUDA runtime shim | `~/shim/libcudart.dylib` | config C-E: md5 `ec0517ecb87846cfcaffc02c7f99808a`, sha256 `20e8167d...`; config F (`tgcudart.cpp` of `shim/0006`): md5 `00771147`, sha256 `339d57f5...` | `shim/build-libcudart.sh` on the mini (C-E byte-identical; F identical apart from the ad-hoc code signature, which carries the build's output name: unsigned md5 `9fdda6f2`) |
+| Opt23 doorbell library (config G) | `~/strata-opt23/lib/libstrata_o23.dylib` | md5 `6a4e09a7`, sha256 `de858998...`; fatbin `exl3_o23.fatbin` sha256 `a6fad4f2...` | `exl3/strata_m4/build_o23.sh` after `exl3/build.sh exl3_o23` (see config-g-repro.md for the byte comparison) |
+| Metal lib (config G) | `~/strata-opt23/lib/libexl3metal_g.dylib` | md5 `c49abac8`, sha256 `53d4deab...` | `exl3/metal/build.sh` (byte-identical) |
 | libusb batch executor (config F) | `~/shim/libtgusb.dylib` | md5 `7e3e04fd`, sha256 `7862dcad...` | `shim/build-libtgusb.sh` (identical apart from the code signature: unsigned md5 `35be5355`) |
 | server | `~/strata/serve/server.py`, `prefix_replay.py` | md5 `780aa4b1`, `398c46f5` | patches `0007`, `0012` |
 | Metal lib | `~/exl3/metal/libexl3metal.dylib` | sha256 `e38a011c79933a8e...` | `exl3/metal/build.sh` (byte-identical, unchanged since the host-tail step) |

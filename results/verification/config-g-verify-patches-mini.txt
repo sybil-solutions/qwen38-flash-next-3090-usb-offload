@@ -1,0 +1,64 @@
+
+=== patches: Strata v0.1.41 + patches/strata/00*.patch
+applied 0001-macos-tgcu-exl3-engine.patch
+applied 0002-server-vision-idle-unload.patch
+applied 0003-prefill-lockstep-groups.patch
+applied 0004-exl3-metal-lane-lru-decode.patch
+applied 0005-prefill-splitf-min-groups.patch
+applied 0006-prefill-lane-min-ple-warm-ahead.patch
+applied 0007-server-prefix-replay.patch
+applied 0008-prefill-xport8-pair-job.patch
+applied 0009-prefill-borrow-grp-const-fix.patch
+applied 0010-verify-miss-tolerance-lossy-off.patch
+applied 0011-decode7-guided-staged-refill-lrumib.patch
+applied 0012-server-vision-lru-release.patch
+applied 0013-startup-staged-fill.patch
+applied 0014-decode9-split-pull-pre-async.patch
+applied 0015-decode10-metal-bgate.patch
+applied 0016-decode11-aligned-reads.patch
+applied 0017-decode12-aligned-prefill-reads.patch
+applied 0018-decode14-kv-grow-resident-gate.patch
+applied 0019-decode15-elastic-pooled-keys.patch
+applied 0020-prefill18-lazy-loan-refill.patch
+applied 0021-fewertrips19-hoist-skipcold.patch
+applied 0022-prefill20-kjobs-dyn-x8pad.patch
+applied 0023-prefill21-plew.patch
+applied 0024-opt23-doorbell-slots-fp16x-devskip.patch
+vision patch applies to tools/vision
+applied shim/0001-allocator-top-reserve-bestfit.patch
+applied shim/0002-launch-ring-stderr.patch
+applied shim/0003-arm-early-pull-pack.patch
+applied shim/0004-vmm-cumem-emulation.patch
+applied shim/0005-memory-knobs.patch
+applied shim/0006-prefill21-async-usb-lazy-pool.patch
+shim base + patches/shim/0*.patch == shim/{tgcu.py,tgcu_api.py,tgcudart.cpp} MATCH
+sha256 $WORK/strata/src/core/verify.cpp 15a8d26814723334c697d3deab6001e588d46c5170c07ff0c1f8ed7bbcc1e1e3 MATCH
+sha256 $WORK/strata/src/core/expert_source.cpp 1693b8dbb622326cd6d5f8b8555178aa427866bc07a74126ba2b4f9a12ddc874 MATCH
+sha256 $WORK/strata/src/core/layer.cpp 0620c7248de174e5700e52228fbb550a2e4caddbe473b89d7d743966e8651dbb MATCH
+sha256 $WORK/strata/src/program/generate.cpp 1ad4009f8a5a71d97f83d235eef88178eff4ff79e88f70d415fa659a0b0322b0 MATCH
+sha256 $WORK/strata/src/prefill/prefill.cpp d92c931c0c8bac7c07770fc1a12d31cdae9ed4a505de003c4548e3c4e0fb91fb MATCH
+sha256 $WORK/strata/src/prefill/kernels.cu 2b0d1c46882c948dcca1369be36c7ce4125e9cc5117109d3ba4f3b59fa612c71 MATCH
+sha256 $WORK/strata/include/strata/prefill/kernels.hpp 45dc31b5c6cf74cd16ae833978e295ee6ef63699f2f64b260a5c4a9f02ee9e7f MATCH
+sha256 $WORK/strata/include/strata/prefill/xport8.hpp bce55ac92eb3fc84dad07365841295805daa3e326b5de41f788e0cbe0b8cc86d MATCH
+sha256 $WORK/strata/src/prefill/xport8_kernels.cuh 80056191cde41f64ca7589951ac45d91992e73e3d10334d4ba8f3d54551059bf MATCH
+sha256 $WORK/strata/include/strata/prefill/path_select.hpp 38027db7c4523117a2bf1fe4ab09cf0990906c6e956412c92eaf93e904ca5710 MATCH
+sha256 $WORK/strata/src/kernels/ngram.cpp bb9af756b75c3f3015d336cf6e1804839e51b88c398b9e9ef3da61acc039df04 MATCH
+sha256 $WORK/strata/serve/server.py f4b281209cfcabd4ac262f0bce43f9281c49ab34b781de110a109cb804e84c67 MATCH
+sha256 $WORK/strata/serve/prefix_replay.py 2fa9e08578304443d1ebfe54b0137b5592d2a5413770dd29413de9db993fc0df MATCH
+sha256 $WORK/strata/serve/test_prefix_replay.py c23c34abed8455cbabccfaa84b4a362afbcce672310a4d927928caa6099d8848 MATCH
+sha256 shim/tgcu.py 8283712f6ba381a22945737135d6bad26938f44704d132d6b4be867496708503 MATCH
+sha256 shim/tgcu_api.py c5b4429db092534798ae5d04a153c8f00a9cb674b21c1e85115ede5939085cf1 MATCH
+sha256 shim/tgcublas.cpp cda0a3009594fea67b90c4fe7bdf856368f25774e741f57c5a28c0000e4d9726 MATCH
+sha256 shim/run-d7.sh 3ee78f72659f8ed49673d5f75bcce82d1d6c1a598b663cf19c21adcb0172cef0 MATCH
+sha256 exl3/placement/d8w4/profile.bin 1f39452e0282daafff2d01656c17119fb0d58de9754cd1afb49b3650fdf0d5c6 MATCH
+sha256 shim/tgcudart.cpp cc9b3a4f709d500f5e4ab5877c4077aef976dbd5d473b853f1934cc0ce8d89be MATCH
+sha256 shim/tgusb.c 13737dd0661e58d98c9bbbd640765f19995ad64d99661a13e2b3f8f47aa1b341 MATCH
+sha256 exl3/exl3_o23.cu b3bdcd6ac269518212e54ba8daf9e7df4b649e7c4b57536ca5e4b0744a12770d MATCH
+sha256 exl3/strata_m4/exl3_o23_host.cu 2c86f5be5b0f0031c8a2813113892fb7601c17ce3247921fdcfb5caf9dce1585 MATCH
+sha256 exl3/metal/exl3_metal.metal dad54f20cd03f8f07d97de42d72dd4ad9ba5475f3c0d139009fdbb1dfa611e57 MATCH
+sha256 exl3/metal/exl3_metal.mm de1f2b7246464466db6070b540ed8aabf103104c3b3724feb39deb6972cdada5 MATCH
+25 files of config G match results/verification/config-g-sha256.txt
+$WORK/d8w4 whole layers [0, 1, 2, 6] = 2048 slots
+exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH
+
+done: patches

@@ -1,0 +1,31 @@
+file sizes: live 113438976  rebuilt 113438968 (after rewriting /tmp/recipe -> /Users/sero: 20 occurrences of the root)
+symbols: live 9396  rebuilt 9396  only in live 0  only in rebuilt 0  different size 1
+  size differs: _ggml_table_f32_ue4m3 106213784 106214344
+
+section                           live size rebuilt size  content
+__TEXT,__text                       4469140      4469140  DIFFERENT
+__TEXT,__stubs                         4968         4968  identical
+__TEXT,__init_offsets                   276          276  identical
+__TEXT,__const                       220852       220852  identical
+__TEXT,__gcc_except_tab               94372        94372  identical
+__TEXT,__cstring                     378569       378569  identical
+__TEXT,__unwind_info                  23096        23096  identical
+__TEXT,__eh_frame                      4712         4712  identical
+__DATA_CONST,__got                     3888         3888  identical
+__DATA_CONST,__const                  15608        15608  identical
+__DATA,__data                          8544         8544  identical
+__DATA,__thread_vars                   1104         1104  identical
+__DATA,__thread_data                     12           12  identical
+__DATA,__thread_bss                  123464       123464  identical
+__DATA,__bss                        1827080      1827080  identical
+__DATA,__common                      526344       526344  identical
+__NV_CUDA,__nv_fatbin             106208944    106209504  DIFFERENT
+__NV_CUDA,__fatbin                     1344         1344  DIFFERENT
+
+__text: 70 of 1117285 instruction words differ: {'adrp': 14, 'add/sub immediate': 56}
+
+embedded CUDA fatbins: live 56, rebuilt 56, byte-identical 52
+  fatbin #2: live 1062968 B (89f7a72a0db1)  rebuilt 1062968 B (d22993919736)
+  fatbin #7: live 818352 B (dbb8e46975c5)  rebuilt 818752 B (f37117be5d22)
+  fatbin #33: live 7863808 B (c994a3b6a864)  rebuilt 7863968 B (1382db03fcf9)
+  fatbin #43: live 165696 B (c6ffc714ccb3)  rebuilt 165696 B (148737edcf37)

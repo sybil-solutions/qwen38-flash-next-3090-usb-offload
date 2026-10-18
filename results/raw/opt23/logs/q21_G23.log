@@ -1,0 +1,51 @@
+$HOME/strata-prefill21/cfg/q_G23.json
+### deploy 08:14:17
+### lp 08:16:23
+code-cpp: R1 {'prompt_n': 3610, 'cache_n': 0, 'prompt_ms': 12375}  R2 read 49 reused 3610 rows 48 OK  R3 read 49 reused 3659 rows 48 OK
+code-py: R1 {'prompt_n': 3003, 'cache_n': 0, 'prompt_ms': 11946}  R2 read 49 reused 3003 rows 48 OK  R3 read 49 reused 3052 rows 48 OK
+agentic: R1 {'prompt_n': 4236, 'cache_n': 0, 'prompt_ms': 11147}  R2 read 30 reused 4236 rows 29 OK  R3 read 49 reused 4266 rows 48 OK
+long-9K: R1 {'prompt_n': 9542, 'cache_n': 0, 'prompt_ms': 17813}  R2 read 30 reused 9542 rows 29 OK  R3 read 30 reused 9572 rows 29 OK
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 10910}  R2 read 49 reused 1388 rows 48 OK  R3 read 45 reused 1437 rows 44 OK
+math: R1 {'prompt_n': 1624, 'cache_n': 0, 'prompt_ms': 10605}  R2 read 48 reused 1624 rows 47 OK  R3 read 48 reused 1672 rows 47 OK
+code-cu: R1 {'prompt_n': 3552, 'cache_n': 0, 'prompt_ms': 11401}  R2 read 49 reused 3552 rows 48 OK  R3 read 49 reused 3601 rows 48 OK
+docs: R1 {'prompt_n': 3068, 'cache_n': 0, 'prompt_ms': 11518}  R2 read 49 reused 3068 rows 48 OK  R3 read 49 reused 3117 rows 48 OK
+### lpcmp p-off G23 08:18:39
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96   97.92  0.002765   0.04162
+code-py         96       96   97.92  0.003808   0.05970
+agentic         77       77   94.81  0.006742   0.08567
+long-9K         58       58   98.28  0.009472   0.14526
+chat            92       92   97.83  0.016328   0.06996
+math            94       94   97.87  0.002931   0.03276
+code-cu         96       96   97.92  0.002189   0.09154
+docs            96       96   98.96  0.001787   0.03148
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 97.73%, mean KL 0.005474 nats, p99 KL 0.081680 nats, mean |dlogp(target)| 0.06535  (KL = top-64-support estimate)
+GATE: PASS
+lpcmp p-off rc=0
+### lpcmp F G23 08:18:39
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96  100.00  0.000000   0.00000
+code-py         96       96  100.00  0.000000   0.00000
+agentic         77       77  100.00  0.000000   0.00000
+long-9K         58       58  100.00  0.000000   0.00000
+chat            92       92  100.00  0.000000   0.00000
+math            94       94  100.00  0.000000   0.00000
+code-cu         96       96  100.00  0.000000   0.00000
+docs            96       96  100.00  0.000000   0.00000
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 100.00%, mean KL 0.000000 nats, p99 KL 0.000000 nats, mean |dlogp(target)| 0.00000  (KL = top-64-support estimate)
+GATE: PASS
+lpcmp F rc=0
+### lpcmp e19cur G23 08:18:39
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96  100.00  0.000000   0.00000
+code-py         96       96  100.00  0.000000   0.00000
+agentic         77       77  100.00  0.000000   0.00000
+long-9K         58       58  100.00  0.000000   0.00000
+chat            92       92  100.00  0.000000   0.00000
+math            94       94  100.00  0.000000   0.00000
+code-cu         96       96  100.00  0.000000   0.00000
+docs            96       96  100.00  0.000000   0.00000
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 100.00%, mean KL 0.000000 nats, p99 KL 0.000000 nats, mean |dlogp(target)| 0.00000  (KL = top-64-support estimate)
+GATE: PASS
+lpcmp e19cur rc=0
+Q21DONE

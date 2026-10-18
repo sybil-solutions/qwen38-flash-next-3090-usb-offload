@@ -1,0 +1,15 @@
+usercheck21: no foreign requests since mark   840315
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 19.31, "n": 300, "tok_s": 32.1, "wall_s": 28.6, "md5": "eeeb8c87"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 20.5, "n": 300, "tok_s": 33.1, "wall_s": 29.5, "md5": "8003bda8"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 14.05, "n": 300, "tok_s": 33.5, "wall_s": 23.0, "md5": "5a59c118"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 17.48, "n": 300, "tok_s": 30.5, "wall_s": 27.3, "md5": "4635a121"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 17.41, "n": 300, "tok_s": 32.3, "wall_s": 26.7, "md5": "b43be665"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 16.45, "n": 300, "tok_s": 33.6, "wall_s": 25.3, "md5": "9694fa97"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 19.58, "n": 300, "tok_s": 36.0, "wall_s": 27.9, "md5": "37f7cda4"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 17.83, "n": 300, "tok_s": 31.8, "wall_s": 27.2, "md5": "152a03dd"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 18.81, "n": 300, "tok_s": 34.5, "wall_s": 27.5, "md5": "c38a767e"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 21.38, "n": 300, "tok_s": 36.4, "wall_s": 29.6, "md5": "84af863d"}
+{"i": 0, "wall_s": 11.8, "prompt_n": 29, "prompt_ms": 1045.2, "predicted_n": 300, "predicted_ms": 10740.9, "tok_s": 27.9, "drafts": "213/256", "pageins_mib": 1, "pageouts_mib": 0, "head": "```python d
+{"i": 1, "wall_s": 10.4, "prompt_n": 35, "prompt_ms": 1732.5, "predicted_n": 258, "predicted_ms": 8630.0, "tok_s": 29.9, "drafts": "133/246", "pageins_mib": 51, "pageouts_mib": 0, "head": "At the core
+{"i": 2, "wall_s": 12.4, "prompt_n": 29, "prompt_ms": 1287.0, "predicted_n": 273, "predicted_ms": 11098.7, "tok_s": 24.6, "drafts": "137/254", "pageins_mib": 1, "pageouts_mib": 0, "head": "Elias had n
+GPU timeouts: 0
