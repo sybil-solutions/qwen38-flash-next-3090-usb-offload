@@ -1,0 +1,196 @@
+config md5 9f92e4e21cc4290eb3e7ec69df88bdfa  binary md5 4180585c847520eadb3cecd70a17bc34
+### start 13:36:58
+[strata] 2026-10-17 13:37:23 engine started: $HOME/strata-prefill22/run-p22.sh --serve --pack $HOME/exl3/pack_full512 --native $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --ple-gguf $HOME/models/qwen38fn/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf --expert-profile $HOME/exl3/placement/d8w4/profile.bin --expert-cache auto --prefill 2048 --spec 4 --spec-min-p 0.5 --mtp $HOME/models/qwen38fn/mtp/rt --kv k8v4 --max-context 204800 --mmap-experts --pcie-frac 0 --adapt-every 0 --resident-budget-gib 0.2 --vram-reserve-mib 310 --vision
+strata generate: profile $HOME/exl3/placement/d8w4/profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: expert cache auto: 17.79 GiB free, 310 MiB reserved (+218 MiB for the draft head) -> 9958 slots
+strata generate: expert cache 9958 slots, 17.27 GiB of VRAM; policy is
+strata generate: staged profile fill (STRATA_D8_FILL): 9958 slots staged + 0 plain in 54.1 s (1245 pieces of <= 8)
+strata generate: pre-filled 9958 of 9958 slots from the profile in 54.1 s (343 MB/s); slot 0 verified
+FileExpertSource: no device alias (cudaErrorInvalidValue); trying pageable memory
+FileExpertSource: locked resident cache complement ready: resident 0.20 GiB, pinned 0.00 GiB in 0 s; no device alias (cudaErrorInvalidValue); mlock
+strata exl3-metal: lane ready ($HOME/exl3/metal/libexl3metal.dylib; 6400 slots of 1867776 B registered)
+strata exl3-metal: LRU preloaded with 6400 of 6400 slots by profile rank in 5.4 s (11.95 GB, F_NOCACHE)
+strata serve: the prompt path borrows 884 CUDA0 cache slots (1.53 GiB)
+strata generate: elastic K/V: 16384 of 204800 cells in VRAM (0.23 of 2.43 GiB); the expert cache (9958 slots) gives the K/V room below slot 9074 as the context grows
+strata serve: 190 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 632 to the config's args (or lower --max-context)
+READY
+SWAP ready 13:39:09 wired_MiB 12595 swap: total = 1024.00M used = 133.12M free = 890.88M (encrypted) engine MALLOC_LARGE swapped: 497.4M
+### realistic decode set (29 prompts, 300 tok) 13:39:11
+usercheck21: no foreign requests since mark   827300
+{"name": "p26", "flag": 7, "prompt_n": 8915, "ttft_s": 19.42, "n": 300, "tok_s": 33.9, "wall_s": 28.2, "md5": "e9a1f60f"}
+{"name": "p22", "flag": 7, "prompt_n": 6429, "ttft_s": 16.63, "n": 300, "tok_s": 32.6, "wall_s": 25.8, "md5": "69e51894"}
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 19.42, "n": 300, "tok_s": 31.8, "wall_s": 28.8, "md5": "a5d2e551"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 20.4, "n": 300, "tok_s": 31.9, "wall_s": 29.8, "md5": "b42d6927"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 14.11, "n": 300, "tok_s": 34.7, "wall_s": 22.7, "md5": "52a147d9"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 17.44, "n": 300, "tok_s": 29.0, "wall_s": 27.7, "md5": "caf883aa"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 17.36, "n": 300, "tok_s": 33.0, "wall_s": 26.4, "md5": "55bfd586"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 16.43, "n": 300, "tok_s": 33.9, "wall_s": 25.2, "md5": "9f512da9"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 19.59, "n": 300, "tok_s": 37.0, "wall_s": 27.7, "md5": "c31f8e56"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 17.88, "n": 300, "tok_s": 33.0, "wall_s": 26.9, "md5": "ba3b9663"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 18.79, "n": 300, "tok_s": 36.5, "wall_s": 26.9, "md5": "8a8298c9"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 21.38, "n": 300, "tok_s": 36.8, "wall_s": 29.5, "md5": "5067a2f1"}
+{"name": "p27", "flag": 7, "prompt_n": 19770, "ttft_s": 40.08, "n": 300, "tok_s": 35.4, "wall_s": 48.5, "md5": "b052cf43"}
+{"name": "p25", "flag": 7, "prompt_n": 5691, "ttft_s": 16.24, "n": 300, "tok_s": 30.4, "wall_s": 26.1, "md5": "21436b22"}
+{"name": "p04", "flag": 7, "prompt_n": 6357, "ttft_s": 17.55, "n": 300, "tok_s": 36.9, "wall_s": 25.6, "md5": "e77380de"}
+{"name": "p29", "flag": 7, "prompt_n": 16399, "ttft_s": 37.76, "n": 149, "tok_s": 18.9, "wall_s": 45.6, "md5": "93c4d3b8"}
+{"name": "p09", "flag": 7, "prompt_n": 5936, "ttft_s": 18.09, "n": 300, "tok_s": 34.2, "wall_s": 26.8, "md5": "9267f357"}
+{"name": "p23", "flag": 7, "prompt_n": 4127, "ttft_s": 12.96, "n": 300, "tok_s": 33.4, "wall_s": 21.9, "md5": "a83c711e"}
+{"name": "p01", "flag": 7, "prompt_n": 6023, "ttft_s": 17.28, "n": 300, "tok_s": 35.1, "wall_s": 25.8, "md5": "326212e5"}
+{"name": "p03", "flag": 7, "prompt_n": 6679, "ttft_s": 17.55, "n": 300, "tok_s": 35.9, "wall_s": 25.9, "md5": "7b874e6c"}
+{"name": "p28", "flag": 7, "prompt_n": 15379, "ttft_s": 37.4, "n": 300, "tok_s": 27.8, "wall_s": 48.2, "md5": "861b5807"}
+{"name": "p21", "flag": 7, "prompt_n": 6240, "ttft_s": 17.36, "n": 300, "tok_s": 31.5, "wall_s": 26.8, "md5": "45a93d71"}
+{"name": "p16", "flag": 7, "prompt_n": 6425, "ttft_s": 16.69, "n": 300, "tok_s": 35.1, "wall_s": 25.2, "md5": "12887357"}
+{"name": "p20", "flag": 7, "prompt_n": 5856, "ttft_s": 16.19, "n": 300, "tok_s": 35.6, "wall_s": 24.6, "md5": "a14a323e"}
+{"name": "p12", "flag": 7, "prompt_n": 6264, "ttft_s": 17.29, "n": 300, "tok_s": 35.7, "wall_s": 25.7, "md5": "5c8c70fb"}
+{"name": "p05", "flag": 7, "prompt_n": 6287, "ttft_s": 17.64, "n": 300, "tok_s": 36.6, "wall_s": 25.8, "md5": "88a81a1b"}
+{"name": "p18", "flag": 7, "prompt_n": 6157, "ttft_s": 16.56, "n": 300, "tok_s": 29.2, "wall_s": 26.8, "md5": "4d46fdb3"}
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 15.9, "n": 300, "tok_s": 31.2, "wall_s": 25.4, "md5": "7a214a32"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 17.93, "n": 300, "tok_s": 31.4, "wall_s": 27.4, "md5": "8ba3fff9"}
+REALISTIC29 requests 29 mean tok/s 33.05 ttft mean 19.63 wall mean 28.54
+SWAP after_realistic 13:53:00 wired_MiB 12804 swap: total = 1024.00M used = 125.12M free = 898.88M (encrypted) engine MALLOC_LARGE swapped: 514.5M
+usercheck21: no foreign requests since mark   827538
+### decode probes x2 (12 requests) 13:53:04
+{"i": 0, "wall_s": 11.5, "prompt_n": 29, "prompt_ms": 1216.1, "predicted_n": 300, "predicted_ms": 10222.3, "tok_s": 29.3, "drafts": "213/258", "pageins_mib": 71, "pageouts_mib": 0, "head": "```python 
+{"i": 1, "wall_s": 10.2, "prompt_n": 35, "prompt_ms": 1698.4, "predicted_n": 254, "predicted_ms": 8453.5, "tok_s": 30.0, "drafts": "134/227", "pageins_mib": 49, "pageouts_mib": 0, "head": "At the core
+{"i": 2, "wall_s": 13.1, "prompt_n": 29, "prompt_ms": 1279.7, "predicted_n": 278, "predicted_ms": 11820.9, "tok_s": 23.5, "drafts": "125/236", "pageins_mib": 33, "pageouts_mib": 0, "head": "Elias had 
+decode tok/s 28.1 n 300 drafts 218/237 md5 f60e112b2b67
+decode tok/s 32.3 n 300 drafts 167/273 md5 4bb98b863d90
+decode tok/s 24.6 n 276 drafts 130/220 md5 126009171c0a
+decode tok/s 27.0 n 300 drafts 215/239 md5 f60e112b2b67
+decode tok/s 32.3 n 300 drafts 163/267 md5 cf15a69f93b6
+decode tok/s 25.3 n 299 drafts 151/252 md5 851b56ebec3a
+{"i": 0, "wall_s": 12.3, "prompt_n": 29, "prompt_ms": 851.3, "predicted_n": 300, "predicted_ms": 11378.9, "tok_s": 26.4, "drafts": "213/256", "pageins_mib": 21, "pageouts_mib": 0, "head": "```python d
+{"i": 1, "wall_s": 10.1, "prompt_n": 35, "prompt_ms": 1688.3, "predicted_n": 248, "predicted_ms": 8365.1, "tok_s": 29.6, "drafts": "127/235", "pageins_mib": 3, "pageouts_mib": 0, "head": "At the core 
+{"i": 2, "wall_s": 13.7, "prompt_n": 29, "prompt_ms": 1285.5, "predicted_n": 289, "predicted_ms": 12395.9, "tok_s": 23.3, "drafts": "135/279", "pageins_mib": 3, "pageouts_mib": 0, "head": "Elias had l
+decode tok/s 27.5 n 300 drafts 216/243 md5 8af670adc70a
+decode tok/s 32.1 n 300 drafts 161/270 md5 491098f82729
+decode tok/s 22.6 n 250 drafts 112/225 md5 e6122343d602
+decode tok/s 27.6 n 300 drafts 213/238 md5 a6e2bf7b9392
+decode tok/s 32.6 n 300 drafts 164/278 md5 5a27a9cf19c8
+decode tok/s 24.7 n 281 drafts 134/230 md5 3670fb17d6d5
+SWAP after_decode 13:56:38 wired_MiB 12710 swap: total = 1024.00M used = 125.12M free = 898.88M (encrypted) engine MALLOC_LARGE swapped: 600.8M
+usercheck21: no foreign requests since mark   827615
+### tool reuse / image 13:56:41
+turn 1: 16.5s read 3340 reused 0; tool_calls 1; content "I'll check the current weather in Lisbon for you."
+  call: get_weather {"city":"Lisbon"}
+turn 2: 2.7s read 40 reused 3379 (turn-1 prompt 3340); reply 'The current weather in Lisbon is **23°C with clear skies** — lovely conditions! ☀️'
+RESULT: PASS (prefix reused True, answer uses the tool result True)
+SWAP after_toolreuse 13:57:01 wired_MiB 12817 swap: total = 1024.00M used = 125.12M free = 898.88M (encrypted) engine MALLOC_LARGE swapped: 696.7M
+~/strata-mac-vision/test-1.jpeg: 15.1s usage {"prompt_tokens": 329, "completion_tokens": 36, "total_tokens": 365, "prompt_tokens_details": {"cached_tokens": 0}}
+  reply: 'This is the front page of *The New York Times* from July 21, 1969, with the headline "MEN WALK ON MOON."'
+RESULT: PASS
+SWAP after_image 13:57:18 wired_MiB 12287 swap: total = 1024.00M used = 125.12M free = 898.88M (encrypted) engine MALLOC_LARGE swapped: 672.3M
+usercheck21: no foreign requests since mark   827641
+### prefill rows 13:57:20
+{"tag": "d22_final", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 11034, "tok_s": 232.5, "wall_s": 11.11, "ts": "2026-10-17T20:57:32Z"}
+{"tag": "d22_final", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 11149, "tok_s": 230.1, "wall_s": 11.22, "ts": "2026-10-17T20:57:43Z"}
+{"tag": "d22_final", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 17008, "tok_s": 471.4, "wall_s": 17.08, "ts": "2026-10-17T20:58:00Z"}
+{"tag": "d22_final", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 15215, "tok_s": 527.0, "wall_s": 15.28, "ts": "2026-10-17T20:58:15Z"}
+{"tag": "d22_final", "target": 17000, "run": 1, "prompt_n": 18330, "cache_n": 0, "prompt_ms": 35422, "tok_s": 517.5, "wall_s": 35.49, "ts": "2026-10-17T20:58:51Z"}
+{"tag": "d22_final", "target": 17000, "run": 2, "prompt_n": 18330, "cache_n": 0, "prompt_ms": 33035, "tok_s": 554.9, "wall_s": 33.1, "ts": "2026-10-17T20:59:24Z"}
+{"tag": "d22_final", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 55090, "tok_s": 614.3, "wall_s": 56.88, "ts": "2026-10-17T21:00:21Z"}
+{"tag": "d22_final", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 52480, "tok_s": 644.9, "wall_s": 52.55, "ts": "2026-10-17T21:01:13Z"}
+SWAP after_prefill 14:01:13 wired_MiB 12690 swap: total = 1024.00M used = 125.12M free = 898.88M (encrypted) engine MALLOC_LARGE swapped: 494.3M
+usercheck21: no foreign requests since mark   827700
+### needle ~190K 14:01:17
+ 190k depth  50%: FOUND  (189,450 prompt tokens, 351 s)
+1 of 1 found
+SWAP after_190k 14:07:08 wired_MiB 12708 swap: total = 1024.00M used = 439.31M free = 584.69M (encrypted) engine MALLOC_LARGE swapped: 1.1G
+usercheck21: no foreign requests since mark   827709
+### small (agent-turn pattern) 14:07:12
+base 3073 tokens 24153 ms
+{"tag": "d22_final", "want_new": 30, "read": 52, "cache_n": 3078, "prompt_ms": 2261, "wall_s": 2.55}
+{"tag": "d22_final", "want_new": 60, "read": 93, "cache_n": 3123, "prompt_ms": 3537, "wall_s": 3.74}
+{"tag": "d22_final", "want_new": 100, "read": 151, "cache_n": 3219, "prompt_ms": 4506, "wall_s": 4.72}
+{"tag": "d22_final", "want_new": 150, "read": 203, "cache_n": 3373, "prompt_ms": 5153, "wall_s": 5.34}
+{"tag": "d22_final", "want_new": 200, "read": 219, "cache_n": 3579, "prompt_ms": 5526, "wall_s": 5.77}
+{"tag": "d22_final", "want_new": 250, "read": 254, "cache_n": 3802, "prompt_ms": 5708, "wall_s": 5.95}
+{"tag": "d22_final", "want_new": 300, "read": 361, "cache_n": 4062, "prompt_ms": 6646, "wall_s": 6.83}
+{"tag": "d22_final", "want_new": 400, "read": 398, "cache_n": 4426, "prompt_ms": 6680, "wall_s": 6.85}
+{"tag": "d22_final", "want_new": 600, "read": 678, "cache_n": 4827, "prompt_ms": 8989, "wall_s": 9.16}
+{"tag": "d22_final", "want_new": 1000, "read": 1019, "cache_n": 5508, "prompt_ms": 9052, "wall_s": 9.22}
+SWAP after_small 14:08:37 wired_MiB 13049 swap: total = 1024.00M used = 689.56M free = 334.44M (encrypted) engine MALLOC_LARGE swapped: 723.4M
+usercheck21: no foreign requests since mark   827763
+### needle x5 14:08:40
+  32k depth  10%: FOUND  (33,286 prompt tokens, 64 s)
+1 of 1 found
+  32k depth  50%: FOUND  (33,286 prompt tokens, 63 s)
+1 of 1 found
+  32k depth  90%: FOUND  (33,286 prompt tokens, 41 s)
+1 of 1 found
+  32k depth  30%: FOUND  (33,286 prompt tokens, 50 s)
+1 of 1 found
+  32k depth  70%: FOUND  (33,286 prompt tokens, 47 s)
+1 of 1 found
+GPU timeouts in the whole regression: 0
+SWAP after_needles 14:13:14 wired_MiB 12580 swap: total = 1024.00M used = 689.56M free = 334.44M (encrypted) engine MALLOC_LARGE swapped: 1.1G
+-- decode probe after the regression
+decode tok/s 29.8 n 300 drafts 217/243 md5 f60e112b2b67
+decode tok/s 34.4 n 300 drafts 170/269 md5 85c1e4be9822
+decode tok/s 25.0 n 276 drafts 121/253 md5 000ba8544a65
+decode tok/s 27.8 n 300 drafts 216/233 md5 f60e112b2b67
+decode tok/s 34.0 n 300 drafts 169/271 md5 d0400803f6ab
+decode tok/s 26.6 n 288 drafts 138/261 md5 6a192dbd3d9b
+SWAP end 14:14:27 wired_MiB 12721 swap: total = 1024.00M used = 715.31M free = 308.69M (encrypted) engine MALLOC_LARGE swapped: 619.1M
+-- elastic K/V / ERR events
+strata d18: req 21 loan from slot 9074: 576 pending slots dropped, 0 kept (8 of 584 done before)
+strata d18: req 22 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 22 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 23 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 23 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 24 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 24 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 25 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 25 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 26 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 26 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 27 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 27 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 28 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 28 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 29 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 29 pending refill finished (idle): 584 of 584 slots done (0 in decode pieces 0 ms spent, 584 idle 7201 ms), 0 pending dropped, 0 stale skipped
+strata d18: req 48 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 48 pending refill finished (idle): 584 of 584 slots done (0 in decode pieces 0 ms spent, 584 idle 5244 ms), 0 pending dropped, 0 stale skipped
+strata d18: req 50 lazy refill: 291 of 291 slots before the first token, 0 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 51 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 51 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 52 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 52 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 53 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 53 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 54 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata: K/V grown to 24576 cells (0.34 GiB); the expert cache gave 60 slots for it, 60 hotter experts moved to colder ones' slots (9852 of 9958 slots hold experts)
+strata d18: req 54 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 55 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 55 loan from slot 9074: 580 pending slots dropped, 0 kept (4 of 584 done before)
+strata d18: req 56 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata: K/V grown to 40960 cells (0.52 GiB); the expert cache gave 104 slots for it, 104 hotter experts moved to colder ones' slots (9748 of 9958 slots hold experts)
+strata d18: req 56 loan from slot 9074: 576 pending slots dropped, 0 kept (8 of 584 done before)
+strata d18: req 57 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 57 loan from slot 9074: 576 pending slots dropped, 0 kept (8 of 584 done before)
+strata d18: req 58 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata: K/V grown to 196608 cells (2.30 GiB); the expert cache gave 1031 slots for it, 632 hotter experts moved to colder ones' slots (8717 of 9958 slots hold experts)
+strata d18: req 58 loan from slot 9074: 252 pending slots dropped, 0 kept (332 of 584 done before)
+strata d18: req 59 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata: K/V trimmed to 8192 cells; 1241 slots back to the expert cache, refilled from the profile
+strata d18: req 59 loan from slot 9074: 264 pending slots dropped, 0 kept (320 of 584 done before)
+strata d18: req 60 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 60 loan from slot 9753: 205 pending slots dropped, 371 kept (8 of 584 done before)
+strata d18: req 60 loan from slot 9667: 86 pending slots dropped, 265 kept (28 of 379 done before)
+strata d18: req 60 loan from slot 9578: 89 pending slots dropped, 168 kept (36 of 293 done before)
+strata d18: req 60 loan from slot 9477: 101 pending slots dropped, 63 kept (40 of 204 done before)
+strata d18: req 60 pending refill finished (idle): 103 of 103 slots done (0 in decode pieces 0 ms spent, 103 idle 2528 ms), 0 pending dropped, 0 stale skipped
+strata: K/V grown to 40960 cells (0.52 GiB); the expert cache gave 210 slots for it, 210 hotter experts moved to colder ones' slots (9748 of 9958 slots hold experts)
+strata d18: req 71 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 71 loan from slot 9074: 348 pending slots dropped, 0 kept (236 of 584 done before)
+strata d18: req 72 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 72 loan from slot 9074: 308 pending slots dropped, 0 kept (276 of 584 done before)
+strata d18: req 73 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 73 loan from slot 9074: 316 pending slots dropped, 0 kept (268 of 584 done before)
+strata d18: req 74 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata d18: req 74 loan from slot 9074: 324 pending slots dropped, 0 kept (260 of 584 done before)
+strata d18: req 75 lazy refill: 300 of 884 slots before the first token, 584 pending (P 4, phi 0.00, grace 0 ms, idle 1, warm cap -1)
+strata: K/V trimmed to 8192 cells; 210 slots back to the expert cache, refilled from the profile
+strata d18: req 75 pending refill finished (idle): 584 of 584 slots done (0 in decode pieces 0 ms spent, 584 idle 7321 ms), 0 pending dropped, 5 stale skipped
+FINAL22DONE

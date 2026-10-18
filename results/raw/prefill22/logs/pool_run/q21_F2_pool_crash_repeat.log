@@ -1,0 +1,44 @@
+$HOME/strata-prefill21/cfg/q_F2.json
+### deploy 14:33:24
+### lp 14:35:34
+code-cpp: R1 {'prompt_n': 3610, 'cache_n': 0, 'prompt_ms': 13304}  R2 read 49 reused 3610 rows 48 OK  R3 read 49 reused 3659 rows 48 OK
+code-py: R1 {'prompt_n': 3003, 'cache_n': 0, 'prompt_ms': 12746}  R2 read 49 reused 3003 rows 48 OK  R3 read 49 reused 3052 rows 48 OK
+agentic: R1 {'prompt_n': 4236, 'cache_n': 0, 'prompt_ms': 13586}  R2 read 30 reused 4236 rows 29 OK  R3 read 49 reused 4266 rows 48 OK
+long-9K: R1 {'prompt_n': 9542, 'cache_n': 0, 'prompt_ms': 20422}  R2 read 30 reused 9542 rows 29 OK  R3 read 30 reused 9572 rows 29 OK
+Traceback (most recent call last):
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 227, in <module>
+    if c == "lp": lp(sys.argv[2], "--ref" in sys.argv)
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 129, in lp
+    r4, _ = post([{"role": "user", "content": p}], 48)
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 41, in post
+    r = json.load(urllib.request.urlopen(urllib.request.Request(URL, body, HDR), timeout=7200))
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 214, in urlopen
+    return opener.open(url, data, timeout)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 523, in open
+    response = meth(req, response)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 632, in http_response
+    response = self.parent.error(
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 561, in error
+    return self._call_chain(*args)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 494, in _call_chain
+    result = func(*args)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 641, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable
+### lpcmp p-off F2 14:37:15
+Traceback (most recent call last):
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 228, in <module>
+    elif c == "lpcmp": lpcmp(sys.argv[2], sys.argv[3])
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 178, in lpcmp
+    B = json.load(open(os.path.join(HOME, "shim", f"xp8_lp_{b}.json")))
+FileNotFoundError: [Errno 2] No such file or directory: '$HOME/shim/xp8_lp_F2.json'
+lpcmp rc=1
+### lpcmp e19cur F2 (informational)
+Traceback (most recent call last):
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 228, in <module>
+    elif c == "lpcmp": lpcmp(sys.argv[2], sys.argv[3])
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 178, in lpcmp
+    B = json.load(open(os.path.join(HOME, "shim", f"xp8_lp_{b}.json")))
+FileNotFoundError: [Errno 2] No such file or directory: '$HOME/shim/xp8_lp_F2.json'
+lpcmp rc=1
+Q21DONE

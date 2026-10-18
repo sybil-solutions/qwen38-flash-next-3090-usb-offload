@@ -1,0 +1,21 @@
+usercheck21: no foreign requests since mark   796734
+RESULT stage1 real: all 34.74 (n=29) vs base 32.30 (n=29): +7.76% paired over 29 (se 2.67, all better in 18/29)
+RESULT stage1 probe: all 27.90 (n=12) vs base 26.77 (n=12): +3.89% paired over 3 (se 3.08, all better in 3/3)
+STAGE1: ALL is decode-neutral on the realistic set
+KEEP ['all']
+DEC22DONE flagstr=pool=3,npipe=1,subp=1,fuse=1,npmin=32768
+flagstr='pool=3,npipe=1,subp=1,fuse=1,npmin=32768'
+{"arm": "f1", "size": 18000, "rep": 1, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 36474, "tok_s": 492.4, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:47:14Z"}
+{"arm": "f0", "size": 18000, "rep": 1, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 35946, "tok_s": 499.6, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:47:53Z"}
+{"arm": "f1", "size": 33000, "rep": 1, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 63759, "tok_s": 516.9, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:49:01Z"}
+{"arm": "f0", "size": 33000, "rep": 1, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 62920, "tok_s": 523.8, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:50:07Z"}
+tok/s by size (arm: values -> mean)
+    8000 f0: [442.4, 501.0] mean 471.7
+    8000 f1: [463.1, 414.8] mean 439.0
+   18000 f0: [482.0, 499.6] mean 490.8
+   18000 f1: [500.8, 492.4] mean 496.6
+   33000 f0: [567.2, 523.8] mean 545.5
+   33000 f1: [593.9, 516.9] mean 555.4
+PLE22DONE
+GPU timeouts: 0
+CHAINADONE

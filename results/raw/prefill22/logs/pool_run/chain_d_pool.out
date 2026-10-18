@@ -1,0 +1,98 @@
+C: realistic 32.86 tok/s (n=58), probes 28.00 (n=24)
+E: realistic 30.85 tok/s (n=58), probes 26.79 (n=24)
+decode C vs E paired over 29 prompts: +6.50% (se 0.71, C better in 28/29)
+probes C vs E +4.49%
+prefill rows (tok/s of the engine's prompt_ms, per arm; each arm's values):
+    2500: C: 223 250 222 247 (mean 236, 2565 tok)  E: 210 231 208 234 (mean 220, 2565 tok)
+    8000: C: 469 528 466 528 (mean 498, 8018 tok)  E: 454 511 454 511 (mean 483, 8018 tok)
+   18000: C: 545 587 546 587 (mean 566, 19547 tok)  E: 516 552 518 552 (mean 534, 19546 tok)
+   33000: C: 606 643 606 642 (mean 624, 33842 tok)  E: 584 621 585 621 (mean 603, 33842 tok)
+agent turns (new tokens: read / prompt_ms / wall_s):
+     30: C: 52/2388/2.65 52/2420/2.68  E: 52/2419/2.68 52/2445/2.72
+     60: C: 93/3426/3.64 93/3393/3.6  E: 93/3719/3.93 93/3728/3.94
+    100: C: 151/4429/4.63 151/4511/4.71  E: 151/4858/5.07 151/4761/4.97
+    150: C: 203/5132/5.33 203/5108/5.31  E: 203/5479/5.69 203/5499/5.7
+    200: C: 219/5521/5.77 219/5445/5.69  E: 219/5842/6.09 219/5841/6.1
+    250: C: 254/5612/5.82 254/5580/5.8  E: 254/5989/6.21 254/5999/6.22
+    300: C: 363/6695/6.89 363/6824/7.02  E: 363/7185/7.39 363/7127/7.32
+    400: C: 398/6758/6.93 398/6694/6.85  E: 398/7088/7.27 398/7021/7.2
+    600: C: 678/9014/9.18 678/9022/9.2  E: 678/9308/9.49 678/9122/9.31
+   1000: C: 1019/8987/9.14 1019/9177/9.36  E: 1019/9351/9.53 1019/9190/9.36
+
+prefill 2500: C 236 vs E 220
+prefill 8000: C 498 vs E 483
+prefill 18000: C 566 vs E 534
+prefill 33000: C 624 vs E 603
+GATE GO
+### regression 13:36:58
+### quality 14:14:30
+usercheck21: no foreign requests since mark   827831
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 214, in urlopen
+    return opener.open(url, data, timeout)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 523, in open
+    response = meth(req, response)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 632, in http_response
+    response = self.parent.error(
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 561, in error
+    return self._call_chain(*args)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 494, in _call_chain
+    result = func(*args)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/urllib/request.py", line 641, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable
+### lpcmp p-off F 14:18:23
+Traceback (most recent call last):
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 228, in <module>
+    elif c == "lpcmp": lpcmp(sys.argv[2], sys.argv[3])
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 178, in lpcmp
+    B = json.load(open(os.path.join(HOME, "shim", f"xp8_lp_{b}.json")))
+FileNotFoundError: [Errno 2] No such file or directory: '$HOME/shim/xp8_lp_F.json'
+lpcmp rc=1
+### lpcmp e19cur F (informational)
+Traceback (most recent call last):
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 228, in <module>
+    elif c == "lpcmp": lpcmp(sys.argv[2], sys.argv[3])
+  File "$HOME/strata-xport8/tools/xp8_quality.py", line 178, in lpcmp
+    B = json.load(open(os.path.join(HOME, "shim", f"xp8_lp_{b}.json")))
+FileNotFoundError: [Errno 2] No such file or directory: '$HOME/shim/xp8_lp_F.json'
+lpcmp rc=1
+Q21DONE
+### soak 14:18:24
+usercheck21: no foreign requests since mark   827989
+usercheck21: no foreign requests since mark   828039
+prompt 1: 1 of 1 found
+usercheck21: no foreign requests since mark   828056
+prompt 2: 1 of 1 found
+usercheck21: no foreign requests since mark   828063
+prompt 3: 1 of 1 found
+usercheck21: no foreign requests since mark   828070
+prompt 4: 1 of 1 found
+usercheck21: no foreign requests since mark   828077
+prompt 5: 1 of 1 found
+engine alive:        1; GPU timeouts 0
+SOAK21DONE
+### cpu 14:25:09
+usercheck21: no foreign requests since mark   828084
+server down
+TGCU_LAZY_D2H_MB=128
+TGCU_LAZY_POOL=3
+TGCU_USB_FENCE=11
+TGCU_USB_FUSE=1
+TGCU_USB_NPIPE=1
+TGCU_USB_SUBP=1
+== seed 1, 8 CPU hogs, 14:25:34
+    |   File "$HOME/tg-strata/tinygrad/runtime/support/system.py", line 198, in flock_acquire
+    |     except OSError: raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | RuntimeError: Failed to acquire lock file nv_usb:0-1.lock. `sudo lsof /var/folders/nn/d6hgjw5x6hqccyzdcvt__h1r0000gn/T/nv_usb:0-1.lock` may help identify the process holding the lock.
+    +------------------------------------
+== seed 2, 8 CPU hogs, 14:25:53
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.400 ms, ce-wait 0.096 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.204 ms, submit 0.343 ms, ce-wait 0.105 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.514 ms, ce-wait 0.085 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.220 ms, submit 0.437 ms, ce-wait 0.078 ms
+stress21: 11849 iterations, 29676 MB moved in 150.0 s, mismatches 0
+== restore 14:28:42
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 14:30:50
+CPU21DONE
+CHAINDDONE

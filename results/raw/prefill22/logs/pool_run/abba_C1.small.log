@@ -1,0 +1,11 @@
+base 3073 tokens 13353 ms
+{"tag": "abba_C1", "want_new": 30, "read": 52, "cache_n": 3078, "prompt_ms": 2388, "wall_s": 2.65}
+{"tag": "abba_C1", "want_new": 60, "read": 93, "cache_n": 3123, "prompt_ms": 3426, "wall_s": 3.64}
+{"tag": "abba_C1", "want_new": 100, "read": 151, "cache_n": 3219, "prompt_ms": 4429, "wall_s": 4.63}
+{"tag": "abba_C1", "want_new": 150, "read": 203, "cache_n": 3373, "prompt_ms": 5132, "wall_s": 5.33}
+{"tag": "abba_C1", "want_new": 200, "read": 219, "cache_n": 3579, "prompt_ms": 5521, "wall_s": 5.77}
+{"tag": "abba_C1", "want_new": 250, "read": 254, "cache_n": 3802, "prompt_ms": 5612, "wall_s": 5.82}
+{"tag": "abba_C1", "want_new": 300, "read": 363, "cache_n": 4060, "prompt_ms": 6695, "wall_s": 6.89}
+{"tag": "abba_C1", "want_new": 400, "read": 398, "cache_n": 4426, "prompt_ms": 6758, "wall_s": 6.93}
+{"tag": "abba_C1", "want_new": 600, "read": 678, "cache_n": 4827, "prompt_ms": 9014, "wall_s": 9.18}
+{"tag": "abba_C1", "want_new": 1000, "read": 1019, "cache_n": 5508, "prompt_ms": 8987, "wall_s": 9.14}

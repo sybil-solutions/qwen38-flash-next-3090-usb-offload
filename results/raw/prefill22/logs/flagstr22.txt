@@ -1,0 +1,1 @@
+pool=3,npipe=1,subp=1,fuse=1,npmin=32768

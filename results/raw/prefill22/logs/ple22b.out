@@ -1,0 +1,21 @@
+slices: 12 hay used 1577910 of 1700000
+{"arm": "f0", "size": 8000, "rep": 0, "count_tokens": 8000, "prompt_n": 7960, "cache_n": 0, "prompt_ms": 20071, "tok_s": 396.6, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:51:52Z"}
+{"arm": "f1", "size": 8000, "rep": 0, "count_tokens": 8000, "prompt_n": 7960, "cache_n": 0, "prompt_ms": 18200, "tok_s": 437.4, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:52:14Z"}
+{"arm": "f0", "size": 18000, "rep": 0, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 38381, "tok_s": 467.9, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:52:56Z"}
+{"arm": "f1", "size": 18000, "rep": 0, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 37879, "tok_s": 474.1, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:53:37Z"}
+{"arm": "f0", "size": 33000, "rep": 0, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 59507, "tok_s": 553.9, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:54:40Z"}
+{"arm": "f1", "size": 33000, "rep": 0, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 61212, "tok_s": 538.5, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:55:45Z"}
+{"arm": "f1", "size": 8000, "rep": 1, "count_tokens": 8000, "prompt_n": 7960, "cache_n": 0, "prompt_ms": 19462, "tok_s": 409.0, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:56:08Z"}
+{"arm": "f0", "size": 8000, "rep": 1, "count_tokens": 8000, "prompt_n": 7960, "cache_n": 0, "prompt_ms": 17323, "tok_s": 459.5, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:56:29Z"}
+{"arm": "f1", "size": 18000, "rep": 1, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 38523, "tok_s": 466.2, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:57:11Z"}
+{"arm": "f0", "size": 18000, "rep": 1, "count_tokens": 18000, "prompt_n": 17960, "cache_n": 0, "prompt_ms": 37577, "tok_s": 478.0, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T18:57:52Z"}
+{"arm": "f1", "size": 33000, "rep": 1, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 61006, "tok_s": 540.3, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768 plew=1", "ts": "2026-10-17T18:58:57Z"}
+{"arm": "f0", "size": 33000, "rep": 1, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 61281, "tok_s": 537.8, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T19:00:02Z"}
+tok/s by size (arm: values -> mean)
+    8000 f0: [396.6, 459.5] mean 428.1
+    8000 f1: [437.4, 409.0] mean 423.2
+   18000 f0: [467.9, 478.0] mean 472.9
+   18000 f1: [474.1, 466.2] mean 470.1
+   33000 f0: [553.9, 537.8] mean 545.8
+   33000 f1: [538.5, 540.3] mean 539.4
+PLE22DONE

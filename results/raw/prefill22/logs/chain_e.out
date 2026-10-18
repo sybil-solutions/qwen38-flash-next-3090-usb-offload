@@ -1,0 +1,134 @@
+config F (no pool) md5 b8d72f718d1101508ccd5fbc15255b76
+### abba 15:30:43
+### E1 15:30:43
+after_small 15:55:34 wired_MiB 13054 swap: total = 1024.00M used = 134.44M free = 889.56M (encrypted)
+E1 done:       29 seq requests, probe mean 26.74 (12), GPU timeouts 0
+### C1 15:55:35
+after_small 16:19:18 wired_MiB 13056 swap: total = 1024.00M used = 300.81M free = 723.19M (encrypted)
+C1 done:       29 seq requests, probe mean 28.12 (12), GPU timeouts 0
+### C2 16:19:19
+after_small 16:43:03 wired_MiB 13156 swap: total = 1024.00M used = 145.75M free = 878.25M (encrypted)
+C2 done:       29 seq requests, probe mean 27.62 (12), GPU timeouts 0
+### E2 16:43:05
+after_small 17:07:51 wired_MiB 13053 swap: total = 1024.00M used = 227.38M free = 796.62M (encrypted)
+E2 done:       29 seq requests, probe mean 27.01 (12), GPU timeouts 0
+C: realistic 32.80 tok/s (n=58), probes 27.88 (n=24)
+E: realistic 30.69 tok/s (n=58), probes 26.88 (n=24)
+decode C vs E paired over 29 prompts: +6.79% (se 0.78, C better in 28/29)
+probes C vs E +3.72%
+prefill rows (tok/s of the engine's prompt_ms, per arm; each arm's values):
+    2500: C: 219 246 221 249 (mean 234, 2565 tok)  E: 208 233 208 232 (mean 220, 2565 tok)
+    8000: C: 469 526 469 527 (mean 498, 8017 tok)  E: 456 511 455 513 (mean 484, 8018 tok)
+   18000: C: 543 582 542 579 (mean 562, 19547 tok)  E: 517 551 517 550 (mean 534, 19547 tok)
+   33000: C: 602 641 600 640 (mean 621, 33842 tok)  E: 580 615 580 617 (mean 598, 33842 tok)
+agent turns (new tokens: read / prompt_ms / wall_s):
+     30: C: 52/2405/2.66 52/2402/2.65  E: 52/2474/2.74 52/2498/2.78
+     60: C: 93/3438/3.65 93/3393/3.59  E: 93/3703/3.92 93/3692/3.91
+    100: C: 151/4491/4.69 151/4440/4.64  E: 151/4801/5.0 151/4748/4.95
+    150: C: 203/5152/5.35 203/5048/5.25  E: 203/5510/5.71 203/5566/5.78
+    200: C: 219/5510/5.75 219/5429/5.67  E: 219/5888/6.13 219/5847/6.09
+    250: C: 254/5618/5.84 254/5583/5.82  E: 254/5993/6.25 254/6012/6.27
+    300: C: 363/6666/6.85 361/6632/6.81  E: 363/7090/7.28 361/7111/7.31
+    400: C: 398/6770/6.93 398/6814/6.98  E: 398/7097/7.27 398/7139/7.31
+    600: C: 678/9312/9.49 678/9004/9.17  E: 678/9080/9.25 678/9184/9.36
+   1000: C: 1019/9167/9.33 1019/9269/9.44  E: 1019/9180/9.35 1019/9406/9.58
+CHAINBDONE
+C: realistic 32.80 tok/s (n=58), probes 27.88 (n=24)
+E: realistic 30.69 tok/s (n=58), probes 26.88 (n=24)
+decode C vs E paired over 29 prompts: +6.79% (se 0.78, C better in 28/29)
+probes C vs E +3.72%
+prefill rows (tok/s of the engine's prompt_ms, per arm; each arm's values):
+    2500: C: 219 246 221 249 (mean 234, 2565 tok)  E: 208 233 208 232 (mean 220, 2565 tok)
+    8000: C: 469 526 469 527 (mean 498, 8017 tok)  E: 456 511 455 513 (mean 484, 8018 tok)
+   18000: C: 543 582 542 579 (mean 562, 19547 tok)  E: 517 551 517 550 (mean 534, 19547 tok)
+   33000: C: 602 641 600 640 (mean 621, 33842 tok)  E: 580 615 580 617 (mean 598, 33842 tok)
+agent turns (new tokens: read / prompt_ms / wall_s):
+     30: C: 52/2405/2.66 52/2402/2.65  E: 52/2474/2.74 52/2498/2.78
+     60: C: 93/3438/3.65 93/3393/3.59  E: 93/3703/3.92 93/3692/3.91
+    100: C: 151/4491/4.69 151/4440/4.64  E: 151/4801/5.0 151/4748/4.95
+    150: C: 203/5152/5.35 203/5048/5.25  E: 203/5510/5.71 203/5566/5.78
+    200: C: 219/5510/5.75 219/5429/5.67  E: 219/5888/6.13 219/5847/6.09
+    250: C: 254/5618/5.84 254/5583/5.82  E: 254/5993/6.25 254/6012/6.27
+    300: C: 363/6666/6.85 361/6632/6.81  E: 363/7090/7.28 361/7111/7.31
+    400: C: 398/6770/6.93 398/6814/6.98  E: 398/7097/7.27 398/7139/7.31
+    600: C: 678/9312/9.49 678/9004/9.17  E: 678/9080/9.25 678/9184/9.36
+   1000: C: 1019/9167/9.33 1019/9269/9.44  E: 1019/9180/9.35 1019/9406/9.58
+
+prefill 2500: C 234 vs E 220
+prefill 8000: C 498 vs E 484
+prefill 18000: C 562 vs E 534
+prefill 33000: C 621 vs E 598
+GATE GO
+### regression 17:07:53
+### quality 17:45:30
+usercheck21: no foreign requests since mark   838572
+math: R1 {'prompt_n': 1624, 'cache_n': 0, 'prompt_ms': 10674}  R2 read 48 reused 1624 rows 47 OK  R3 read 48 reused 1672 rows 47 OK
+code-cu: R1 {'prompt_n': 3552, 'cache_n': 0, 'prompt_ms': 12184}  R2 read 49 reused 3552 rows 48 OK  R3 read 49 reused 3601 rows 48 OK
+docs: R1 {'prompt_n': 3068, 'cache_n': 0, 'prompt_ms': 11954}  R2 read 49 reused 3068 rows 48 OK  R3 read 49 reused 3117 rows 48 OK
+### lpcmp p-off F 17:50:08
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96   97.92  0.002765   0.04162
+code-py         96       96   97.92  0.003808   0.05970
+agentic         77       77   94.81  0.006742   0.08567
+long-9K         58       58   98.28  0.009472   0.14526
+chat            92       92   97.83  0.016328   0.06996
+math            94       94   97.87  0.002931   0.03276
+code-cu         96       96   97.92  0.002189   0.09154
+docs            96       96   98.96  0.001787   0.03148
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 97.73%, mean KL 0.005474 nats, p99 KL 0.081680 nats, mean |dlogp(target)| 0.06535  (KL = top-64-support estimate)
+GATE: PASS
+lpcmp rc=0
+### lpcmp e19cur F (informational)
+prompt    base pos  matched   top1%    meanKL   |dlogp|
+code-cpp        96       96  100.00  0.000000   0.00000
+code-py         96       96  100.00  0.000000   0.00000
+agentic         77       77  100.00  0.000000   0.00000
+long-9K         58       58  100.00  0.000000   0.00000
+chat            92       92  100.00  0.000000   0.00000
+math            94       94  100.00  0.000000   0.00000
+code-cu         96       96  100.00  0.000000   0.00000
+docs            96       96  100.00  0.000000   0.00000
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 100.00%, mean KL 0.000000 nats, p99 KL 0.000000 nats, mean |dlogp(target)| 0.00000  (KL = top-64-support estimate)
+GATE: PASS
+lpcmp rc=0
+Q21DONE
+### soak 17:50:09
+usercheck21: no foreign requests since mark   838791
+usercheck21: no foreign requests since mark   838842
+prompt 1: 1 of 1 found
+usercheck21: no foreign requests since mark   838859
+prompt 2: 1 of 1 found
+usercheck21: no foreign requests since mark   838866
+prompt 3: 1 of 1 found
+usercheck21: no foreign requests since mark   838873
+prompt 4: 1 of 1 found
+usercheck21: no foreign requests since mark   838880
+prompt 5: 1 of 1 found
+engine alive:        1; GPU timeouts 0
+SOAK21DONE
+### cpu 17:57:17
+usercheck21: no foreign requests since mark   838887
+server down
+TGCU_LAZY_D2H_MB=128
+TGCU_USB_FENCE=11
+TGCU_USB_FUSE=1
+TGCU_USB_NPIPE=1
+TGCU_USB_SUBP=1
+== seed 1, 8 CPU hogs, 17:57:58
+(lock still held, retry 1)
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.469 ms, ce-wait 0.097 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.240 ms, submit 0.322 ms, ce-wait 0.093 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.440 ms, ce-wait 0.098 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.225 ms, submit 0.299 ms, ce-wait 0.096 ms
+stress21: 10482 iterations, 26317 MB moved in 150.0 s, mismatches 0
+== seed 2, 8 CPU hogs, 18:01:23
+(lock still held, retry 1)
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.458 ms, ce-wait 0.100 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.236 ms, submit 0.316 ms, ce-wait 0.098 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.460 ms, ce-wait 0.100 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.239 ms, submit 0.312 ms, ce-wait 0.097 ms
+stress21: 10544 iterations, 26394 MB moved in 150.0 s, mismatches 0
+== restore 18:04:50
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 18:06:58
+CPU21DONE
+CHAINEDONE

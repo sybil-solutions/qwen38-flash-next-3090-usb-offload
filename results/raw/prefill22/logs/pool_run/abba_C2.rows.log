@@ -1,0 +1,8 @@
+{"tag": "abba_C2", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 11563, "tok_s": 221.8, "wall_s": 11.63, "ts": "2026-10-17T20:07:05Z"}
+{"tag": "abba_C2", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 10374, "tok_s": 247.3, "wall_s": 10.44, "ts": "2026-10-17T20:07:15Z"}
+{"tag": "abba_C2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 17220, "tok_s": 465.6, "wall_s": 17.29, "ts": "2026-10-17T20:07:33Z"}
+{"tag": "abba_C2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 15173, "tok_s": 528.4, "wall_s": 15.24, "ts": "2026-10-17T20:07:48Z"}
+{"tag": "abba_C2", "target": 18000, "run": 1, "prompt_n": 19547, "cache_n": 0, "prompt_ms": 35817, "tok_s": 545.7, "wall_s": 35.89, "ts": "2026-10-17T20:08:24Z"}
+{"tag": "abba_C2", "target": 18000, "run": 2, "prompt_n": 19547, "cache_n": 0, "prompt_ms": 33296, "tok_s": 587.1, "wall_s": 33.37, "ts": "2026-10-17T20:08:57Z"}
+{"tag": "abba_C2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 55804, "tok_s": 606.4, "wall_s": 55.88, "ts": "2026-10-17T20:09:53Z"}
+{"tag": "abba_C2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 52700, "tok_s": 642.2, "wall_s": 52.77, "ts": "2026-10-17T20:10:46Z"}

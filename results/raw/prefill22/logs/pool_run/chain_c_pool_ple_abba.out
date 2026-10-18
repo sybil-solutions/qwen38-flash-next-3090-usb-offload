@@ -1,0 +1,50 @@
+usercheck21: no foreign requests since mark   819712
+{"arm": "f0", "size": 33000, "rep": 1, "count_tokens": 33000, "prompt_n": 32960, "cache_n": 0, "prompt_ms": 61281, "tok_s": 537.8, "flags": "pool=3 npipe=1 subp=1 fuse=1 npmin=32768", "ts": "2026-10-17T19:00:02Z"}
+tok/s by size (arm: values -> mean)
+    8000 f0: [396.6, 459.5] mean 428.1
+    8000 f1: [437.4, 409.0] mean 423.2
+   18000 f0: [467.9, 478.0] mean 472.9
+   18000 f1: [474.1, 466.2] mean 470.1
+   33000 f0: [553.9, 537.8] mean 545.8
+   33000 f1: [538.5, 540.3] mean 539.4
+PLE22DONE
+PLE pooled 8000: f0 449.9 (4) f1 431.1 (4) -4.2%
+PLE pooled 18000: f0 481.9 (4) f1 483.4 (4) +0.3%
+PLE pooled 33000: f0 545.7 (4) f1 547.4 (4) +0.3%
+PLEW OUT: mean ratio -1.18%, worst -4.18%
+$HOME/strata-prefill21/cfg/candF.json
+candF md5 c4341e7e92c8167e7b902d2ad73a88ae plew=0
+### E1 12:00:04
+after_small 12:24:47 wired_MiB 13025 swap: total = 1024.00M used = 185.06M free = 838.94M (encrypted)
+E1 done:       29 seq requests, probe mean 26.63 (12), GPU timeouts 0
+### C1 12:24:49
+after_small 12:48:25 wired_MiB 13037 swap: total = 1024.00M used = 284.50M free = 739.50M (encrypted)
+C1 done:       29 seq requests, probe mean 27.98 (12), GPU timeouts 0
+### C2 12:48:26
+after_small 13:12:01 wired_MiB 13165 swap: total = 1024.00M used = 155.44M free = 868.56M (encrypted)
+C2 done:       29 seq requests, probe mean 28.01 (12), GPU timeouts 0
+### E2 13:12:03
+after_small 13:36:49 wired_MiB 13023 swap: total = 1024.00M used = 127.88M free = 896.12M (encrypted)
+E2 done:       29 seq requests, probe mean 26.95 (12), GPU timeouts 0
+C: realistic 32.86 tok/s (n=58), probes 28.00 (n=24)
+E: realistic 30.85 tok/s (n=58), probes 26.79 (n=24)
+decode C vs E paired over 29 prompts: +6.50% (se 0.71, C better in 28/29)
+probes C vs E +4.49%
+prefill rows (tok/s of the engine's prompt_ms, per arm; each arm's values):
+    2500: C: 223 250 222 247 (mean 236, 2565 tok)  E: 210 231 208 234 (mean 220, 2565 tok)
+    8000: C: 469 528 466 528 (mean 498, 8018 tok)  E: 454 511 454 511 (mean 483, 8018 tok)
+   18000: C: 545 587 546 587 (mean 566, 19547 tok)  E: 516 552 518 552 (mean 534, 19546 tok)
+   33000: C: 606 643 606 642 (mean 624, 33842 tok)  E: 584 621 585 621 (mean 603, 33842 tok)
+agent turns (new tokens: read / prompt_ms / wall_s):
+     30: C: 52/2388/2.65 52/2420/2.68  E: 52/2419/2.68 52/2445/2.72
+     60: C: 93/3426/3.64 93/3393/3.6  E: 93/3719/3.93 93/3728/3.94
+    100: C: 151/4429/4.63 151/4511/4.71  E: 151/4858/5.07 151/4761/4.97
+    150: C: 203/5132/5.33 203/5108/5.31  E: 203/5479/5.69 203/5499/5.7
+    200: C: 219/5521/5.77 219/5445/5.69  E: 219/5842/6.09 219/5841/6.1
+    250: C: 254/5612/5.82 254/5580/5.8  E: 254/5989/6.21 254/5999/6.22
+    300: C: 363/6695/6.89 363/6824/7.02  E: 363/7185/7.39 363/7127/7.32
+    400: C: 398/6758/6.93 398/6694/6.85  E: 398/7088/7.27 398/7021/7.2
+    600: C: 678/9014/9.18 678/9022/9.2  E: 678/9308/9.49 678/9122/9.31
+   1000: C: 1019/8987/9.14 1019/9177/9.36  E: 1019/9351/9.53 1019/9190/9.36
+CHAINBDONE
+CHAINCDONE

@@ -1,0 +1,26 @@
+usercheck21: no foreign requests since mark   828306
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11428}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO all PASS
+arm all (pool=3,npipe=1,subp=1,fuse=1,npmin=32768): short reads +0
+usercheck21: no foreign requests since mark   829435
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11350}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO base PASS
+arm base (): short reads +0
+usercheck21: no foreign requests since mark   830564
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11302}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO noP PASS
+arm noP (npipe=1,subp=1,fuse=1,npmin=32768): short reads +0
+usercheck21: no foreign requests since mark   831694
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11377}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO noN PASS
+arm noN (pool=3,subp=1,fuse=1): short reads +0
+usercheck21: no foreign requests since mark   832823
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11342}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO noS PASS
+arm noS (pool=3,npipe=1,fuse=1,npmin=32768): short reads +0
+usercheck21: no foreign requests since mark   833952
+chat: R1 {'prompt_n': 1388, 'cache_n': 0, 'prompt_ms': 11345}  R2 read 49 reused 1388 rows 0 NOT A WINDOW READ  R3 read 45 reused 1437 rows 0 NOT A WINDOW READ
+REPRO noF PASS
+arm noF (pool=3,npipe=1,subp=1,npmin=32768): short reads +0
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 15:04:51
+CHAINRDONE

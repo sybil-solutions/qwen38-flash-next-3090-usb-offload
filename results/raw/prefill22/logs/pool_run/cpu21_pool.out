@@ -1,0 +1,23 @@
+usercheck21: no foreign requests since mark   828084
+server down
+TGCU_LAZY_D2H_MB=128
+TGCU_LAZY_POOL=3
+TGCU_USB_FENCE=11
+TGCU_USB_FUSE=1
+TGCU_USB_NPIPE=1
+TGCU_USB_SUBP=1
+== seed 1, 8 CPU hogs, 14:25:34
+    |   File "$HOME/tg-strata/tinygrad/runtime/support/system.py", line 198, in flock_acquire
+    |     except OSError: raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | RuntimeError: Failed to acquire lock file nv_usb:0-1.lock. `sudo lsof /var/folders/nn/d6hgjw5x6hqccyzdcvt__h1r0000gn/T/nv_usb:0-1.lock` may help identify the process holding the lock.
+    +------------------------------------
+== seed 2, 8 CPU hogs, 14:25:53
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.400 ms, ce-wait 0.096 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.204 ms, submit 0.343 ms, ce-wait 0.105 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.514 ms, ce-wait 0.085 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.220 ms, submit 0.437 ms, ce-wait 0.078 ms
+stress21: 11849 iterations, 29676 MB moved in 150.0 s, mismatches 0
+== restore 14:28:42
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 14:30:50
+CPU21DONE

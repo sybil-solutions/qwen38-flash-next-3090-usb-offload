@@ -1,0 +1,20 @@
+usercheck21: no foreign requests since mark   835144
+REPRO noSubp CRASH <HTTPError 503: 'Service Unavailable'>
+arm noSubp (STRATA_LOGPOS=$HOME/shim/xp8_logpos_rq.tsv STRATA_LOGPOS_TOPK=64 STRATA_DEC_ROUTE_DUMP=$HOME/strata-prefill21/logs/route_rq.bin TGCU_USB_SUBP=-): short reads +1
+usercheck21: no foreign requests since mark   835302
+REPRO noFuse CRASH <HTTPError 503: 'Service Unavailable'>
+arm noFuse (STRATA_LOGPOS=$HOME/shim/xp8_logpos_rq.tsv STRATA_LOGPOS_TOPK=64 STRATA_DEC_ROUTE_DUMP=$HOME/strata-prefill21/logs/route_rq.bin TGCU_USB_FUSE=-): short reads +1
+usercheck21: no foreign requests since mark   835460
+REPRO noNpipe CRASH <HTTPError 503: 'Service Unavailable'>
+arm noNpipe (STRATA_LOGPOS=$HOME/shim/xp8_logpos_rq.tsv STRATA_LOGPOS_TOPK=64 STRATA_DEC_ROUTE_DUMP=$HOME/strata-prefill21/logs/route_rq.bin TGCU_USB_NPIPE=-): short reads +1
+usercheck21: no foreign requests since mark   835618
+REPRO noPool PASS
+arm noPool (STRATA_LOGPOS=$HOME/shim/xp8_logpos_rq.tsv STRATA_LOGPOS_TOPK=64 STRATA_DEC_ROUTE_DUMP=$HOME/strata-prefill21/logs/route_rq.bin TGCU_LAZY_POOL=-): short reads +0
+usercheck21: no foreign requests since mark   835785
+REPRO lpOnly CRASH <HTTPError 503: 'Service Unavailable'>
+arm lpOnly (STRATA_LOGPOS=$HOME/shim/xp8_logpos_rq.tsv STRATA_LOGPOS_TOPK=64): short reads +1
+usercheck21: no foreign requests since mark   835944
+REPRO rdOnly PASS
+arm rdOnly (STRATA_DEC_ROUTE_DUMP=$HOME/strata-prefill21/logs/route_rq.bin): short reads +0
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 15:29:44
+CHAINR2DONE

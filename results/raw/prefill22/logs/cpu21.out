@@ -1,0 +1,24 @@
+usercheck21: no foreign requests since mark   838887
+server down
+TGCU_LAZY_D2H_MB=128
+TGCU_USB_FENCE=11
+TGCU_USB_FUSE=1
+TGCU_USB_NPIPE=1
+TGCU_USB_SUBP=1
+== seed 1, 8 CPU hogs, 17:57:58
+(lock still held, retry 1)
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.469 ms, ce-wait 0.097 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.240 ms, submit 0.322 ms, ce-wait 0.093 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.440 ms, ce-wait 0.098 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.225 ms, submit 0.299 ms, ce-wait 0.096 ms
+stress21: 10482 iterations, 26317 MB moved in 150.0 s, mismatches 0
+== seed 2, 8 CPU hogs, 18:01:23
+(lock still held, retry 1)
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.458 ms, ce-wait 0.100 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.236 ms, submit 0.316 ms, ce-wait 0.098 ms
+[tgcu prof] h2d: n=200 control 0.000 ms, bulk 0.000 ms, submit 0.460 ms, ce-wait 0.100 ms
+[tgcu prof] d2h: n=100 control 0.001 ms, bulk 0.239 ms, submit 0.312 ms, ce-wait 0.097 ms
+stress21: 10544 iterations, 26394 MB moved in 150.0 s, mismatches 0
+== restore 18:04:50
+restore21: OK config md5 078235c5bfec8bac85dc0a39d562485d 18:06:58
+CPU21DONE
