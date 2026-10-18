@@ -1,0 +1,286 @@
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -285,6 +285,63 @@
+     return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
+ }
+ 
++// ---- Opt23 (STRATA_O23: bit 0 = fp16 x, bit 1 = device skip; needs STRATA_EXL3_SLIM=1 and STRATA_HS_PRE=1).  The EXL3 slim doorbell publishes into per-ring payload slots (the device may run ahead through rings with no cold expert),
++// x rounded to fp16 (the Metal lane rounds x to fp16 first, so this is bit-exact and halves the pulled bytes), and the device skips the wait for the host's rows (wait_flag_ge_or) when no routed expert of the
++// ring is outside VRAM; the host reads that decision from the payload (aux[ring]) and sends no flag.  Kernel: libstrata_o23.dylib (STRATA_O23_LIB, ~/strata-opt23/lib/exl3_o23.cu).
++struct O23 {
++    bool ok = false, xh = false, skip = false, yh = false;
++    uint16_t *h_yh = nullptr, *m_yh = nullptr;   // fp16 y rows (host -> device), the device adds and re-zeroes them
++    int (*add_h)(float*, uint16_t*, int, void*) = nullptr;
++    int max_t = 0, rings = 0; int64_t N = 0, K = 0;
++    float *h_xf = nullptr, *m_xf = nullptr; uint16_t *h_xh = nullptr, *m_xh = nullptr;
++    int32_t *h_ids = nullptr, *m_ids = nullptr; float *h_w = nullptr, *m_w = nullptr; int32_t *h_aux = nullptr, *m_aux = nullptr;
++    uint32_t* d_skip = nullptr;
++    int (*doorbell)(const float*, int, const int32_t*, const float*, int, const int32_t*, int, void*, int, int32_t*, float*, int32_t*, uint32_t*, uint32_t, uint32_t*, void*) = nullptr;
++    long long n_rings = 0, n_skipped = 0, n_disagree = 0;
++    void* m_x_slot(int64_t slot, int tb) const { const size_t o = (size_t) slot * (size_t) max_t * (size_t) N + (size_t) tb * (size_t) N; return xh ? (void*) (m_xh + o) : (void*) (m_xf + o); }
++    int segs(int64_t slot, int tb, int n, void** ps, size_t* ns) const {   // the host buffers of one ring's pull: x (fp16 or fp32), ids, w[, aux]
++        const size_t xo = (size_t) slot * (size_t) max_t * (size_t) N + (size_t) tb * (size_t) N, io = (size_t) slot * (size_t) max_t * (size_t) K + (size_t) tb * (size_t) K;
++        int c = 0;
++        if (xh) { ps[c] = h_xh + xo; ns[c] = (size_t) n * (size_t) N * 2; } else { ps[c] = h_xf + xo; ns[c] = (size_t) n * (size_t) N * 4; }
++        ++c;
++        ps[c] = h_ids + io; ns[c] = (size_t) n * (size_t) K * 4; ++c;
++        ps[c] = h_w + io; ns[c] = (size_t) n * (size_t) K * 4; ++c;
++        if (skip) { ps[c] = h_aux + slot; ns[c] = 4; ++c; }
++        return c;
++    }
++};
++std::unordered_map<const void*, O23>& o23_map() { static std::unordered_map<const void*, O23> m; return m; }
++O23* o23_of(const void* key) { auto& m = o23_map(); auto it = m.find(key); return it != m.end() && it->second.ok ? &it->second : nullptr; }
++bool o23_init(const void* key, int max_t, int64_t N, int64_t K, int64_t layers, std::string& err) {
++    const char* e = std::getenv("STRATA_O23");
++    const int mode = e ? std::atoi(e) : 0;
++    if (mode == 0) return true;
++    const char* hp = std::getenv("STRATA_HS_PRE");
++    if (!(hp && std::atoi(hp) != 0) || max_t < 2 || max_t > 8 || (N & 1) != 0) { std::fprintf(stderr, "strata o23: needs STRATA_HS_PRE=1 and a 2..8 token window: off\n"); return true; }
++    O23 o;
++    const char* lp = std::getenv("STRATA_O23_LIB");
++    const char* home = std::getenv("HOME");
++    const std::string path = lp ? lp : std::string(home ? home : "") + "/strata-opt23/lib/libstrata_o23.dylib";
++    void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
++    if (!h) { err = "o23: dlopen " + path + ": " + dlerror(); return false; }
++    o.doorbell = (decltype(o.doorbell)) dlsym(h, "exl3o_doorbell");
++    o.add_h = (decltype(o.add_h)) dlsym(h, "exl3o_add_h");
++    if (!o.doorbell || (o.yh && !o.add_h)) { err = "o23: " + path + " lacks exl3o_doorbell / exl3o_add_h"; return false; }
++    o.xh = (mode & 1) != 0; o.skip = (mode & 2) != 0; o.yh = (mode & 4) != 0; o.max_t = max_t; o.rings = (int) layers; o.N = N; o.K = K;
++    const size_t R = (size_t) layers, T = (size_t) max_t;
++    bool ok = (o.xh ? mapped(R * T * (size_t) N * 2, (void**) &o.h_xh, (void**) &o.m_xh) : mapped(R * T * (size_t) N * 4, (void**) &o.h_xf, (void**) &o.m_xf)) &&
++              mapped(R * T * (size_t) K * 4, (void**) &o.h_ids, (void**) &o.m_ids) && mapped(R * T * (size_t) K * 4, (void**) &o.h_w, (void**) &o.m_w) &&
++              mapped(R * 4 + 64, (void**) &o.h_aux, (void**) &o.m_aux) &&
++              (!o.yh || (mapped(T * (size_t) N * 2, (void**) &o.h_yh, (void**) &o.m_yh) && (strata::tgcu::push(o.h_yh, T * (size_t) N * 2), true))) &&
++              cudaMalloc((void**) &o.d_skip, 64) == cudaSuccess && cudaMemset(o.d_skip, 0, 64) == cudaSuccess;
++    if (!ok) { err = "o23: payload slot allocation failed"; return false; }
++    o.ok = true;
++    std::fprintf(stderr, "strata o23: per-ring payload slots (%zu rings x %d rows), x as %s, device skip %s, y as %s, lib %s\n", R, max_t, o.xh ? "fp16" : "fp32", o.skip ? "on" : "off", o.yh ? "fp16" : "fp32", path.c_str());
++    o23_map()[key] = o;
++    return true;
++}
++
++
+ strata::kernels::QsaShapes shapes_of(const ModelGeometry& g) {
+     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
+     s.n_head = g.n_head;
+@@ -587,6 +644,7 @@
+         const char* v_sl = std::getenv("STRATA_EXL3_SLIM");
+         slim_ = v_sl != nullptr && std::atoi(v_sl) != 0;   // opt-in: measured slower until AsyncCopy.h2d submit is fixed
+     }
++    if (slim_ && !o23_init(this, (int) max_t, (int64_t) N, (int64_t) K, g.n_layers, err)) return false;
+     // the GPU plan: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) | ptr2(cap u64) | start2(cap+1)
+     {
+         const int64_t cap = (int64_t) (T * K);
+@@ -1494,6 +1552,16 @@
+ #endif
+             // #578: the helper GPUs reduce with the routing weights - publish them; set_always_publish: the rows
+             // whatever the device's residency table says (pipelined windows)
++            if (O23* const o23 = (slim && G == 1) ? o23_of(this) : nullptr; o23 != nullptr) {   // Opt23: this ring's payload slot; the device also decides whether any routed expert is cold
++                const int64_t slot = mx ? (int64_t) db_idx_[(size_t) l] : (l - lb_);
++                const size_t io = (size_t) slot * (size_t) max_t_ * (size_t) K + (size_t) tb * (size_t) K;
++                if (o23->doorbell(xm, (int) ((int64_t) n * N), ids_ + tb * K, w_ + tb * K, (int) ((int64_t) n * K), hits_.d_res + l * g.n_expert, (int) g.n_expert,
++                                  o23->m_x_slot(slot, tb), o23->xh ? 1 : 0, o23->m_ids + io, o23->m_w + io, o23->m_aux + slot, o23->skip ? o23->d_skip + grp : nullptr,
++                                  (uint32_t) (slot + 1) + fo, m_seq_, cs) != 0) {
++                    err = "verify: the Opt23 doorbell failed at layer " + std::to_string(l);
++                    return false;
++                }
++            } else
+             if (remote_opt_ || always_publish_ || slim)
+                 doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
+                                  m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
+@@ -1573,6 +1641,11 @@
+     }();
+     const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
+                               !cvec().covers(g.n_layers - 1);
++    O23* const o23_p = (slim && G == 1) ? o23_of(this) : nullptr;
++    auto wait_host = [&](uint32_t ring_v, int grp_v) {   // the host's rows: Opt23 lets the device pass this wait when the ring had no cold expert (its doorbell wrote the ring value into skip[grp])
++        if (o23_p != nullptr && o23_p->skip) wait_flag_ge_or(m_flag_, ring_v + fo, o23_p->d_skip + grp_v, cs);
++        else wait_flag_ge(m_flag_, ring_v + fo, cs);
++    };
+     auto post = [&](int64_t l, int grp) -> bool {
+         const int tb = tb_[grp], te = te_[grp], n = te - tb;
+         const uint32_t ring = mx ? (uint32_t) (db_idx_[(size_t) l] * G + grp + 1) : (uint32_t) ((l - lb_) * G + grp + 1);
+@@ -1612,7 +1685,7 @@
+             stamp(l, 20, grp);
+         } else if (slim) {   // EXL3 slim doorbell: no plan / flag A / flag B; the host's reduced CPU rows come in one block
+             if (!(d19_hoist && lay.exl3)) {
+-                wait_flag_ge(m_flag_, ring + fo, cs);
++                wait_host(ring, grp);
+                 stamp(l, 23, grp);
+             }
+             cudaMemsetAsync(parts_out, 0, (size_t) n * K * N * sizeof(float), cs);   // the combine then adds the shared expert only
+@@ -1684,14 +1757,22 @@
+                 if (err.empty()) err = "verify: EXL3 decode MoE (post) failed at layer " + std::to_string(l);
+                 return false;
+             }
+-            wait_flag_ge(m_flag_, ring + fo, cs);
++            wait_host(ring, grp);
+             stamp(l, 23, grp);
++            if (o23_p != nullptr && o23_p->yh) {   // Opt23: the host's rows come as fp16; one kernel adds them and zeroes the mirror
++                if (o23_p->add_h(bo_ + tb * N, o23_p->m_yh + tb * N, (int) ((int64_t) n * N), cs) != 0) { err = "verify: the Opt23 y add failed at layer " + std::to_string(l); return false; }
++            } else {
+             add_inplace(bo_ + tb * N, m_yred_ + tb * N, (int64_t) n * N, cs);
+             cudaMemsetAsync(m_yred_ + tb * N, 0, (size_t) n * N * sizeof(float), cs);
++            }
+         } else {
+         if (slim && !ar_l(l)) {   // the CPU experts' routing-weighted sum (host reduced), then the mirror is zero again
++            if (o23_p != nullptr && o23_p->yh) {
++                if (o23_p->add_h(bo_ + tb * N, o23_p->m_yh + tb * N, (int) ((int64_t) n * N), cs) != 0) { err = "verify: the Opt23 y add failed at layer " + std::to_string(l); return false; }
++            } else {
+             add_inplace(bo_ + tb * N, m_yred_ + tb * N, (int64_t) n * N, cs);
+             cudaMemsetAsync(m_yred_ + tb * N, 0, (size_t) n * N * sizeof(float), cs);
++            }
+         }
+         if (lay.exl3) {   // M4: bo += the resident experts' weighted outputs (exl3_moe_coop B, bo as its shared term)
+             Exl3Gpu* xg = exl3_gpu(err);
+@@ -2210,17 +2291,21 @@
+     static const bool hs_pre_env = std::getenv("STRATA_HS_PRE") != nullptr && std::atoi(std::getenv("STRATA_HS_PRE")) != 0;
+     const bool hs_pre = hs_pre_env && slim_run && !test_stall;
+     bool hs_armed = false;
+-    auto hs_ring_segs = [&](int64_t kk, void** ps, size_t* ns) {
++    O23* const o23h = (slim_run && G == 1) ? o23_of(this) : nullptr;
++    if (o23h != nullptr && !hs_pre) { err = "verify: STRATA_O23 needs the pre-armed handshake (STRATA_HS_PRE=1)"; return false; }
++    auto hs_ring_segs = [&](int64_t kk, void** ps, size_t* ns) -> int {
+         const int gg = (int) (kk % G);
+         const int tb_ = gtb[gg], n_ = gte[gg] - gtb[gg];
+         const int64_t K2 = ss.k, N2 = g.n_embd;
++        if (o23h != nullptr) return o23h->segs(kk, tb_, n_, ps, ns);
+         ps[0] = h_x_ + (size_t) tb_ * N2; ps[1] = h_ids_ + (size_t) tb_ * K2; ps[2] = h_w_ + (size_t) tb_ * K2;
+         ns[0] = (size_t) n_ * N2 * sizeof(float); ns[1] = (size_t) n_ * K2 * 4; ns[2] = (size_t) n_ * K2 * 4;
++        return 3;
+     };
+     auto hs_arm_ring = [&](int64_t kk) -> bool {
+-        void* ps[3]; size_t ns[3];
+-        hs_ring_segs(kk, ps, ns);
+-        return strata::tgcu::hs_arm(ps, ns, 3, (const void*) h_seq_, (unsigned) (kk + 1)) == 0;
++        void* ps[4]; size_t ns[4];
++        const int c = hs_ring_segs(kk, ps, ns);
++        return strata::tgcu::hs_arm(ps, ns, c, (const void*) h_seq_, (unsigned) (kk + 1)) == 0;
+     };
+     static const bool hs_defer = std::getenv("STRATA_HS_DEFER") != nullptr && std::atoi(std::getenv("STRATA_HS_DEFER")) != 0;
+     if (hs_pre) hs_armed = hs_arm_ring(0);
+@@ -2284,12 +2369,18 @@
+             auto hs_now = [] { return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count(); };
+             const double hs0 = hs_now();
+             if (!hs_got) {
+-                strata::tgcu::pull(h_ids_ + (size_t) tb * K_, (size_t) n * K_ * 4);
+-                strata::tgcu::pull(h_w_ + (size_t) tb * K_, (size_t) n * K_ * 4);
++                if (o23h != nullptr) {
++                    void* fp[4]; size_t fn[4];
++                    const int fc = hs_ring_segs(k, fp, fn);
++                    for (int q = 0; q < fc; ++q) strata::tgcu::pull(fp[q], fn[q]);
++                } else {
++                    strata::tgcu::pull(h_ids_ + (size_t) tb * K_, (size_t) n * K_ * 4);
++                    strata::tgcu::pull(h_w_ + (size_t) tb * K_, (size_t) n * K_ * 4);
++                }
+             }
+             const double hs1 = hs_now();
+-            const int32_t* ids = h_ids_ + (size_t) tb * K_;
+-            const float* wsrc = h_w_ + (size_t) tb * K_;   // the weights the host side (Metal lane / CPU reduce) uses
++            const int32_t* ids = o23h != nullptr ? o23h->h_ids + (size_t) k * (size_t) o23h->max_t * (size_t) K_ + (size_t) tb * (size_t) K_ : h_ids_ + (size_t) tb * K_;
++            const float* wsrc = o23h != nullptr ? o23h->h_w + (size_t) k * (size_t) o23h->max_t * (size_t) K_ + (size_t) tb * (size_t) K_ : h_w_ + (size_t) tb * K_;   // the weights the host side (Metal lane / CPU reduce) uses
+             {   // STRATA_DEC_ROUTE_DUMP=<path> (Decode7 research): one record per ring: [layer, n rows, K] int32 + n*K router ids (before any miss tolerance); strata_route_mark writes [-1, tag, 0]
+                 if (strata_route_dump_file() != nullptr) {
+                     const int32_t hdr[3] = {(int32_t) l, (int32_t) n, (int32_t) K_};
+@@ -2325,6 +2416,20 @@
+                         break;
+                     }
+                 }
++            bool dev_skip = false;   // Opt23: the device found no cold expert in this ring and does not wait for the host
++            float* xp = h_x_ + (size_t) tb * N_;
++            if (o23h != nullptr) {
++                const size_t xo = (size_t) k * (size_t) o23h->max_t * (size_t) N_ + (size_t) tb * (size_t) N_;
++                ++o23h->n_rings;
++                dev_skip = o23h->skip && *(volatile int32_t*) (o23h->h_aux + k) != 0;
++                if (dev_skip) { ++o23h->n_skipped; if (r0 >= 0) ++o23h->n_disagree; r0 = r1 = -1; }
++                if (!o23h->xh) xp = o23h->h_xf + xo;
++                else if (r0 >= 0) {   // the lanes round x to fp16 first: the widened fp16 rows are the same inputs
++                    const _Float16* hx = (const _Float16*) (o23h->h_xh + xo);
++                    float* fx = h_x_ + (size_t) tb * N_;
++                    for (int64_t q = 0; q < (int64_t) n * N_; ++q) fx[q] = (float) hx[q];
++                }
++            }
+             const double hs1b = hs_now();
+             double hs2 = hs1b, hs3 = hs1b, hs4 = hs1b, hs5x = hs1b;
+             bool hs_merged = false, hs_next_q = false;
+@@ -2342,23 +2447,24 @@
+                         if (!dup) cold[nc++] = e;
+                     }
+                 // rows outside r0..r1 have no cold experts by construction of r0/r1 only for the first/last; scan all rows
+-                if (!(hs_got && strata_exl3_metal_begin(l, cold, nc, h_x_ + (size_t) tb * N_, ids, wsrc, h_yred_ + (size_t) tb * N_, n, K_)))
++                if (!(hs_got && strata_exl3_metal_begin(l, cold, nc, xp, ids, wsrc, h_yred_ + (size_t) tb * N_, n, K_)))
+                     strata_mac_pull_begin(l, cold, nc);
+             }
+             if (r0 >= 0) {
+-                if (!hs_got) strata::tgcu::pull(h_x_ + (size_t) (tb + r0) * N_, (size_t) (r1 - r0 + 1) * N_ * sizeof(float));
++                if (!hs_got && o23h == nullptr) strata::tgcu::pull(h_x_ + (size_t) (tb + r0) * N_, (size_t) (r1 - r0 + 1) * N_ * sizeof(float));
+                 hs2 = hs_now();
+                 // Decode9 STRATA_D9_PRE_ASYNC=1: the gated rows + flag job (and the next pull) is queued by a helper thread while this thread runs the Metal lane
+                 // (reads, job B, waits): the ~0.58 ms of Python / USB submit overlaps the lane instead of preceding it.  Joined right after the pool call.
+                 static const bool d9_pre_async = std::getenv("STRATA_D9_PRE_ASYNC") != nullptr && std::atoi(std::getenv("STRATA_D9_PRE_ASYNC")) != 0;
+                 std::thread d9_pre_th;
+-                void* ps[2] = {h_yred_ + (size_t) (tb + r0) * N_, (void*) h_flag_};
+-                const size_t ns[2] = {(size_t) (r1 - r0 + 1) * N_ * sizeof(float), 4};
+-                void* nps[3]; size_t nns[3];
++                const bool y16 = o23h != nullptr && o23h->yh;   // Opt23: the rows go back as fp16
++                void* ps[2] = {y16 ? (void*) (o23h->h_yh + (size_t) (tb + r0) * N_) : (void*) (h_yred_ + (size_t) (tb + r0) * N_), (void*) h_flag_};
++                const size_t ns[2] = {(size_t) (r1 - r0 + 1) * N_ * (y16 ? sizeof(uint16_t) : sizeof(float)), 4};
++                void* nps[4]; size_t nns[4]; int ncnt = 3;
+                 if (hs_pre && !(k == 0 && do_ple && !mxon)) {   // the rows + the flag: one gated copy-engine job, queued now
+                     if (hs_defer && k + 1 < steps) {   // + the next ring's pull, queued now and held until the arm after the push
+-                        hs_ring_segs(k + 1, nps, nns);
+-                        auto d9_call = [&] { hs_merged = hs_next_q = strata::tgcu::hs_push_pre_next(ps, ns, 2, nps, nns, 3, (const void*) h_seq_, (unsigned) (k + 2)) == 0; };
++                        ncnt = hs_ring_segs(k + 1, nps, nns);
++                        auto d9_call = [&] { hs_merged = hs_next_q = strata::tgcu::hs_push_pre_next(ps, ns, 2, nps, nns, ncnt, (const void*) h_seq_, (unsigned) (k + 2)) == 0; };
+                         if (d9_pre_async && pool != nullptr) d9_pre_th = std::thread(d9_call); else d9_call();
+                     } else
+                     hs_merged = strata::tgcu::hs_push_pre(ps, ns, 2) == 0;
+@@ -2369,7 +2475,7 @@
+                 } else {
+                 strata_exl3_metal_arm(wsrc, h_yred_ + (size_t) tb * N_);
+                 if (pool != nullptr)
+-                    pool(user, h_x_ + (size_t) tb * N_, ids, n, ss.k, h_ymiss_ + (size_t) tb * K_ * N_, l);
++                    pool(user, xp, ids, n, ss.k, h_ymiss_ + (size_t) tb * K_ * N_, l);
+                 }
+                 if (d9_pre_th.joinable()) d9_pre_th.join();
+                 progress_tick();
+@@ -2390,13 +2496,18 @@
+                     if (first) std::memset(acc, 0, (size_t) N_ * sizeof(float));
+                 }
+                 hs4 = hs_now();
++                if (y16) {   // fp32 rows -> fp16 (clamped like the prefill lane's y_f2h; NaN passes)
++                    const float* ys = h_yred_ + (size_t) (tb + r0) * N_;
++                    _Float16* yd = (_Float16*) (o23h->h_yh + (size_t) (tb + r0) * N_);
++                    for (int64_t q = 0; q < (int64_t) (r1 - r0 + 1) * N_; ++q) { float v = ys[q]; v = v > 65504.0f ? 65504.0f : (v < -65504.0f ? -65504.0f : v); yd[q] = (_Float16) v; }
++                }
+                 if (hs_merged) {
+                     *flag = want + fo;
+                     std::atomic_thread_fence(std::memory_order_seq_cst);
+                     strata::tgcu::hs_push_go();
+                     if (hs_next_q) { strata::tgcu::hs_release(); hs_armed = true; }
+                 } else
+-                strata::tgcu::push(h_yred_ + (size_t) (tb + r0) * N_, (size_t) (r1 - r0 + 1) * N_ * sizeof(float));
++                strata::tgcu::push(ps[0], ns[0]);
+                 hs5x = hs_now();
+             }
+             if (k == 0 && do_ple && !mxon) {
+@@ -2408,7 +2519,7 @@
+                 ms_host += ms_since(tp);
+             }
+             const double hs5 = hs_now();
+-            if (!hs_merged && !(test_stall && k + 1 == steps)) { *flag = want + fo; strata::tgcu::push(h_flag_, 4); }
++            if (!hs_merged && !dev_skip && !(test_stall && k + 1 == steps)) { *flag = want + fo; strata::tgcu::push(h_flag_, 4); }
+             if (hs_pre && k + 1 < steps && !hs_next_q) hs_armed = hs_arm_ring(k + 1);
+             if (hs_trace) {
+                 const double hs6 = hs_now();
+@@ -2425,6 +2536,8 @@
+                                  hs_cold ? hs[5] / hs_cold : 0.0, hs_cold ? hs[9] / hs_cold : 0.0,
+                                  hs_n > hs_cold ? hs[10] / (double) (hs_n - hs_cold) : 0.0, hs[6] / hs_n, hs[7] / hs_n);
+             }
++            if (hs_trace && o23h != nullptr && hs_n % 480 == 0)
++                std::fprintf(stderr, "strata o23: %lld rings, %lld device-skipped (%.1f%%), %lld host/device disagreements\n", o23h->n_rings, o23h->n_skipped, 100.0 * (double) o23h->n_skipped / (double) std::max<long long>(1, o23h->n_rings), o23h->n_disagree);
+             ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
+             ms_pool += ms_since(b);
+             continue;

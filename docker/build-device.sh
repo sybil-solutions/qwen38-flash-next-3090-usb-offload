@@ -1,6 +1,6 @@
 #!/bin/bash
 # Inside the build container: the device code that has no engine build of its own.
-#   - the three EXL3 engine modules (exl3_strata, exl3_strata_recon, exl3_strata_pf) -> sm_86 fatbins, nvcc 13.4.92, the flags of exl3/build.sh
+#   - the four EXL3 engine modules (exl3_strata, exl3_strata_recon, exl3_strata_pf, exl3_o23) -> sm_86 fatbins, nvcc 13.4.92, the flags of exl3/build.sh
 #   - the shim's two prebuilt blobs (tgcu_builtin.fatbin, tgcu_libc.cubin), same flags/tool as the shipped ones
 # Every product's sha256 is compared with the deployed one (results/verification/fatbin-sha256.txt, shim/prebuilt/SHA256SUMS); a mismatch fails the build.
 # The path /Users/sero/exl3 (= $BUILD_ROOT/exl3) is part of the contract: exl3_strata.fatbin embeds a path-dependent id.
@@ -18,10 +18,11 @@ expect() {   # expect <file> <expected sha256> <label>
   echo "MATCH deployed: $3 $got"; echo "$got  $3" >> $OUT/SHA256SUMS
 }
 cd $R/exl3
-for m in exl3_strata exl3_strata_recon exl3_strata_pf; do
-  nv $OUT/$m.nvcc.log $NVCC -std=c++17 -O3 --fatbin -arch=sm_86 -no-compress -Xptxas -v -I torchstub --expt-relaxed-constexpr \
-    "-DCUBLAS_STATUS_MAPPING_ERROR=((cublasStatus_t) 11)" "-DCUBLAS_STATUS_LICENSE_ERROR=((cublasStatus_t) 16)" \
-    -x cu $m.cu -o $OUT/$m.fatbin
+for m in exl3_strata exl3_strata_recon exl3_strata_pf exl3_o23; do
+  # exl3_o23 (config G) is built with the plain flags the deployed fatbin was built with (~/strata-opt23/lib/build.sh): the extra flags of the other three
+  # (-I torchstub, --expt-relaxed-constexpr, the cuBLAS status -D's) change its bytes (sha256 937aef03... instead of a6fad4f2..., same source, checked 2026-10-18)
+  if [ $m = exl3_o23 ]; then xf=(); else xf=(-Xptxas -v -I torchstub --expt-relaxed-constexpr "-DCUBLAS_STATUS_MAPPING_ERROR=((cublasStatus_t) 11)" "-DCUBLAS_STATUS_LICENSE_ERROR=((cublasStatus_t) 16)"); fi
+  nv $OUT/$m.nvcc.log $NVCC -std=c++17 -O3 --fatbin -arch=sm_86 -no-compress "${xf[@]}" -x cu $m.cu -o $OUT/$m.fatbin
   expect $OUT/$m.fatbin "$(awk -v f=$m.fatbin '$1 !~ /^#/ && $2 == f {print $1}' $R/verify/fatbin-sha256.txt)" $m.fatbin
 done
 cd $R/shim

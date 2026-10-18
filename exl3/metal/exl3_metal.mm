@@ -51,7 +51,7 @@ struct Slot {
     size_t p_x_n = 0, p_tbl_n = 0, p_cap = 0, p_wg_n = 0, p_y_n = 0, p_yh_n = 0;
 };
 
-struct Pipes { id<MTLComputePipelineState> rot_dec, mid_dec, comb_dec, gemv[9], rot_pf, rot_pf_h, y_f2h, decode_w, gemm_gu, gemm_d, mid_pf, comb_pf; };
+struct Pipes { id<MTLComputePipelineState> rot_dec, mid_dec, comb_dec, gemv[9], rot_pf, rot_pf_h, y_f2h, decode_w, gemm_gu, gemm_d, mid_pf, comb_pf, decode_w_lm, gemm_gu_lm, gemm_d_lm, gemm_gu_fd, gemm_d_fd, gemm_gu_fd64, gemm_d_fd64; };
 }  // namespace
 
 struct exl3m_ctx {
@@ -67,6 +67,8 @@ struct exl3m_ctx {
     exl3m_stats st{};
     std::string dname;
     int pf_chunk_rows = 4096, pf_chunk_experts = 16;
+    int pf_fd = 0;   // Opt23: the prefill GEMMs decode the trellis into their B tile (no decoded-weight scratch / round trip)
+    int pf_lm = 0;   // Prefill20: lane-major decoded weights (decode_w_lm + gemm_*_lm: coalesced 16 B stores, bit-identical results)
     int wait_spin = 0, unretained = 0;   // decode latency knobs: poll the command buffer status instead of waitUntilCompleted; unretained references
     int64_t skip_mask = 0;   // profiling only: bit i skips prefill kernel i (rot, decode_w x3, gemm_gu, mid, gemm_d, comb)
 };
@@ -160,12 +162,17 @@ exl3m_ctx *exl3m_create(int n_threads, int n_slots) {
         P.rot_pf = mkpipe(c, lib, @"rot_in_pf"); P.decode_w = mkpipe(c, lib, @"decode_w"); P.gemm_gu = mkpipe(c, lib, @"gemm_gu");
         P.gemm_d = mkpipe(c, lib, @"gemm_d"); P.mid_pf = mkpipe(c, lib, @"mid_pf"); P.comb_pf = mkpipe(c, lib, @"comb_pf");
         P.rot_pf_h = mkpipe(c, lib, @"rot_in_pf_h"); P.y_f2h = mkpipe(c, lib, @"y_f2h");
+        P.decode_w_lm = mkpipe(c, lib, @"decode_w_lm"); P.gemm_gu_lm = mkpipe(c, lib, @"gemm_gu_lm"); P.gemm_d_lm = mkpipe(c, lib, @"gemm_d_lm");
+        P.gemm_gu_fd = mkpipe(c, lib, @"gemm_gu_fd"); P.gemm_d_fd = mkpipe(c, lib, @"gemm_d_fd");
+        P.gemm_gu_fd64 = mkpipe(c, lib, @"gemm_gu_fd64"); P.gemm_d_fd64 = mkpipe(c, lib, @"gemm_d_fd64");
         if (!P.rot_dec || !P.mid_dec || !P.comb_dec || !P.gemv[1] || !P.gemv[2] || !P.gemv[4] || !P.gemv[8] || !P.rot_pf || !P.rot_pf_h || !P.y_f2h ||
-            !P.decode_w || !P.gemm_gu || !P.gemm_d || !P.mid_pf || !P.comb_pf) { delete c; return nullptr; }
+            !P.decode_w || !P.gemm_gu || !P.gemm_d || !P.mid_pf || !P.comb_pf || !P.decode_w_lm || !P.gemm_gu_lm || !P.gemm_d_lm || !P.gemm_gu_fd || !P.gemm_d_fd || !P.gemm_gu_fd64 || !P.gemm_d_fd64) { delete c; return nullptr; }
         if (n_slots <= 0) n_slots = 2;
         if (n_slots > 8) n_slots = 8;
         if (const char *e = getenv("EXL3M_WAIT_SPIN")) c->wait_spin = atoi(e);        // decode jobs: poll the command buffer instead of waitUntilCompleted
         if (const char *e = getenv("EXL3M_UNRETAINED")) c->unretained = atoi(e);
+        if (const char *e = getenv("EXL3M_PF_FD")) c->pf_fd = atoi(e);
+        if (const char *e = getenv("EXL3M_PF_LM")) c->pf_lm = atoi(e);                 // Prefill20: lane-major decoded weights
         if (const char *e = getenv("EXL3M_PF_CHUNK_ROWS")) { if (atoi(e) >= 64) c->pf_chunk_rows = atoi(e); }          // prefill scratch size (rows per chunk) ...
         if (const char *e = getenv("EXL3M_PF_CHUNK_EXPERTS")) { if (atoi(e) >= 1) c->pf_chunk_experts = atoi(e); }     // ... and decoded-weight experts per chunk: smaller = less Metal memory
         c->slots.resize((size_t)n_slots);
@@ -217,6 +224,8 @@ int exl3m_unregister(exl3m_ctx *c, const void *base) {
 }
 
 int exl3m_set_param(exl3m_ctx *c, const char *key, int64_t v) {
+    if (!strcmp(key, "pf_fd")) { c->pf_fd = (int)v; return 0; }
+    if (!strcmp(key, "pf_lm")) { c->pf_lm = (int)v; return 0; }
     if (!strcmp(key, "pf_chunk_rows") && v >= 64) { c->pf_chunk_rows = (int)v; return 0; }
     if (!strcmp(key, "pf_chunk_experts") && v >= 1) { c->pf_chunk_experts = (int)v; return 0; }
     if (!strcmp(key, "wait_spin")) { c->wait_spin = (int)v; return 0; }
@@ -406,7 +415,7 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
         }
         uint32_t cap_rows = 0; int maxg = 0; size_t tbl_bytes = 0;
         for (auto &ch : chunks) { cap_rows = std::max(cap_rows, ch.rows); maxg = std::max(maxg, ch.u1 - ch.u0);
-            tbl_bytes += 256 + (size_t)(ch.u1 - ch.u0) * 16 + 256 + (size_t)ch.rows * 8 + 256 + ((size_t)ch.rows / 32 + (size_t)(ch.u1 - ch.u0) + 1) * 16 + 256 + (size_t)ch.rows * 16 + 1024; }
+            tbl_bytes += 256 + (size_t)(ch.u1 - ch.u0) * 16 + 256 + (size_t)ch.rows * 8 + 256 + ((size_t)ch.rows / 32 + (size_t)(ch.u1 - ch.u0) + 1) * 32 + 256 + (size_t)ch.rows * 16 + 1024; }
         cap_rows += 64;
 
         Slot *s = acquire(c);
@@ -449,8 +458,10 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
             s->p_cap = cap_rows;
         }
         const size_t wbytes = (size_t)H * FF * 2;
+        if (!c->pf_fd) {
         grow(c, s->p_Wg, s->p_wg_n, (size_t)maxg * wbytes, PRIV);
         if (!s->p_Wu || s->p_Wu.length < s->p_Wg.length) { s->p_Wu = mkbuf(c, s->p_Wg.length, PRIV); s->p_Wd = mkbuf(c, s->p_Wg.length, PRIV); }
+        }
         {
             double a = now_ms();
             memcpy(s->p_x.contents, x, xbytes_in);
@@ -470,10 +481,10 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
             const int G = ch.u1 - ch.u0; const uint32_t R = ch.rows;
             size_t o_units = take((size_t)G * 16), o_uor = take((size_t)R * 4), o_src = take((size_t)R * 4);
             size_t ntiles_max = (size_t)R / 32 + (size_t)G + 1;
-            size_t o_tiles = take(ntiles_max * 16);
+            size_t o_tiles = take(ntiles_max * 16), o_tiles64 = take(ntiles_max * 16);
             size_t o_touched = take((size_t)R * 4), o_tptr = take(((size_t)R + 1) * 4), o_cps = take((size_t)R * 8);
             UnitPH *U = (UnitPH *)(tbl + o_units); uint32_t *uor = (uint32_t *)(tbl + o_uor); int32_t *src = (int32_t *)(tbl + o_src);
-            GTH *tiles = (GTH *)(tbl + o_tiles); uint32_t ntiles = 0;
+            GTH *tiles = (GTH *)(tbl + o_tiles), *tiles64 = (GTH *)(tbl + o_tiles64); uint32_t ntiles = 0, ntiles64 = 0;
             std::vector<float> pw(R); std::vector<uint32_t> prow(R);
             uint32_t pr = 0;
             for (int g = 0; g < G; g++) {
@@ -484,6 +495,14 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
                     uint32_t p = order[ecount[(size_t)e] + i];
                     uor[pr] = (uint32_t)g; src[pr] = ridx[p]; pw[pr] = w[p]; prow[pr] = (uint32_t)ridx[p];
                 }
+                if (c->pf_fd == 2) {   // Opt23: 64-row tiles for what does not fit 32 rows, 32-row tiles for the rest
+                    uint32_t r = 0;
+                    while (r < nr) {
+                        const uint32_t rem = nr - r;
+                        if (rem > 32) { tiles64[ntiles64++] = { (uint32_t)g, U[g].row0 + r, std::min<uint32_t>(64, rem), 0 }; r += 64; }
+                        else { tiles[ntiles++] = { (uint32_t)g, U[g].row0 + r, rem, 0 }; r += 32; }
+                    }
+                } else
                 for (uint32_t r = 0; r < nr; r += 32) tiles[ntiles++] = { (uint32_t)g, U[g].row0 + r, std::min<uint32_t>(32, nr - r), 0 };
             }
             // combine CSR: touched rows, pairs in chunk order
@@ -503,25 +522,53 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
             [en setBuffer:s->p_x offset:0 atIndex:0]; [en setBuffer:s->p_tbl offset:o_units atIndex:1]; [en setBuffer:s->p_tbl offset:o_uor atIndex:2];
             [en setBuffer:s->p_tbl offset:o_src atIndex:3]; [en setBuffer:s->p_A offset:0 atIndex:4]; [en setBytes:&pp length:sizeof pp atIndex:5];
             if (!(c->skip_mask & 1)) [en dispatchThreadgroups:MTLSizeMake(20, R, 2) threadsPerThreadgroup:tg128];
-            [en setComputePipelineState:c->P.decode_w];
+            if (c->pf_fd) {
+                if (ntiles) {
+                    [en setComputePipelineState:c->P.gemm_gu_fd];
+                    [en setBuffer:s->p_A offset:0 atIndex:0]; [en setBuffer:s->p_C offset:0 atIndex:1]; [en setBuffer:s->p_tbl offset:o_tiles atIndex:2]; [en setBytes:&pp length:sizeof pp atIndex:3];
+                    [en setBuffer:s->p_tbl offset:o_units atIndex:4];
+                    if (!(c->skip_mask & 4)) [en dispatchThreadgroups:MTLSizeMake(10, ntiles, 2) threadsPerThreadgroup:tg128];
+                }
+                if (ntiles64) {
+                    [en setComputePipelineState:c->P.gemm_gu_fd64];
+                    [en setBuffer:s->p_A offset:0 atIndex:0]; [en setBuffer:s->p_C offset:0 atIndex:1]; [en setBuffer:s->p_tbl offset:o_tiles64 atIndex:2]; [en setBytes:&pp length:sizeof pp atIndex:3];
+                    [en setBuffer:s->p_tbl offset:o_units atIndex:4];
+                    if (!(c->skip_mask & 4)) [en dispatchThreadgroups:MTLSizeMake(10, ntiles64, 2) threadsPerThreadgroup:tg128];
+                }
+            } else {
+            [en setComputePipelineState:c->pf_lm ? c->P.decode_w_lm : c->P.decode_w];
             [en setBuffer:s->p_tbl offset:o_units atIndex:0];
             for (uint32_t which = 0; which < 3; which++) {
                 id<MTLBuffer> wb = which == 0 ? s->p_Wg : which == 1 ? s->p_Wu : s->p_Wd;
                 [en setBuffer:wb offset:0 atIndex:1]; [en setBytes:&which length:4 atIndex:2];
                 if (!(c->skip_mask & 2)) [en dispatchThreads:MTLSizeMake(6400 * 32, (NSUInteger)G, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             }
-            [en setComputePipelineState:c->P.gemm_gu];
+            [en setComputePipelineState:c->pf_lm ? c->P.gemm_gu_lm : c->P.gemm_gu];
             [en setBuffer:s->p_A offset:0 atIndex:0]; [en setBuffer:s->p_Wg offset:0 atIndex:1]; [en setBuffer:s->p_Wu offset:0 atIndex:2];
             [en setBuffer:s->p_C offset:0 atIndex:3]; [en setBuffer:s->p_tbl offset:o_tiles atIndex:4]; [en setBytes:&pp length:sizeof pp atIndex:5];
             if (!(c->skip_mask & 4)) [en dispatchThreadgroups:MTLSizeMake(10, ntiles, 2) threadsPerThreadgroup:tg128];
+            }
             [en setComputePipelineState:c->P.mid_pf];
             [en setBuffer:s->p_tbl offset:o_units atIndex:0]; [en setBuffer:s->p_tbl offset:o_uor atIndex:1]; [en setBuffer:s->p_C offset:0 atIndex:2];
             [en setBuffer:s->p_Z offset:0 atIndex:3]; [en setBytes:&pp length:sizeof pp atIndex:4];
             if (!(c->skip_mask & 8)) [en dispatchThreadgroups:MTLSizeMake(5, R, 1) threadsPerThreadgroup:tg128];
-            [en setComputePipelineState:c->P.gemm_d];
+            if (c->pf_fd) {
+                if (ntiles) {
+                    [en setComputePipelineState:c->P.gemm_d_fd];
+                    [en setBuffer:s->p_Z offset:0 atIndex:0]; [en setBuffer:s->p_Yd offset:0 atIndex:1]; [en setBuffer:s->p_tbl offset:o_tiles atIndex:2]; [en setBuffer:s->p_tbl offset:o_units atIndex:3];
+                    if (!(c->skip_mask & 16)) [en dispatchThreadgroups:MTLSizeMake(40, ntiles, 1) threadsPerThreadgroup:tg128];
+                }
+                if (ntiles64) {
+                    [en setComputePipelineState:c->P.gemm_d_fd64];
+                    [en setBuffer:s->p_Z offset:0 atIndex:0]; [en setBuffer:s->p_Yd offset:0 atIndex:1]; [en setBuffer:s->p_tbl offset:o_tiles64 atIndex:2]; [en setBuffer:s->p_tbl offset:o_units atIndex:3];
+                    if (!(c->skip_mask & 16)) [en dispatchThreadgroups:MTLSizeMake(40, ntiles64, 1) threadsPerThreadgroup:tg128];
+                }
+            } else {
+            [en setComputePipelineState:c->pf_lm ? c->P.gemm_d_lm : c->P.gemm_d];
             [en setBuffer:s->p_Z offset:0 atIndex:0]; [en setBuffer:s->p_Wd offset:0 atIndex:1]; [en setBuffer:s->p_Yd offset:0 atIndex:2];
             [en setBuffer:s->p_tbl offset:o_tiles atIndex:3];
             if (!(c->skip_mask & 16)) [en dispatchThreadgroups:MTLSizeMake(40, ntiles, 1) threadsPerThreadgroup:tg128];
+            }
             [en setComputePipelineState:c->P.comb_pf];
             [en setBuffer:s->p_tbl offset:o_units atIndex:0]; [en setBuffer:s->p_tbl offset:o_uor atIndex:1]; [en setBuffer:s->p_Yd offset:0 atIndex:2];
             [en setBuffer:s->p_tbl offset:o_touched atIndex:3]; [en setBuffer:s->p_tbl offset:o_tptr atIndex:4]; [en setBuffer:s->p_tbl offset:o_cps atIndex:5];

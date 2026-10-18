@@ -9,8 +9,8 @@
 #                           Metal toolchain when the mini does not (Command Line Tools alone have no `metal` compiler), then run ./run.sh on the mini
 #   ./run.sh stop           stop the server this script started (pid file $HOME/shim/server.pid)
 # options: --force (replace differing installed files / rebuild), --restart (stop a running server first), --verify-pack (sha256 of the whole 45.8 GB
-#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-f` = config F = config E + the asynchronous USB batches (shim/0006 + libtgusb, TGCU_USB_NPIPE/SUBP/FUSE=1)
-#          and the Prefill20 prefill patches (0022/0023), the recommended recipe; `-e` = config E (decode hoist, patch 0021, STRATA_D19_HOIST=1), `-d` = config D (lazy loan refill, no hoist), `-c` = config C (blocking refill, best decode), and the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
+#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-g` = config G = config F + the Opt23 doorbell (patch 0024 + libstrata_o23: x pulled as fp16, device-side skip of rings with no cold expert, STRATA_O23=3)
+#          and the fused-decode Metal prefill kernels (EXL3M_PF_FD=2, exl3/metal), the recommended recipe; `-f` = config F (asynchronous USB batches, shim/0006 + libtgusb, TGCU_USB_NPIPE/SUBP/FUSE=1, and the Prefill20 prefill patches 0022/0023); `-e` = config E (decode hoist, patch 0021, STRATA_D19_HOIST=1), `-d` = config D (lazy loan refill, no hoist), `-c` = config C (blocking refill, best decode), and the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
 # env:     RUN_ROOT (default $HOME: where shim/ exl3/ strata/ ... go; the dry run on a machine that is serving should use a scratch dir),
 #          BUNDLE (default ./out), HOST (127.0.0.1), PORT (8080), KEY_FILE ($HOME/.config/strata/flashnext.key), JOBS (host compile jobs, default 4),
 #          CLANG_BIN (directory with clang/clang++ for the CUDA host compiles of the engine; needed when `clang` is older than Apple clang 21, see below)
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 CHECK=0; FORCE=0; RESTART=0; VERIFY_PACK=0; MODE=up
-CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-f}
+CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-g}
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
@@ -244,7 +244,7 @@ install_bundle() {
     ok "strata_cmds.txt re-rooted $BUILD_ROOT -> $ROOT"
   fi
   install_tree "$REPO/exl3" "$HOME/exl3" "EXL3 sources, packers, profile" td pack out __pycache__ '*.dylib' '*.fatbin' '*.air' '*.metallib' exl3_metallib.h
-  local m; for m in exl3_strata exl3_strata_recon exl3_strata_pf; do install_file "$BUNDLE/fatbins/$m.fatbin" "$HOME/exl3/$m.fatbin"; done
+  local m; for m in exl3_strata exl3_strata_recon exl3_strata_pf exl3_o23; do install_file "$BUNDLE/fatbins/$m.fatbin" "$HOME/exl3/$m.fatbin"; done
   # the shim, exactly as shim/install.sh lays it out
   local f
   for f in tgcu.py tgcu_api.py tgcu_prof.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h tgcu_builtin.cu tgcu_libc.ptx tgusb.c \
@@ -330,7 +330,7 @@ build_libs() {
     elif [ -f "$BUNDLE/metal/libexl3metal.dylib" ]; then mkdir -p "$HOME/exl3/metal"; cp "$BUNDLE/metal/libexl3metal.dylib" "$HOME/exl3/metal/libexl3metal.dylib"; ok "installed libexl3metal.dylib from $BUNDLE/metal"
     else bad "no Metal toolchain and no $BUNDLE/metal/libexl3metal.dylib: run ./run.sh --build-metal on a Mac with the Metal toolchain"; fi
   else ok "libexl3metal.dylib present"; fi
-  [ -f "$HOME/exl3/metal/libexl3metal.dylib" ] && expected_sha libexl3metal "$HOME/exl3/metal/libexl3metal.dylib" e38a011c79933a8efdc31e7b15789a7ff63aa5e62597f5b4f68995070c4e6ea9
+  [ -f "$HOME/exl3/metal/libexl3metal.dylib" ] && expected_sha libexl3metal "$HOME/exl3/metal/libexl3metal.dylib" 53d4deab43590de46df680addb22fed9a665d959b7e4c8b46634684f30d18a6d
   # libcudart (the CUDA runtime shim) embeds CPython: use the interpreter the tinygrad venv runs on
   py_prefix=$("$HOME/tinygrad/.venv/bin/python" -c "import sys; print(sys.base_prefix)")
   h=$(hash_files "$REPO/shim/tgcudart.cpp" "$REPO/shim/tgcublas.cpp" "$REPO/shim/tgcuda_launch.h" "$REPO/shim/build-libcudart.sh"); h="$h-$(basename "$py_prefix")"
@@ -350,6 +350,12 @@ build_libs() {
     cuda_clang zsh "$HOME/exl3/strata_m4/build.sh" > "$CACHE/libstrata_exl3.log" 2>&1 || { tail -20 "$CACHE/libstrata_exl3.log"; die "libstrata_exl3 build failed"; }
     stamp libstrata_exl3 x "$h"; ok "built libstrata_exl3.dylib"
   else ok "libstrata_exl3.dylib present"; fi
+  # libstrata_o23 (config G: the Opt23 doorbell kernels, dlopen'd by the engine when STRATA_O23 is set)
+  h=$(hash_files "$REPO/exl3/strata_m4/exl3_o23_host.cu" "$REPO/exl3/strata_m4/build_o23.sh" "$BUNDLE/fatbins/exl3_o23.fatbin")
+  if need_build libstrata_o23 "$HOME/exl3/strata_m4/libstrata_o23.dylib" "$h"; then
+    cuda_clang zsh "$HOME/exl3/strata_m4/build_o23.sh" > "$CACHE/libstrata_o23.log" 2>&1 || { tail -20 "$CACHE/libstrata_o23.log"; die "libstrata_o23 build failed"; }
+    stamp libstrata_o23 x "$h"; ok "built libstrata_o23.dylib"
+  else ok "libstrata_o23.dylib present"; fi
 }
 build_engine() {
   step "Strata engine (host half; the device code is in the bundle)"
@@ -433,11 +439,11 @@ WIRE_CMD='sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032
 sysnum() { sysctl -n "$1" 2>/dev/null | head -1 | tr -cd '0-9'; }
 host_prereqs() {
   step "host prerequisites ($CONFIG_NAME)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 23 patches, config C/D/E/F's shim); see patches/README.md";; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 24 patches, config C/D/E/F/G's shim); see patches/README.md";; esac
   local slots; slots=$(python3 -c "import json,sys; print(json.load(open('$CONFIG'))['env'].get('STRATA_EXL3_METAL_SLOTS', '0'))")
   local bytes=$((slots * 1867776))
   info "STRATA_EXL3_METAL_SLOTS $slots: $((bytes / 1000000)) MB of mlocked, Metal-registered expert slots on the mini side (config C ships 6400)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f) if [ "$slots" != 6400 ]; then warn "config C/D/E/F is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g) if [ "$slots" != 6400 ]; then warn "config C/D/E/F/G is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
   # wired limits: the LRU is locked memory; above the default cap mlock fails (errno 35) and the slots swap out
   local wl gl ul; wl=$(sysnum iogpu.wired_limit_mb); gl=$(sysnum vm.global_user_wire_limit); ul=$(sysnum vm.user_wire_limit)
   # iogpu.wired_limit_mb 0 = the macOS default, which scales with RAM: on the 16 GiB mini it is below 14 GiB, and then vm.global_user_wire_limit (12,451 MiB by default) shows it

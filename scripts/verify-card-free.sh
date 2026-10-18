@@ -26,7 +26,7 @@ expect_sha() {   # expect_sha <file> <sha256> <label>
 }
 
 step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41 export; every other patch applies to its own base
-  say "patches: Strata v0.1.41 + patches/strata/000*.patch"
+  say "patches: Strata v0.1.41 + patches/strata/00*.patch"
   rm -rf $WORK/strata; mkdir -p $WORK/strata
   if [ -n "${STRATA_DIR:-}" ]; then (cd $STRATA_DIR && git archive v0.1.41) | tar x -C $WORK/strata
   else rm -rf $WORK/strata-clone; git clone -q --depth 1 --branch v0.1.41 ${STRATA_GIT:-https://github.com/Niko1221/Strata} $WORK/strata-clone
@@ -37,8 +37,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
   for p in $REPO/patches/strata/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied $(basename $p)"; done
   rm -rf $WORK/vis && mkdir -p $WORK/vis/tools && cp -r $WORK/strata/tools/vision $WORK/vis/tools/ && cd $WORK/vis && git init -q . 2>/dev/null
   git apply --check $REPO/patches/vision/0001-strata-vision-metal-macos.patch; echo "vision patch applies to tools/vision"
-  # config F (Prefill22 = config E + patches 0022/0023 and shim/0006): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
-  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-f-sha256.txt; config-e-sha256.txt is the manifest before 0022, config-d-sha256.txt before 0021, config-c-sha256.txt before 0020)
+  # config G (Opt23 = config F + patch 0024; F = config E + patches 0022/0023 and shim/0006): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
+  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-g-sha256.txt; config-f-sha256.txt is the manifest before 0024, config-e-sha256.txt before 0022, config-d-sha256.txt before 0021, config-c-sha256.txt before 0020)
   rm -rf $WORK/shimchk && mkdir -p $WORK/shimchk/shim && cp $REPO/patches/shim/base/* $WORK/shimchk/shim/ && cd $WORK/shimchk && git init -q . 2>/dev/null || true
   for p in $REPO/patches/shim/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied shim/$(basename $p)"; done
   for f in tgcu.py tgcu_api.py tgcudart.cpp; do cmp $WORK/shimchk/shim/$f $REPO/shim/$f || fail "patches/shim/base + 0*.patch differ from shim/$f"; done
@@ -48,8 +48,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
     case $h in ""|\#*) continue;; esac
     case $f in shim/*|exl3/*) f=$REPO/$f;; *) f=$WORK/strata/$f;; esac
     expect_sha $f $h "${f#$REPO/}"; n=$((n + 1))
-  done < $REPO/results/verification/config-f-sha256.txt
-  echo "$n files of config F match results/verification/config-f-sha256.txt"
+  done < $REPO/results/verification/config-g-sha256.txt
+  echo "$n files of config G match results/verification/config-g-sha256.txt"
   logged profile-d8w4 1 env STRATA_TOOLS=$WORK/strata/tools python3 $REPO/exl3/make_profile_wholelayers.py $WORK/d8w4 0,1,2,6
   [ "$(md5 -q $WORK/d8w4/profile.bin)" = 2ac3b7e1436c1720487993969c651c5c ] && echo "exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH" || fail "d8w4 profile does not reproduce"
 }
@@ -84,16 +84,16 @@ step_cudart() {    # the CUDA-runtime shim and the libusb batch executor compile
     || echo "libtgusb.dylib (signature removed) md5 $got differs from the deployed $want: toolchain-dependent; not a failure"
 }
 step_fatbins() {   # sm_86 fatbins of the EXL3 engine kernels (nvcc 13.4 in the strata-cuda container) + the host library around them
-  say "fatbins: exl3_strata / _recon / _pf with nvcc 13.4 in the container, then strata_m4/build.sh"
+  say "fatbins: exl3_strata / _recon / _pf / _o23 with nvcc 13.4 in the container, then strata_m4/build.sh and build_o23.sh"
   case $REPO in $HOME/*) ;; *) fail "repo must be under \$HOME (the container mounts \$HOME 1:1)";; esac
   cd $REPO/exl3
-  for m in exl3_strata exl3_strata_recon exl3_strata_pf; do
+  for m in exl3_strata exl3_strata_recon exl3_strata_pf exl3_o23; do
     logged fatbin-$m 2 zsh build.sh $m
     want=$(awk -v f=$m.fatbin '$1 !~ /^#/ && $2 == f {print $1}' $REPO/results/verification/fatbin-sha256.txt)
     if [ $m = exl3_strata ] && [ $PWD != /Users/sero/exl3 ]; then echo "$m.fatbin: its id depends on the build path ($PWD, not /Users/sero/exl3); sha256 not compared"
     else expect_sha $m.fatbin $want $m.fatbin; fi
   done
-  (cd strata_m4 && logged strata_m4-build 2 zsh build.sh)
+  (cd strata_m4 && logged strata_m4-build 2 zsh build.sh && logged strata_m4-build-o23 3 zsh build_o23.sh)
 }
 step_pack-layer() { # fetch one layer from the pinned HF revision into a TEMP pack, verify, compare its sha256 with results/pack/exl3_pack.json
   say "pack-layer: pack_td.py sync $PACK_LAYER into $WORK/exl3 (needs ~1 GB free + network)"
