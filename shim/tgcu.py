@@ -537,20 +537,24 @@ class Context:
   def _submit(self, cmds:list[int]):
     pb = array.array("I", cmds).tobytes()
     off = self._transient(len(pb))
-    self.ctrl_mv[off:off + len(pb)] = pb
     fifo = self.fifo
     put = fifo.put_value.as_memoryview(allow_zero_copy=True).cast("Q")
     p = put[0]
     entry = (self.ctrl_va + off) | ((len(pb) // 4) << 42) | (1 << 41)
-    ring = fifo.ring.host
-    ring[(p % fifo.entries) * 8:(p % fifo.entries) * 8 + 8] = struct.pack("<Q", entry)
-    put[0] = p + 1
-    if _POKE1 & 8:   # GPPut and doorbell: one USB control transfer each instead of control + bulk
-      _w32(fifo.gpput.host, 0, (p + 1) % fifo.entries)
-      _w32(self.dev.gpu_mmio, 0x90, fifo.token)
+    if _tgu is not None and flag("subp", _SUBP):   # Prefill21: pushbuffer, ring entry, GPPut and doorbell as one asynchronous USB batch (tgusb21.c)
+      _pipe_submit(pb, self.ctrl_mv.addr + off, fifo.ring.host.addr + (p % fifo.entries) * 8, entry, fifo.gpput.host.addr, (p + 1) % fifo.entries, self.dev.gpu_mmio.addr + 0x90, fifo.token)
+      put[0] = p + 1
     else:
-      fifo.gpput.host[0:4] = struct.pack("<I", (p + 1) % fifo.entries)
-      self.dev.gpu_mmio[0x90 // 4] = fifo.token # usermode doorbell in BAR0, a PCIe write over USB
+      self.ctrl_mv[off:off + len(pb)] = pb
+      ring = fifo.ring.host
+      ring[(p % fifo.entries) * 8:(p % fifo.entries) * 8 + 8] = struct.pack("<Q", entry)
+      put[0] = p + 1
+      if _POKE1 & 8:   # GPPut and doorbell: one USB control transfer each instead of control + bulk
+        _w32(fifo.gpput.host, 0, (p + 1) % fifo.entries)
+        _w32(self.dev.gpu_mmio, 0x90, fifo.token)
+      else:
+        fifo.gpput.host[0:4] = struct.pack("<I", (p + 1) % fifo.entries)
+        self.dev.gpu_mmio[0x90 // 4] = fifo.token # usermode doorbell in BAR0, a PCIe write over USB
     for s in self.seg_touched: self.seg_last[s] = self.sem_value   # this submission (or a later one) is the last to read the segments it wrote
     self.seg_touched.clear()
 
@@ -738,6 +742,48 @@ _POKE1 = int(os.getenv("TGCU_POKE1", "0"))   # bit 0: GPPut, 1: doorbell, 2: hol
 def _w32(mmio, off:int, val:int):
   a = mmio.addr + off
   mmio.usb.pcie_request(0x60 if a >> 32 else 0x40, a, val & 0xffffffff)   # 3DW header for a 32-bit address, 4DW above
+# Prefill21: asynchronous USB batches (tgusb21.c, libtgusb.dylib next to this file).  TGCU_USB_NPIPE=1: the pipelined upload / download loops run natively (arm + bulk and the semaphore polls queued back to back);
+# TGCU_USB_SUBP=1: pushbuffer / ring entry / GPPut / doorbell of every submission as one batch; TGCU_USB_FUSE=1: a small upload's submission + arm + payload as one batch; TGCU_USB_FENCE: 1 = a fence before every control
+# transfer behind a bulk, 2 = between an arm and its bulk.  TGCU_P21_FLAG=<file> ("npipe=1 subp=0 ..."): the same switches re-read every 0.2 s, for in-server A/B.
+_NPIPE, _SUBP, _FUSE = (int(os.getenv(k, "0")) for k in ("TGCU_USB_NPIPE", "TGCU_USB_SUBP", "TGCU_USB_FUSE"))
+_FLAGF = os.getenv("TGCU_P21_FLAG"); _FLAGS: dict = {}; _FLAGT = [0.0]
+def flag(name:str, default:int=0) -> int:
+  if _FLAGF is None: return default
+  t = time.perf_counter()
+  if t - _FLAGT[0] > 0.2:
+    _FLAGT[0] = t
+    try: _FLAGS.clear(); _FLAGS.update({k: int(v) for k, v in (x.split("=") for x in open(_FLAGF).read().split())})
+    except Exception: _FLAGS.clear()
+  return _FLAGS.get(name, default)
+_tgu = None
+def _tgu_load(usb):
+  global _tgu
+  if _tgu is not None: return
+  import ctypes
+  lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libtgusb.dylib"))
+  d = _usbmod.libusb.dll
+  def sym(n): return ctypes.cast(getattr(d, n), ctypes.c_void_p).value
+  lib.tgu_init.argtypes = [ctypes.c_void_p] * 5; lib.tgu_init.restype = ctypes.c_int
+  if lib.tgu_init(sym("libusb_alloc_transfer"), sym("libusb_submit_transfer"), sym("libusb_handle_events_timeout"), ctypes.cast(usb.handle, ctypes.c_void_p), ctypes.cast(_usbmod.USB3.ctx(), ctypes.c_void_p)): raise RuntimeError("tgu_init failed")
+  u64, u32, i32, vp, dbl = ctypes.c_uint64, ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_double
+  lib.tgu_fence.argtypes = [i32]; lib.tgu_fence.restype = None
+  lib.tgu_read32.argtypes = [u64, ctypes.POINTER(u32)]; lib.tgu_read32.restype = i32
+  lib.tgu_wait_sem.argtypes = [u64, u32, dbl]; lib.tgu_wait_sem.restype = i32
+  lib.tgu_submit.argtypes = [vp, i32, u64, u64, u32, u32, i32, i32, u64, u32, u64, u32, i32, i32, vp, i32, i32]; lib.tgu_submit.restype = i32
+  lib.tgu_h2d_pipe.argtypes = [vp, u64, vp, u64, u32, u32, i32, i32, i32, i32, dbl]; lib.tgu_h2d_pipe.restype = i32
+  lib.tgu_d2h_pipe.argtypes = [vp, u64, vp, vp, i32, i32, i32, u64, u32, u64, u32, dbl]; lib.tgu_d2h_pipe.restype = i32
+  lib.tgu_fence(int(os.getenv("TGCU_USB_FENCE", "11")))   # bit 0: a fence after the pushbuffer bulk, 1: between an arm and its bulk, 3: between a stream header and its bulk (all needed: tgusb21.c); 2 / 8 alone fail under CPU load
+  _tgu = lib
+def _ptr(buf) -> int:   # the address of a bytes / bytearray / writable memoryview
+  import ctypes
+  if isinstance(buf, bytes): return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
+  mv = memoryview(buf)
+  if mv.readonly: raise ValueError("read-only buffer")
+  return ctypes.addressof(ctypes.c_char.from_buffer(mv))
+def _pipe_submit(pb:bytes, pb_addr:int, entry_addr:int, entry:int, gpput_addr:int, gpput_val:int, db_addr:int, db_val:int, arm=None, data=None, arm_first:int=0):
+  rc = _tgu.tgu_submit(_ptr(pb), len(pb) // 4, pb_addr, entry_addr, entry & 0xffffffff, entry >> 32, 1, 1, gpput_addr, gpput_val, db_addr, db_val,
+                       arm[0] if arm else -1, arm[1] if arm else 0, _ptr(data) if data is not None else None, len(data) if data is not None else 0, arm_first)
+  if rc: raise RuntimeError(f"tgu_submit failed: {rc}")
 _PROF_ACC = [[0.0, 0.0, 0, 0.0, 0.0], [0.0, 0.0, 0, 0.0, 0.0]]   # [h2d, d2h]: submit s, ce-wait s, calls, control s, bulk s
 _SUB_ACC = [[0.0, 0.0, 0.0, 0.0, 0.0]]
 def _prof_dump():
@@ -755,6 +801,7 @@ class AsyncCopy:
     # COPY0 in a channel group of its own: time-sliced against the graphics group (the async CE runlists do not start here)
     self.engine = engine_type if engine_type is not None else nvg.NV2080_ENGINE_TYPE_COPY0
     self.usb = dev.iface.pci_dev.usb                       # the ASM2464 controller
+    if _NPIPE or _SUBP or _FUSE or _FLAGF: _tgu_load(self.usb.usb)   # Prefill21: native asynchronous USB batches
     self.sram_va = dev.iface.ctrl.get_storage().buf + 0x5000  # GPU VA of the staging window (TRANSFER_PADDR)
     self.cq_va = dev.iface.ctrl.get_storage().buf + 0x100c    # the bridge's completion queue word (usb_cq)
     self.slot0, self.slot_size = iface.TRANSFER_START_SLOT, iface.SLOT_SIZE
@@ -795,11 +842,17 @@ class AsyncCopy:
     pb = array.array("I", cmds).tobytes()
     if self.pb_head + len(pb) > 0x100000: self.pb_head = 0x10000  # callers wait on each submission, so the ring is free
     off, self.pb_head = self.pb_head, round_up(self.pb_head + len(pb), 0x100)
+    entry = (self.va + off) | ((len(pb) // 4) << 42) | (1 << 41)
+    slot = self.put % self.ENTRIES
+    fuse, self._fuse = self._fuse, None
+    if _tgu is not None and (fuse is not None or flag("subp", _SUBP)):   # Prefill21: one asynchronous USB batch (a fused arm / arm + payload rides with it)
+      self.put += 1
+      _pipe_submit(pb, self.mv.addr + off, self.mv.addr + slot * 8, entry, self.mv.addr + self.gpput_off, self.put % self.ENTRIES, self.ctx.dev.gpu_mmio.addr + 0x90, self.token,
+                   fuse[0] if fuse else None, fuse[1] if fuse else None, fuse[2] if fuse else 0)
+      return
     _s0 = time.perf_counter()
     self.mv[off:off + len(pb)] = pb
     _s1 = time.perf_counter()
-    entry = (self.va + off) | ((len(pb) // 4) << 42) | (1 << 41)
-    slot = self.put % self.ENTRIES
     self.mv[slot * 8:slot * 8 + 8] = struct.pack("<Q", entry)
     _s2 = time.perf_counter()
     self.put += 1
@@ -838,9 +891,13 @@ class AsyncCopy:
     self._submit(cmds)
     _t2 = time.perf_counter()
     if between is not None: between()
-    t0 = time.perf_counter()
-    while struct.unpack("<I", self.mv[self.sem_off:self.sem_off + 4])[0] != self.sem_value:
-      if time.perf_counter() - t0 > 5: raise RuntimeError("async copy timeout")
+    if _tgu is not None and flag("subp", _SUBP):   # Prefill21: the semaphore poll natively (request + completion queued back to back)
+      rc = _tgu.tgu_wait_sem(self.mv.addr + self.sem_off, self.sem_value & 0xffffffff, 5000.0)
+      if rc: raise RuntimeError(f"async copy timeout (native {rc})")
+    else:
+      t0 = time.perf_counter()
+      while struct.unpack("<I", self.mv[self.sem_off:self.sem_off + 4])[0] != self.sem_value:
+        if time.perf_counter() - t0 > 5: raise RuntimeError("async copy timeout")
     if _PROF:
       _t3 = time.perf_counter(); p = _PROF_ACC[1 if ring_cq else 0]
       p[0] += _t2 - _t1; p[1] += _t3 - _t2; p[2] += 1
@@ -861,12 +918,15 @@ class AsyncCopy:
 
   def h2d(self, dst:int, data:bytes):
     if self.PIPE_MIN and len(data) >= self.PIPE_MIN: return self._h2d_pipe(dst, data)
+    if _tgu is not None and flag("npipe", _NPIPE) and len(data) >= flag("npmin", 32768): return self._h2d_pipe(dst, data)   # Prefill21: the native round loop also wins at 32 KiB .. 1 MiB
     return self._h2d_rounds(dst, data)
 
   def d2h(self, src:int, n:int) -> bytes:
     if self.PIPE_MIN and n >= self.PIPE_MIN: return self._d2h_pipe(src, n)
+    if _tgu is not None and flag("npipe", _NPIPE) and n >= flag("npmin", 32768): return self._d2h_pipe(src, n)
     return self._d2h_rounds(src, n)
 
+  _fuse = None
   def _h2d_pipe(self, dst:int, data:bytes):
     nvg, nvm = onv.nv_gpu, onv.nvm
     SL = self.slot_size
@@ -875,6 +935,7 @@ class AsyncCopy:
     n = len(data)
     rounds = (n + rb - 1) // rb
     mv = memoryview(data) if not isinstance(data, memoryview) else data
+    v0, g0 = self.sem_value, self.gate_seq
     sem = self.va + self.sem_off
     cmds, plan = [], []
     for i in range(rounds):
@@ -899,6 +960,12 @@ class AsyncCopy:
     self._submit(cmds)                                      # the jobs wait on their sentinels; the pushbuffer is free again once the last one has run
     usb = self.usb.usb
     ub = self.usb.usb
+    if _tgu is not None and flag("npipe", _NPIPE):          # Prefill21: the round loop natively (tgusb21.c): arm + bulk queued together, the next poll behind the bulk
+      if cap > len(ub._bulk_mv): ub._bulk_buf, ub._bulk_mv = _usbmod.alloc_cbuffer(cap)
+      import ctypes
+      rc = _tgu.tgu_h2d_pipe(_ptr(data if isinstance(data, bytes) else mv), n, ctypes.addressof(ub._bulk_buf), self.mv.addr + self.sem_off, v0 & 0xffffffff, g0, self.slot0, self.PIPE_SLOTS, SL, rb, 10000.0)
+      if rc: raise RuntimeError(f"tgu_h2d_pipe failed: {rc}")
+      return
     for i, (o, m, wire, reg, gate, sv) in enumerate(plan):
       if i >= 2: self._wait_sem(plan[i - 2][5])             # this region's previous job has drained it
       if wire > len(ub._bulk_mv): ub._bulk_buf, ub._bulk_mv = _usbmod.alloc_cbuffer(wire)
@@ -940,6 +1007,15 @@ class AsyncCopy:
     usb = self.usb.usb
     hmv = self.ctx.mapped_mv
     out = into if into is not None else bytearray(n)
+    if _tgu is not None and flag("npipe", _NPIPE):          # Prefill21: the round loop natively: arm + hold poke + bulk IN queued together, the previous round's payload copied out meanwhile
+      import ctypes
+      wmax = round_up(self.prefix + R, 512)
+      if wmax > len(usb._bulk_mv): usb._bulk_buf, usb._bulk_mv = _usbmod.alloc_cbuffer(wmax)
+      if getattr(self, "_bulkB", None) is None or len(self._bulkB) < wmax: self._bulkB = (ctypes.c_ubyte * max(wmax, 1 << 20))()
+      rc = _tgu.tgu_d2h_pipe(_ptr(out), n, ctypes.addressof(usb._bulk_buf), ctypes.addressof(self._bulkB), R, self.prefix, SL, hmv.addr + self.hold_off, base_tok & 0xffffffff,
+                             self.mv.addr + self.sem_off, self.sem_value & 0xffffffff, 30000.0)
+      if rc: raise RuntimeError(f"tgu_d2h_pipe failed: {rc}")
+      return bytes(out) if into is None else None
     for o, m, wire, tok, sv in plan:
       usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + SL - 1) // SL) << 8))
       hmv[self.hold_off:self.hold_off + 4] = struct.pack("<I", tok & 0xffffffff)
@@ -967,10 +1043,13 @@ class AsyncCopy:
       buf[:len(chunk)] = chunk
       buf[wire - 8:] = struct.pack("<Q", gate)
       _t = [0.0, 0.0, 0.0]
+      fused = _tgu is not None and flag("fuse", _FUSE)   # Prefill21: submission + arm + payload as one asynchronous USB batch
       def send():
+        if fused: return
         _t[0] = time.perf_counter()
         self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
         _t[1] = time.perf_counter(); self.usb.usb.bulk_write(bytes(buf)); _t[2] = time.perf_counter()
+      if fused: self._fuse = ((wire // 512, self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8)), bytes(buf), 0)
       self._copy_and_signal(dst + o, self.sram_va, len(chunk), gate=(self.sram_va + wire - 8, gate), between=send)
       if _PROF:
         p = _PROF_ACC[0]; p[3] += _t[1] - _t[0]; p[4] += _t[2] - _t[1]
@@ -983,7 +1062,10 @@ class AsyncCopy:
       wire = round_up(self.prefix + m, 512)
       # arm the read first; the copy engine fills SRAM and rings the completion queue, then the bulk IN streams it
       _ta = time.perf_counter()
-      self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
+      if _tgu is not None and flag("fuse", _FUSE):   # Prefill21: the arm rides in front of the submission's batch
+        self._fuse = ((wire // 512 | 0x8000, 0 | (((wire + self.slot_size - 1) // self.slot_size) << 8)), None, 1)
+      else:
+        self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
       _tb = time.perf_counter()
       self._copy_and_signal(self.sram_va, src + o, m, ring_cq=True)
       _tc = time.perf_counter()

@@ -1,0 +1,266 @@
+# Prefill20 (2026-10-17, config F): prefill-lane changes of the Mac lane, all lossless and OFF/identical unless the env says otherwise:
+#  (1) STRATA_PF_CFG=<file> ("mc=6 div=512 pair=2 g=6 lag=-1"), re-read at the start of every prefill: chunk count, job size, group depth, lag, for in-server A/B without a restart (keys left out keep the env defaults).
+#  (2) STRATA_PF_PAIR=N (N >= 2) makes the shared Metal job an N-chunk job (1 = the pair, as in config E): the job's fixed cost (decode of every cold expert's weights, ~37 ms for 290 experts) is paid once per N chunks.
+#  (3) STRATA_PF_MIN_CHUNKS stays an env default that STRATA_PF_CFG can override.
+#  (4) the packed x8 rows' device buffer gets +16 KiB and its download is rounded up to whole 16 KiB pages: no tail edge, so the shim's lazy download no longer pays a synchronous 3 ms read per layer.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0021, applied in order with `git apply -p1`.
+
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -226,10 +226,35 @@
+ inline bool pf_xport8_y() { return (pf_xport8_mode() == 1 || pf_xport8_mode() == 3) && pf_mac_y16(); }
+ // STRATA_PF_PAIR=1 (default 0; needs the lockstep group + STRATA_PF_MAC_Y16): chunks 2p and 2p + 1 of a group submit ONE Metal job per layer (their x rows and pair lists concatenated): the job's
+ // fixed cost (decoding every cold expert's weights, ~50 ms) is paid once per two chunks instead of once per chunk.
+-inline bool pf_pair() {
+-    static const bool on = [] { const char* v = std::getenv("STRATA_PF_PAIR"); return v != nullptr && std::atoi(v) != 0; }();
+-    return on;
++// Prefill20: STRATA_PF_CFG=<file>, re-read at the start of every Prefill::run_impl ("mc=6 div=512 pair=2 g=6 lag=-1"; keys left out keep the env defaults): in-server A/B of the chunk count, the job size, the group depth and
++// the lag without a restart.  pair=1 turns the shared jobs off, pair=N (2..STRATA_PF_PAIR) caps them at N chunks; g=N caps the group at N chunks; mc = min chunks, div = the tokens per chunk below which mc is not forced (512).
++struct PfDyn { std::atomic<int> mc{-1}, div{-1}, pair{-1}, g{-1}, lag{-2}; };
++inline PfDyn& pf_dyn() { static PfDyn d; return d; }
++inline void pf_dyn_refresh() {
++    static const char* path = std::getenv("STRATA_PF_CFG");
++    PfDyn& d = pf_dyn();
++    d.mc = -1; d.div = -1; d.pair = -1; d.g = -1; d.lag = -2;
++    if (path == nullptr) return;
++    FILE* f = std::fopen(path, "r");
++    if (f == nullptr) return;
++    char k[16]; int v = 0;
++    while (std::fscanf(f, " %15[a-z]=%d", k, &v) == 2) {
++        if (!std::strcmp(k, "mc")) d.mc = v; else if (!std::strcmp(k, "div")) d.div = v; else if (!std::strcmp(k, "pair")) d.pair = v; else if (!std::strcmp(k, "g")) d.g = v; else if (!std::strcmp(k, "lag")) d.lag = v;
++    }
++    std::fclose(f);
++}
++// Prefill20: STRATA_PF_PAIR=N (N >= 2) makes the job an N-chunk job (1 = the pair, 2 chunks): the job's fixed cost (decode of every cold expert's weights, ~37 ms for 290 experts on the M4) is paid once per N
++// chunks.  A lockstep group of G chunks is cut into ceil(G / N) consecutive jobs of as even a size as possible (G = 6, N = 3: 3 + 3).  A job of s chunks needs lag >= s (split) / s - 1 (plain).
++inline int pf_pair_env() {
++    static const int v = [] { const char* e = std::getenv("STRATA_PF_PAIR"); const int n = e ? std::atoi(e) : 0; return n <= 0 ? 0 : (n == 1 ? 2 : std::clamp(n, 2, 8)); }();
++    return v;
++}
++inline int pf_pair_k() {
++    const int e = pf_pair_env(), dv = pf_dyn().pair;
++    if (dv < 0 || e == 0) return e;
++    return dv <= 1 ? 0 : std::min(dv, e);
+ }
++inline bool pf_pair() { return pf_pair_k() >= 2; }
+ inline int pf_xport8_threads() {
+     static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT8_THREADS"); return e ? std::clamp(std::atoi(e), 1, 16) : 4; }();
+     return v;
+@@ -265,6 +290,8 @@
+     return v;
+ }
+ inline int pf_lag_req(int g) {
++    const int dl = pf_dyn().lag;
++    if (dl != -2) return dl < 0 ? g - 1 : dl;
+     const char* e = std::getenv("STRATA_PF_LAG");
+     return e ? std::atoi(e) : g - 1;
+ }
+@@ -306,6 +333,8 @@
+     bool aborted = false;
+     bool more = false;         // another lockstep group follows this one (its first layers' reads start behind this group's last layers)
+     bool pair = false;         // STRATA_PF_PAIR: chunks 2p / 2p + 1 share one Mac job per layer
++    std::vector<int> jb;       // Prefill20 (pair mode): job q = the chunks [jb[q], jb[q + 1])
++    int job_of(int c) const { int q = 0; while (q + 1 < (int) jb.size() - 1 && c >= jb[(size_t) q + 1]) ++q; return q; }
+     bool wait(int64_t step, int j) {
+         std::unique_lock<std::mutex> lk(mu);
+         cv.wait(lk, [&] { return aborted || (turn < order.size() && order[turn].first == j && order[turn].second == step); });
+@@ -911,13 +940,14 @@
+     float *mac_x32 = nullptr, *mac_y32 = nullptr;
+     std::vector<float> mac_wh, mac_wt;
+     std::vector<int32_t> mac_cold, mac_eidx, mac_ridx, mac_idx_of, mac_next;
+-    struct PairSt {   // STRATA_PF_PAIR: chunks 2p (leader) and 2p + 1 (follower) of a lockstep group share ONE Metal job per layer, submitted at the follower's F turn
+-        bool pending = false, y_ok = false;
+-        int64_t l = -1, T0 = 0;
+-        std::vector<int32_t> cold, eidx, ridx;
+-        std::vector<float> wt;
++    struct PairSt {   // STRATA_PF_PAIR=N: the chunks [jb[q], jb[q + 1]) of a lockstep group share ONE Metal job per layer, submitted at the last member's F turn
++        bool y_ok = false;
++        int y_left = 0;       // members whose B turn has yet to read their rows of the collected job
++        int nparked = 0;      // members (all but the last) that parked their lists at layer l
++        int64_t l = -1;
++        struct Mem { std::vector<int32_t> cold, eidx, ridx; std::vector<float> wt; int64_t T0 = 0, T = 0; } mem[8];
+         void* job = nullptr;
+-        uint16_t *x16 = nullptr, *y16 = nullptr;   // [2 * T_max x N] fp16: the pair's x rows (leader's, then follower's), the job's y rows (same order)
++        uint16_t *x16 = nullptr, *y16 = nullptr;   // [members * T_max x N] fp16: the job's x rows (members in order), the job's y rows (same order)
+     } pairs[6];
+     std::vector<int32_t> pair_pos, pair_u, pair_e, pair_r;
+     std::vector<float> pair_w;
+@@ -1358,7 +1388,7 @@
+     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
+     m.mixed_h = o.take<uint16_t>(T * N, ok);
+     if (pf_mac_enabled()) m.mac_y_dev = o.take<float>(T * N, ok);   // STRATA_PF_MAC: the Mac's partial sums [T x N] fp32 (or fp16 in the first half)
+-    if (pf_mac_enabled() && pf_xport8_x()) m.x8_dev = o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)), ok);   // STRATA_PF_XPORT8: the packed x rows (the y rows' packed copy lives in mac_y_dev's idle second half)
++    if (pf_mac_enabled() && pf_xport8_x()) m.x8_dev = o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16384, ok);   // STRATA_PF_XPORT8: the packed x rows (the y rows' packed copy lives in mac_y_dev's idle second half); +16 KiB: the download is rounded up to whole 16 KiB pages (Prefill20: a tail edge made the shim's lazy download pay a synchronous 3 ms read per layer)
+     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
+     m.bo = m.emb;
+     if (bf16x2_hc(m.f16_io)) { m.xn16_lo = o.take<uint16_t>(T * D, ok); m.lo16_lo = o.take<uint16_t>(T * LR, ok); }
+@@ -2042,7 +2072,7 @@
+         for (int i = 0; i < ring_slots(T); ++i) o.take<uint8_t>((size_t) MAXBLOB(), ok);
+     }
+     f(T * N);
+-    if (pf_mac_enabled() && pf_xport8_x()) o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)), ok);   // carve's x8_dev
++    if (pf_mac_enabled() && pf_xport8_x()) o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16384, ok);   // carve's x8_dev
+     f((size_t) strata::kernels::NG_HC_DIM);
+     strata::kernels::KvHostPools stage;
+     take_stage(o, ss, s, stage, ok);
+@@ -2203,6 +2233,7 @@
+ 
+ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
+     err.clear();
++    pf_dyn_refresh();
+     Impl& m = *impl_;
+     const core::OnDevice on_device(m.device);
+     const core::ModelGeometry& g = *m.g;
+@@ -2248,8 +2279,10 @@
+         static const bool even = [] { const char* v = std::getenv("STRATA_PF_EVEN"); return v == nullptr || std::atoi(v) != 0; }();
+         if (!pf_mac_enabled() || hand_in_ != nullptr || next_ != nullptr) return m.T;
+         int64_t tc = strata::prefill::even_chunk(n, m.T, even);
+-        static const int64_t min_chunks = [] { const char* v = std::getenv("STRATA_PF_MIN_CHUNKS"); return v != nullptr ? (int64_t) std::max(1, std::atoi(v)) : (int64_t) 1; }();   // pair jobs want deep groups: a prompt of >= min_chunks * 512 tokens is cut into at least that many chunks
+-        if (min_chunks > 1 && n >= min_chunks * 512 && (n + tc - 1) / tc < min_chunks) tc = std::min<int64_t>(tc, (((n + min_chunks - 1) / min_chunks) + 15) & ~(int64_t) 15);
++        static const int64_t min_chunks_env = [] { const char* v = std::getenv("STRATA_PF_MIN_CHUNKS"); return v != nullptr ? (int64_t) std::max(1, std::atoi(v)) : (int64_t) 1; }();   // pair jobs want deep groups: a prompt of >= min_chunks * 512 tokens is cut into at least that many chunks
++        const int64_t min_chunks = pf_dyn().mc >= 1 ? (int64_t) pf_dyn().mc : min_chunks_env;
++        const int64_t mc_div = pf_dyn().div >= 16 ? (int64_t) pf_dyn().div : (int64_t) 512;
++        if (min_chunks > 1 && n >= min_chunks * mc_div && (n + tc - 1) / tc < min_chunks) tc = std::min<int64_t>(tc, (((n + min_chunks - 1) / min_chunks) + 15) & ~(int64_t) 15);
+         return tc;
+     }();
+     const bool helped = single_chunk && bind_stage_helper(n);
+@@ -2514,8 +2547,8 @@
+             m.mac_x16 = (uint16_t*) px; m.mac_x32 = (float*) p32; m.mac_y32 = (float*) py; m.mac_y16h = (uint16_t*) py16;
+             m.mac_wh.assign((size_t) m.T_max * K, 0.0f);
+         }
+-        if (mac_pf && pf_pair() && pf_mac_y16() && m.pairs[0].x16 == nullptr) {   // STRATA_PF_PAIR: per pair of a lockstep group: the parked x rows + the job's y rows of two chunks
+-            const size_t pb = (((size_t) m.T_max * N * 2) * 2 + 16383) & ~(size_t) 16383;
++        if (mac_pf && pf_pair_env() > 0 && pf_mac_y16() && m.pairs[0].x16 == nullptr) {   // STRATA_PF_PAIR=N: per job of a lockstep group: the parked x rows + the job's y rows of up to N chunks (N = the env value; STRATA_PF_CFG can only lower it)
++            const size_t pb = (((size_t) m.T_max * N * 2) * (size_t) pf_pair_env() + 16383) & ~(size_t) 16383;
+             for (int pi = 0; pi < 6; ++pi) {
+                 void *px2 = nullptr, *py2 = nullptr;
+                 if (posix_memalign(&px2, 16384, pb) != 0 || posix_memalign(&py2, 16384, pb) != 0) { err = "prefill: cannot allocate the pair-job buffers"; return false; }
+@@ -3389,7 +3422,7 @@
+                             if (any_cold) {
+                                 if (xp8_x) {
+                                     strata::prefill::xport8_quant(m.mixed_h, m.x8_dev, (int64_t) (T * N), m.cs);   // 53% of the fp16 bytes cross the link
+-                                    cudaMemcpyAsync(m.mac_x8, m.x8_dev, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), cudaMemcpyDeviceToHost, m.cs);
++                                    cudaMemcpyAsync(m.mac_x8, m.x8_dev, (strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16383) & ~(size_t) 16383, cudaMemcpyDeviceToHost, m.cs);   // whole pages: no tail edge for the lazy download
+                                     mac_x8 = true;
+                                 } else {
+                                     cudaMemcpyAsync(m.mac_x16, m.mixed_h, (size_t) T * N * 2, cudaMemcpyDeviceToHost, m.cs);
+@@ -4260,19 +4293,25 @@
+                             const auto t0 = Clk::now();
+                             { volatile uint8_t t = ((volatile uint8_t*) (mac_x8 ? m.mac_x8 : (uint8_t*) m.mac_x16))[0]; (void) t; }   // the first touch downloads the whole lazy range over the link
+                             const auto t1 = Clk::now();
+-                            // STRATA_PF_PAIR roles (lockstep group, chunks 2p / 2p + 1): 1 = leader (parks its x rows + lists), 2 = follower (submits the shared job), 0 = alone
++                            // STRATA_PF_PAIR=N roles (lockstep group, the chunks of one job): 1 = first member (parks its lists, collects the job), 2 = middle member (parks), 3 = last member (submits the shared job), 0 = alone
+                             Impl::PairSt* ps = nullptr;
+-                            int pr_role = 0;
+-                            int64_t pr_y_off = 0;
++                            int pr_role = 0, pr_mi = 0, pr_sz = 1;
++                            int64_t pr_y_off = 0, pr_x_off = 0;
+                             const uint16_t* y16src = m.mac_y16h;
+                             if (ls != nullptr && ls->pair && half_path) {
+-                                ps = &m.pairs[lj / 2];
+-                                if (lj % 2 == 0) pr_role = lj + 1 < ls->n ? 1 : 0;
+-                                else if (ps->pending && ps->l == l) { pr_role = 2; pr_y_off = ps->T0; }
++                                const int q = ls->job_of(lj);
++                                const int ja = ls->jb[(size_t) q];
++                                pr_sz = ls->jb[(size_t) q + 1] - ja; pr_mi = lj - ja;
++                                ps = &m.pairs[q];
++                                if (pr_sz < 2) pr_role = 0;
++                                else if (pr_mi == 0) pr_role = 1;
++                                else if (pr_mi < pr_sz - 1) { if (ps->l == l && ps->nparked == pr_mi) pr_role = 2; }
++                                else if (ps->l == l && ps->nparked == pr_sz - 1) pr_role = 3;
++                                if (pr_role >= 2) pr_x_off = ps->mem[pr_mi - 1].T0 + ps->mem[pr_mi - 1].T;
++                                pr_y_off = pr_x_off;
+                             }
+                             uint16_t* xdst = m.mac_x16;
+-                            if (pr_role == 1) xdst = ps->x16;
+-                            else if (pr_role == 2) xdst = ps->x16 + (size_t) ps->T0 * N;
++                            if (pr_role != 0) xdst = ps->x16 + (size_t) pr_x_off * N;
+                             if (mac_x8) strata::prefill::xport8::dequant(m.mac_x8, xdst, (int64_t) (T * N), pf_xport8_threads());   // NEON: the lane's fp16 input rows
+                             else if (xdst != m.mac_x16) std::memcpy(xdst, m.mac_x16, (size_t) T * N * 2);
+                             const double xdq_ms = std::chrono::duration<double, std::milli>(Clk::now() - t1).count();
+@@ -4324,23 +4363,29 @@
+                                 void* job = nullptr;
+                                 const auto tsb0 = Clk::now();
+                                 int rcs = 0;
+-                                if (pr_role == 1) {   // pair leader: park the x rows (already in the pair's buffer) and the lists; the follower's F turn submits the shared job
+-                                    ps->cold = m.mac_cold; ps->eidx = eidx; ps->ridx = ridx; ps->wt = wt;
+-                                    ps->T0 = T; ps->l = l; ps->pending = true; ps->job = nullptr;   // (y_ok is NOT reset here: the previous layer's follower B turn may still be to come)
+-                                } else if (pr_role == 2) {   // pair follower: the union of both chunks' cold experts, both chunks' pairs (rows of the follower offset by T0), one job
++                                if (pr_role == 1 || pr_role == 2) {   // park the x rows (already in the job's buffer) and the lists; the last member's F turn submits the shared job
++                                    Impl::PairSt::Mem& me = ps->mem[pr_mi];
++                                    me.cold = m.mac_cold; me.eidx = eidx; me.ridx = ridx; me.wt = wt;
++                                    me.T0 = pr_x_off; me.T = T;
++                                    ps->l = l; ps->nparked = pr_mi + 1; ps->job = nullptr;   // (y_ok is NOT reset here: the previous layer's last member B turn may still be to come)
++                                } else if (pr_role == 3) {   // the union of all members' cold experts, all members' pairs (rows offset by the member's start), one job
+                                     const int ne = (int) m.g->n_expert;
+                                     std::vector<int32_t>& pos = m.pair_pos; std::vector<int32_t>& U = m.pair_u;
+                                     pos.assign((size_t) ne, -1); U.clear();
+-                                    for (int32_t e : ps->cold) pos[(size_t) e] = 0;
++                                    for (int i = 0; i < pr_sz - 1; ++i) for (int32_t e : ps->mem[i].cold) pos[(size_t) e] = 0;
+                                     for (int32_t e : m.mac_cold) pos[(size_t) e] = 0;
+                                     for (int32_t e = 0; e < ne; ++e) if (pos[(size_t) e] == 0) { pos[(size_t) e] = (int32_t) U.size(); U.push_back(e); }
+                                     std::vector<int32_t>& pe = m.pair_e; std::vector<int32_t>& pr = m.pair_r; std::vector<float>& pw = m.pair_w;
+                                     pe.clear(); pr.clear(); pw.clear();
+-                                    for (size_t k = 0; k < ps->eidx.size(); ++k) { pe.push_back(pos[(size_t) ps->cold[(size_t) ps->eidx[k]]]); pr.push_back(ps->ridx[k]); pw.push_back(ps->wt[k]); }
+-                                    for (size_t k = 0; k < eidx.size(); ++k) { pe.push_back(pos[(size_t) m.mac_cold[(size_t) eidx[k]]]); pr.push_back(ridx[k] + (int32_t) ps->T0); pw.push_back(wt[k]); }
+-                                    rcs = strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), U.data(), (int) U.size(), ps->x16, (int) (ps->T0 + T),
++                                    for (int i = 0; i < pr_sz - 1; ++i) {
++                                        Impl::PairSt::Mem& me = ps->mem[i];
++                                        for (size_t k = 0; k < me.eidx.size(); ++k) { pe.push_back(pos[(size_t) me.cold[(size_t) me.eidx[k]]]); pr.push_back(me.ridx[k] + (int32_t) me.T0); pw.push_back(me.wt[k]); }
++                                    }
++                                    for (size_t k = 0; k < eidx.size(); ++k) { pe.push_back(pos[(size_t) m.mac_cold[(size_t) eidx[k]]]); pr.push_back(ridx[k] + (int32_t) pr_x_off); pw.push_back(wt[k]); }
++                                    ps->mem[pr_mi].T0 = pr_x_off; ps->mem[pr_mi].T = T;
++                                    rcs = strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), U.data(), (int) U.size(), ps->x16, (int) (pr_x_off + T),
+                                                                  (int64_t) pe.size(), pe.data(), pr.data(), pw.data(), ps->y16, &ps->job, mm);
+-                                    ps->pending = false;
++                                    ps->nparked = 0;
+                                 } else {
+                                     rcs = half_path
+                                         ? strata_pf_mac_submit_h(m.src, (int) l, (int) (l & 1), m.mac_cold.data(), (int) m.mac_cold.size(), m.mac_x16, (int) T,
+@@ -4357,14 +4402,14 @@
+                                 else cudaMemcpyAsync(m.inj, m.INJ_x[sj], (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
+                                 const auto tw = Clk::now();
+                                 int rcw = 0;
+-                                if (pr_role == 1) {   // the shared job: the leader's B turn (before the follower's) collects it into the pair's y buffer
+-                                    if (ps->job == nullptr) { err = "prefill: the pair's Mac job was never submitted at layer " + std::to_string(l) + " (the follower chunk had no cold experts)"; return false; }
++                                if (pr_role == 1) {   // the shared job: the first member's B turn (before the other members') collects it into the job's y buffer
++                                    if (ps->job == nullptr) { err = "prefill: the pair's Mac job was never submitted at layer " + std::to_string(l) + " (a later member chunk had no cold experts)"; return false; }
+                                     rcw = strata_pf_mac_wait(ps->job);
+-                                    ps->job = nullptr; ps->y_ok = true;
++                                    ps->job = nullptr; ps->y_ok = true; ps->y_left = pr_sz - 1;
+                                     y16src = ps->y16;
+-                                } else if (pr_role == 2) {
++                                } else if (pr_role >= 2) {
+                                     if (!ps->y_ok) { err = "prefill: the pair's Mac rows were not collected at layer " + std::to_string(l); return false; }
+-                                    ps->y_ok = false;
++                                    if (--ps->y_left <= 0) ps->y_ok = false;
+                                     y16src = ps->y16 + (size_t) pr_y_off * N;
+                                 } else {
+                                     rcw = strata_pf_mac_wait(job);
+@@ -4665,7 +4710,8 @@
+     };
+     {
+         const strata::kernels::cpu::ExpertLayout& lay_g = strata::kernels::cpu::expert_layout();
+-        const int G = pf_group_n();
++        const int dyn_g = pf_dyn().g;
++        const int G = dyn_g >= 1 ? std::min(dyn_g, pf_group_n()) : pf_group_n();
+         const bool lockstep_ok = G > 1 && !pf_group_plain() && pf_mac_enabled() && lay_g.exl3 && m.host_res != nullptr && m.cache != nullptr && m.src != nullptr &&
+                                  m.mac_y_dev != nullptr && hand_in_ == nullptr && next_ == nullptr && !m.pp && !kv_prefetch && m.T <= 16384 &&
+                                  (int) m.R_x.size() + 1 >= G && (int) m.steps_x.size() + 1 >= G && (int) m.S_x.size() >= G && m.grp_zero != nullptr;
+@@ -4710,11 +4756,14 @@
+             }
+             static const int split_min = [] { const char* v = std::getenv("STRATA_PF_SPLITF_MIN"); return v != nullptr ? std::max(2, std::atoi(v)) : 2; }();   // measured: the split order gains on 4-chunk groups (+9%) and loses on 2-chunk ones (-25%)
+             const bool split = pf_splitf() && gn >= split_min;   // F1 / F2 / B turns (the y push on the copy stream behind the next chunk's front): lag >= 1, Mac jobs in flight = lag
+-            const int jobs_eff = pf_pair() ? 2 * pf_jobs() : pf_jobs();   // a pair job covers two chunks: Mac jobs in flight = lag / 2
++            const int jobs_eff = pf_pair() ? pf_pair_k() * pf_jobs() : pf_jobs();   // an N-chunk job covers N chunks: Mac jobs in flight = lag / N
+             const int lag = split ? std::clamp(pf_lag_req(G), 1, std::min(gn - 1, jobs_eff))
+                                   : std::clamp(pf_lag_req(G), 0, std::min(gn - 1, jobs_eff - 1));   // Mac jobs in flight = lag + 1 (lag when split) <= the Metal context's job slots
+             Lockstep ls(gn, LE - LB, lag, split);
+-            ls.pair = pf_pair() && pf_mac_y16() && lag >= (split ? 2 : 1);   // a pair's leader B turn must come after its follower's submit (F2 when split)
++            int ke = pf_pair() && pf_mac_y16() ? std::min(pf_pair_k(), gn) : 1;   // jobs of ke chunks at most: a job's first member's B turn must come after its last member's submit (F2 when split)
++            while (ke > 1 && lag < (split ? ke : ke - 1)) --ke;
++            ls.pair = ke >= 2;
++            if (ls.pair) { const int nj = (gn + ke - 1) / ke; ls.jb.assign(1, 0); for (int q = 0; q < nj; ++q) ls.jb.push_back(ls.jb.back() + gn / nj + (q < gn % nj ? 1 : 0)); }
+             {   // another lockstep group follows (>= 2 lane-sized chunks left)?  Its first layers' reads start behind this group's last layers
+                 int64_t rem = 0;
+                 for (int64_t c = g0 + (int64_t) gn * Tc; c < n && std::min<int64_t>(Tc, n - c) >= pf_mac_min(); c += Tc) ++rem;

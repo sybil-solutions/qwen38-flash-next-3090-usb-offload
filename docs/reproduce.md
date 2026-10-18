@@ -77,7 +77,7 @@ zsh <repo>/shim/install.sh
 ```
 
 `install.sh` copies `tgcu.py tgcu_api.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h run-strata.sh run-d7.sh srv.sh ls_srv.sh macbuild.py ...` and
-`shim/prebuilt/{tgcu_builtin.fatbin,tgcu_libc.cubin}` to `~/shim`, then builds `libcudart.dylib` (`shim/build-libcudart.sh`: clang++ -O2, CUDA 12.8 headers, CPython 3.12.15
+`shim/prebuilt/{tgcu_builtin.fatbin,tgcu_libc.cubin}` to `~/shim` (config F: also `tgusb.c` and `build-libtgusb.sh`), then builds `libcudart.dylib` (`shim/build-libcudart.sh`: clang++ -O2, CUDA 12.8 headers, CPython 3.12.15
 from uv, `-install_name @rpath/libcudart.dylib`, ad-hoc codesign; the flags are those of the deployed config-C build and on the mini the result is **byte-identical** to the deployed `libcudart.dylib`, section 11).
 Every engine start runs `pcie_cycle.py` and `usb_drain.py` (power-cycles the card over the bridge and drains stale USB state) before tinygrad opens the device;
 `TGCU_NO_USB_RESET=1` skips that.
@@ -282,7 +282,8 @@ otherwise download them) and 1-2 GB of disk. Everything it does is `nice`d; it t
 | engine | `~/strata-decode15/bin/strata_d15a` | md5 `fc6e4ddd2c9549d6c52a922ffb8ad718`, sha256 `9ac46e32...` | patches `0001`-`0019` + `run.sh`; differs only in four nvcc fatbins (8b) |
 | engine wrapper | `~/strata-decode7/run-d7.sh` | md5 `11d7d6f3` | `shim/run-d7.sh` (byte-identical) |
 | shim | `~/shim/tgcu.py`, `tgcu_api.py` | md5 `d2692131`, `9697e39c` | `shim/` (byte-identical), `patches/shim/` |
-| CUDA runtime shim | `~/shim/libcudart.dylib` | md5 `ec0517ecb87846cfcaffc02c7f99808a`, sha256 `20e8167d...` | `shim/build-libcudart.sh` on the mini (byte-identical) |
+| CUDA runtime shim | `~/shim/libcudart.dylib` | config C-E: md5 `ec0517ecb87846cfcaffc02c7f99808a`, sha256 `20e8167d...`; config F (`tgcudart.cpp` of `shim/0006`): md5 `00771147`, sha256 `339d57f5...` | `shim/build-libcudart.sh` on the mini (C-E byte-identical; F identical apart from the ad-hoc code signature, which carries the build's output name: unsigned md5 `9fdda6f2`) |
+| libusb batch executor (config F) | `~/shim/libtgusb.dylib` | md5 `7e3e04fd`, sha256 `7862dcad...` | `shim/build-libtgusb.sh` (identical apart from the code signature: unsigned md5 `35be5355`) |
 | server | `~/strata/serve/server.py`, `prefix_replay.py` | md5 `780aa4b1`, `398c46f5` | patches `0007`, `0012` |
 | Metal lib | `~/exl3/metal/libexl3metal.dylib` | sha256 `e38a011c79933a8e...` | `exl3/metal/build.sh` (byte-identical, unchanged since the host-tail step) |
 | profile | `~/exl3/placement/d8w4/profile.bin` | md5 `2ac3b7e1436c1720487993969c651c5c` | `exl3/make_profile_wholelayers.py` (byte-identical) and committed |

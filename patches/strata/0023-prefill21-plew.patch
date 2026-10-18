@@ -1,0 +1,49 @@
+# Prefill21 (2026-10-17): STRATA_PF_PLE_WARM_FIRST=1 (or plew=1 in the STRATA_PF_CFG file) reads the PLE rows of the FIRST lockstep group's later chunks ahead as well (Prefill600 only read ahead the chunks after the first group).
+# Measured with matched prompt token counts on fresh text (4 ABBA repeats, config F flags): 8K -4.2 %, 18K +0.3 %, 33K +0.3 %: no gain, so it is OFF in config F (the code stays behind the switch).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0022, applied in order with `git apply -p1`.
+
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -228,18 +228,18 @@
+ // fixed cost (decoding every cold expert's weights, ~50 ms) is paid once per two chunks instead of once per chunk.
+ // Prefill20: STRATA_PF_CFG=<file>, re-read at the start of every Prefill::run_impl ("mc=6 div=512 pair=2 g=6 lag=-1"; keys left out keep the env defaults): in-server A/B of the chunk count, the job size, the group depth and
+ // the lag without a restart.  pair=1 turns the shared jobs off, pair=N (2..STRATA_PF_PAIR) caps them at N chunks; g=N caps the group at N chunks; mc = min chunks, div = the tokens per chunk below which mc is not forced (512).
+-struct PfDyn { std::atomic<int> mc{-1}, div{-1}, pair{-1}, g{-1}, lag{-2}; };
++struct PfDyn { std::atomic<int> mc{-1}, div{-1}, pair{-1}, g{-1}, lag{-2}, plew{-1}; };   // Prefill21: plew=1 reads the PLE rows of the FIRST group's later chunks ahead as well (0 = Prefill600 behaviour)
+ inline PfDyn& pf_dyn() { static PfDyn d; return d; }
+ inline void pf_dyn_refresh() {
+     static const char* path = std::getenv("STRATA_PF_CFG");
+     PfDyn& d = pf_dyn();
+-    d.mc = -1; d.div = -1; d.pair = -1; d.g = -1; d.lag = -2;
++    d.mc = -1; d.div = -1; d.pair = -1; d.g = -1; d.lag = -2; d.plew = -1;
+     if (path == nullptr) return;
+     FILE* f = std::fopen(path, "r");
+     if (f == nullptr) return;
+     char k[16]; int v = 0;
+     while (std::fscanf(f, " %15[a-z]=%d", k, &v) == 2) {
+-        if (!std::strcmp(k, "mc")) d.mc = v; else if (!std::strcmp(k, "div")) d.div = v; else if (!std::strcmp(k, "pair")) d.pair = v; else if (!std::strcmp(k, "g")) d.g = v; else if (!std::strcmp(k, "lag")) d.lag = v;
++        if (!std::strcmp(k, "mc")) d.mc = v; else if (!std::strcmp(k, "div")) d.div = v; else if (!std::strcmp(k, "pair")) d.pair = v; else if (!std::strcmp(k, "g")) d.g = v; else if (!std::strcmp(k, "lag")) d.lag = v; else if (!std::strcmp(k, "plew")) d.plew = v;
+     }
+     std::fclose(f);
+ }
+@@ -2429,15 +2429,17 @@
+             ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
+                 return ple_gather(c0, b, ple_next_err);
+             });
+-        if (ple_on && n > Tc * std::max(1, pf_group_n()) && !ple_warm_thr.joinable()) {   // Prefill600: the rows of the chunks after the first group are read ahead (a chunk's gather only started when the one before it landed at layer 1: ~0.75 s each on fresh text, chained)
++        static const int plew_env = [] { const char* v = std::getenv("STRATA_PF_PLE_WARM_FIRST"); return v != nullptr ? std::atoi(v) : 0; }();
++        const int plew_dyn = pf_dyn().plew.load(), plew = plew_dyn >= 0 ? plew_dyn : plew_env;
++        if (ple_on && (n > Tc * std::max(1, pf_group_n()) || (plew >= 1 && n > Tc)) && !ple_warm_thr.joinable()) {   // Prefill600: the rows of the chunks after the first group are read ahead (a chunk's gather only started when the one before it landed at layer 1: ~0.75 s each on fresh text, chained); Prefill21 plew=1: the first group's later chunks too
+             static const int warm_ahead = [] { const char* v = std::getenv("STRATA_PF_PLE_WARM_AHEAD"); return v != nullptr ? std::atoi(v) : 12; }();
+             if (warm_ahead > 0)
+-                ple_warm_thr = std::thread([&ss, tokens, n, prev0, Tc, &ple_landed, &ple_warm_stop] {
++                ple_warm_thr = std::thread([&ss, tokens, n, prev0, Tc, plew, &ple_landed, &ple_warm_stop] {
+                     std::this_thread::sleep_for(std::chrono::milliseconds(20));   // the first chunk's own gather is queued first
+                     auto at = [&](int64_t i) { return i < 2 ? prev0[i] : (int32_t) tokens[i - 2]; };
+                     std::vector<uint32_t> rows;
+                     std::string werr;
+-                    for (int64_t k = std::max<int64_t>(1, pf_group_n()), nk = (n + Tc - 1) / Tc; k < nk && !ple_warm_stop.load(); ++k) {   // (the first group's rows are needed within a second of the start: warming them only queues behind/ahead of each other on the same SSD)
++                    for (int64_t k = plew >= 1 ? 1 : std::max<int64_t>(1, pf_group_n()), nk = (n + Tc - 1) / Tc; k < nk && !ple_warm_stop.load(); ++k) {   // (Prefill600: the first group's rows are needed within a second of the start; Prefill21 plew=1 warms them anyway)
+                         while (!ple_warm_stop.load() && k > ple_landed.load(std::memory_order_relaxed) + warm_ahead) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                         if (ple_warm_stop.load()) break;
+                         const int64_t c1 = k * Tc, T1 = std::min(Tc, n - c1);

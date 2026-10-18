@@ -37,8 +37,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
   for p in $REPO/patches/strata/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied $(basename $p)"; done
   rm -rf $WORK/vis && mkdir -p $WORK/vis/tools && cp -r $WORK/strata/tools/vision $WORK/vis/tools/ && cd $WORK/vis && git init -q . 2>/dev/null
   git apply --check $REPO/patches/vision/0001-strata-vision-metal-macos.patch; echo "vision patch applies to tools/vision"
-  # config E (FewerTrips19 = config D + patch 0021): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
-  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-e-sha256.txt; config-d-sha256.txt is the manifest before 0021, config-c-sha256.txt before 0020)
+  # config F (Prefill22 = config E + patches 0022/0023 and shim/0006): the shim patches apply to their base (the host-tail shim) and give the shipped shim/ files; every file of the patched Strata tree
+  # and every shipped shim / data file has the sha256 of the file the live engine was built from (results/verification/config-f-sha256.txt; config-e-sha256.txt is the manifest before 0022, config-d-sha256.txt before 0021, config-c-sha256.txt before 0020)
   rm -rf $WORK/shimchk && mkdir -p $WORK/shimchk/shim && cp $REPO/patches/shim/base/* $WORK/shimchk/shim/ && cd $WORK/shimchk && git init -q . 2>/dev/null || true
   for p in $REPO/patches/shim/0*.patch; do git apply --check -p1 $p; git apply -p1 $p; echo "applied shim/$(basename $p)"; done
   for f in tgcu.py tgcu_api.py tgcudart.cpp; do cmp $WORK/shimchk/shim/$f $REPO/shim/$f || fail "patches/shim/base + 0*.patch differ from shim/$f"; done
@@ -48,8 +48,8 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
     case $h in ""|\#*) continue;; esac
     case $f in shim/*|exl3/*) f=$REPO/$f;; *) f=$WORK/strata/$f;; esac
     expect_sha $f $h "${f#$REPO/}"; n=$((n + 1))
-  done < $REPO/results/verification/config-e-sha256.txt
-  echo "$n files of config E match results/verification/config-e-sha256.txt"
+  done < $REPO/results/verification/config-f-sha256.txt
+  echo "$n files of config F match results/verification/config-f-sha256.txt"
   logged profile-d8w4 1 env STRATA_TOOLS=$WORK/strata/tools python3 $REPO/exl3/make_profile_wholelayers.py $WORK/d8w4 0,1,2,6
   [ "$(md5 -q $WORK/d8w4/profile.bin)" = 2ac3b7e1436c1720487993969c651c5c ] && echo "exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH" || fail "d8w4 profile does not reproduce"
 }
@@ -67,14 +67,21 @@ step_metal() {     # libexl3metal parity (vs NEON + float64 reference), negative
   [ -n "$lib" ] || fail "no libexl3metal: set LIBEXL3METAL=<dylib built with exl3/metal/build.sh on a Mac with the Metal toolchain>"
   logged metal-test 6 nice -n 10 $PYTHON $REPO/exl3/metal/test_exl3_metal.py --lib $lib --cpu-lib $WORK/cpu/libexl3cpu.dylib --pack $PACK_BIN --receipt $WORK/metal_receipt.json
 }
-step_cudart() {    # the CUDA-runtime shim compiles; exported symbol set printed (deployed one: 136 symbols)
-  say "cudart: build shim/libcudart.dylib"
+step_cudart() {    # the CUDA-runtime shim and the libusb batch executor compile; exported symbol set printed (deployed libcudart: 140 symbols); unsigned binaries equal the deployed ones
+  say "cudart: build shim/libcudart.dylib and shim/libtgusb.dylib"
   logged cudart-build 2 zsh $REPO/shim/build-libcudart.sh $WORK/cudart
   local n=$(nm -gU $WORK/cudart/libcudart.dylib | wc -l | tr -d ' ')
-  [ "$n" = 136 ] && echo "exported symbols: $n MATCH (deployed: 136)" || fail "libcudart exports $n symbols, the deployed one 136"
-  local got=$(sha_of $WORK/cudart/libcudart.dylib) want=20e8167d271ba797fa12e1442dbc155a6c6cc6405dc330a8dd92b05a14508b1d
-  [ "$got" = $want ] && echo "libcudart.dylib sha256 $got MATCH (the deployed config-C one)" \
-    || echo "libcudart.dylib sha256 $got differs from the deployed $want: byte-identical only with the mini's toolchain (Apple clang 21, MacOSX26.5.sdk, uv CPython 3.12.15); not a failure"
+  [ "$n" = 140 ] && echo "exported symbols: $n MATCH (deployed: 140)" || fail "libcudart exports $n symbols, the deployed one 140"
+  # the ad-hoc code signature carries the build's output name, so the signed file differs between two builds of identical code: compare with the signature removed
+  cp $WORK/cudart/libcudart.dylib $WORK/cudart/libcudart.unsigned.dylib; codesign --remove-signature $WORK/cudart/libcudart.unsigned.dylib
+  local got=$(md5 -q $WORK/cudart/libcudart.unsigned.dylib) want=9fdda6f2298207462628970d312a516f
+  [ "$got" = $want ] && echo "libcudart.dylib (signature removed) md5 $got MATCH (the deployed config-F one, signed sha256 339d57f5d475...)" \
+    || echo "libcudart.dylib (signature removed) md5 $got differs from the deployed $want: byte-identical only with the mini's toolchain (Apple clang 21, MacOSX26.5.sdk, uv CPython 3.12.15); not a failure"
+  logged tgusb-build 2 zsh $REPO/shim/build-libtgusb.sh $WORK/cudart
+  cp $WORK/cudart/libtgusb.dylib $WORK/cudart/libtgusb.unsigned.dylib; codesign --remove-signature $WORK/cudart/libtgusb.unsigned.dylib
+  got=$(md5 -q $WORK/cudart/libtgusb.unsigned.dylib) want=35be5355eb6cf0e63ee3a9cac13b4bbb
+  [ "$got" = $want ] && echo "libtgusb.dylib (signature removed) md5 $got MATCH (the deployed config-F one, signed sha256 7862dcad0ab5...)" \
+    || echo "libtgusb.dylib (signature removed) md5 $got differs from the deployed $want: toolchain-dependent; not a failure"
 }
 step_fatbins() {   # sm_86 fatbins of the EXL3 engine kernels (nvcc 13.4 in the strata-cuda container) + the host library around them
   say "fatbins: exl3_strata / _recon / _pf with nvcc 13.4 in the container, then strata_m4/build.sh"

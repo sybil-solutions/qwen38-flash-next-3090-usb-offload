@@ -1,0 +1,390 @@
+# Prefill21 (2026-10-17, config F): the USB transfer path of the prompt lane and of the decode ring.
+# tgcu.py: asynchronous libusb batches through libtgusb.dylib (shim/tgusb.c): TGCU_USB_NPIPE=1 (the upload / download round loops of >= 32 KiB run natively: arm + bulk queued back to back),
+#   TGCU_USB_SUBP=1 (pushbuffer + ring entry + GPPut + doorbell of a submission as one batch; the semaphore poll as one request + completion pair), TGCU_USB_FUSE=1 (a small upload's submission + arm + payload as one batch),
+#   TGCU_USB_FENCE=11 (default; bit 0 a fence before every control transfer that follows a bulk, bit 1 between an arm and its bulk, bit 3 between a stream header and its bulk; all three are REQUIRED:
+#   with fence 0 or 8 a 3.4 GB byte-exact stress under 8 CPU hogs timed out, EP0 and bulk ordering is not guaranteed); TGCU_P21_FLAG=<file> ("npipe=1 subp=1 fuse=1 npmin=32768 pool=3") re-reads the same switches every 0.2 s for in-server A/B.
+# tgcudart.cpp: TGCU_LAZY_POOL=N (default 0 = off): dead lazy shadows stay allocated for the next lazy download. NOT in config F: with it the teacher-forced quality flow crashes the engine deterministically
+#   ('bulk IN short read' in hs_wait of the decode ring; every arm without the pool passes), and it measured +0.9 % at 18K at best.
+# Base: patches/shim/base + 0001..0005.
+
+diff --git a/shim/tgcu.py b/shim/tgcu.py
+--- a/shim/tgcu.py
++++ b/shim/tgcu.py
+@@ -537,20 +537,24 @@
+   def _submit(self, cmds:list[int]):
+     pb = array.array("I", cmds).tobytes()
+     off = self._transient(len(pb))
+-    self.ctrl_mv[off:off + len(pb)] = pb
+     fifo = self.fifo
+     put = fifo.put_value.as_memoryview(allow_zero_copy=True).cast("Q")
+     p = put[0]
+     entry = (self.ctrl_va + off) | ((len(pb) // 4) << 42) | (1 << 41)
+-    ring = fifo.ring.host
+-    ring[(p % fifo.entries) * 8:(p % fifo.entries) * 8 + 8] = struct.pack("<Q", entry)
+-    put[0] = p + 1
+-    if _POKE1 & 8:   # GPPut and doorbell: one USB control transfer each instead of control + bulk
+-      _w32(fifo.gpput.host, 0, (p + 1) % fifo.entries)
+-      _w32(self.dev.gpu_mmio, 0x90, fifo.token)
++    if _tgu is not None and flag("subp", _SUBP):   # Prefill21: pushbuffer, ring entry, GPPut and doorbell as one asynchronous USB batch (tgusb21.c)
++      _pipe_submit(pb, self.ctrl_mv.addr + off, fifo.ring.host.addr + (p % fifo.entries) * 8, entry, fifo.gpput.host.addr, (p + 1) % fifo.entries, self.dev.gpu_mmio.addr + 0x90, fifo.token)
++      put[0] = p + 1
+     else:
+-      fifo.gpput.host[0:4] = struct.pack("<I", (p + 1) % fifo.entries)
+-      self.dev.gpu_mmio[0x90 // 4] = fifo.token # usermode doorbell in BAR0, a PCIe write over USB
++      self.ctrl_mv[off:off + len(pb)] = pb
++      ring = fifo.ring.host
++      ring[(p % fifo.entries) * 8:(p % fifo.entries) * 8 + 8] = struct.pack("<Q", entry)
++      put[0] = p + 1
++      if _POKE1 & 8:   # GPPut and doorbell: one USB control transfer each instead of control + bulk
++        _w32(fifo.gpput.host, 0, (p + 1) % fifo.entries)
++        _w32(self.dev.gpu_mmio, 0x90, fifo.token)
++      else:
++        fifo.gpput.host[0:4] = struct.pack("<I", (p + 1) % fifo.entries)
++        self.dev.gpu_mmio[0x90 // 4] = fifo.token # usermode doorbell in BAR0, a PCIe write over USB
+     for s in self.seg_touched: self.seg_last[s] = self.sem_value   # this submission (or a later one) is the last to read the segments it wrote
+     self.seg_touched.clear()
+ 
+@@ -738,6 +742,48 @@
+ def _w32(mmio, off:int, val:int):
+   a = mmio.addr + off
+   mmio.usb.pcie_request(0x60 if a >> 32 else 0x40, a, val & 0xffffffff)   # 3DW header for a 32-bit address, 4DW above
++# Prefill21: asynchronous USB batches (tgusb21.c, libtgusb.dylib next to this file).  TGCU_USB_NPIPE=1: the pipelined upload / download loops run natively (arm + bulk and the semaphore polls queued back to back);
++# TGCU_USB_SUBP=1: pushbuffer / ring entry / GPPut / doorbell of every submission as one batch; TGCU_USB_FUSE=1: a small upload's submission + arm + payload as one batch; TGCU_USB_FENCE: 1 = a fence before every control
++# transfer behind a bulk, 2 = between an arm and its bulk.  TGCU_P21_FLAG=<file> ("npipe=1 subp=0 ..."): the same switches re-read every 0.2 s, for in-server A/B.
++_NPIPE, _SUBP, _FUSE = (int(os.getenv(k, "0")) for k in ("TGCU_USB_NPIPE", "TGCU_USB_SUBP", "TGCU_USB_FUSE"))
++_FLAGF = os.getenv("TGCU_P21_FLAG"); _FLAGS: dict = {}; _FLAGT = [0.0]
++def flag(name:str, default:int=0) -> int:
++  if _FLAGF is None: return default
++  t = time.perf_counter()
++  if t - _FLAGT[0] > 0.2:
++    _FLAGT[0] = t
++    try: _FLAGS.clear(); _FLAGS.update({k: int(v) for k, v in (x.split("=") for x in open(_FLAGF).read().split())})
++    except Exception: _FLAGS.clear()
++  return _FLAGS.get(name, default)
++_tgu = None
++def _tgu_load(usb):
++  global _tgu
++  if _tgu is not None: return
++  import ctypes
++  lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libtgusb.dylib"))
++  d = _usbmod.libusb.dll
++  def sym(n): return ctypes.cast(getattr(d, n), ctypes.c_void_p).value
++  lib.tgu_init.argtypes = [ctypes.c_void_p] * 5; lib.tgu_init.restype = ctypes.c_int
++  if lib.tgu_init(sym("libusb_alloc_transfer"), sym("libusb_submit_transfer"), sym("libusb_handle_events_timeout"), ctypes.cast(usb.handle, ctypes.c_void_p), ctypes.cast(_usbmod.USB3.ctx(), ctypes.c_void_p)): raise RuntimeError("tgu_init failed")
++  u64, u32, i32, vp, dbl = ctypes.c_uint64, ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_double
++  lib.tgu_fence.argtypes = [i32]; lib.tgu_fence.restype = None
++  lib.tgu_read32.argtypes = [u64, ctypes.POINTER(u32)]; lib.tgu_read32.restype = i32
++  lib.tgu_wait_sem.argtypes = [u64, u32, dbl]; lib.tgu_wait_sem.restype = i32
++  lib.tgu_submit.argtypes = [vp, i32, u64, u64, u32, u32, i32, i32, u64, u32, u64, u32, i32, i32, vp, i32, i32]; lib.tgu_submit.restype = i32
++  lib.tgu_h2d_pipe.argtypes = [vp, u64, vp, u64, u32, u32, i32, i32, i32, i32, dbl]; lib.tgu_h2d_pipe.restype = i32
++  lib.tgu_d2h_pipe.argtypes = [vp, u64, vp, vp, i32, i32, i32, u64, u32, u64, u32, dbl]; lib.tgu_d2h_pipe.restype = i32
++  lib.tgu_fence(int(os.getenv("TGCU_USB_FENCE", "11")))   # bit 0: a fence after the pushbuffer bulk, 1: between an arm and its bulk, 3: between a stream header and its bulk (all needed: tgusb21.c); 2 / 8 alone fail under CPU load
++  _tgu = lib
++def _ptr(buf) -> int:   # the address of a bytes / bytearray / writable memoryview
++  import ctypes
++  if isinstance(buf, bytes): return ctypes.cast(ctypes.c_char_p(buf), ctypes.c_void_p).value
++  mv = memoryview(buf)
++  if mv.readonly: raise ValueError("read-only buffer")
++  return ctypes.addressof(ctypes.c_char.from_buffer(mv))
++def _pipe_submit(pb:bytes, pb_addr:int, entry_addr:int, entry:int, gpput_addr:int, gpput_val:int, db_addr:int, db_val:int, arm=None, data=None, arm_first:int=0):
++  rc = _tgu.tgu_submit(_ptr(pb), len(pb) // 4, pb_addr, entry_addr, entry & 0xffffffff, entry >> 32, 1, 1, gpput_addr, gpput_val, db_addr, db_val,
++                       arm[0] if arm else -1, arm[1] if arm else 0, _ptr(data) if data is not None else None, len(data) if data is not None else 0, arm_first)
++  if rc: raise RuntimeError(f"tgu_submit failed: {rc}")
+ _PROF_ACC = [[0.0, 0.0, 0, 0.0, 0.0], [0.0, 0.0, 0, 0.0, 0.0]]   # [h2d, d2h]: submit s, ce-wait s, calls, control s, bulk s
+ _SUB_ACC = [[0.0, 0.0, 0.0, 0.0, 0.0]]
+ def _prof_dump():
+@@ -755,6 +801,7 @@
+     # COPY0 in a channel group of its own: time-sliced against the graphics group (the async CE runlists do not start here)
+     self.engine = engine_type if engine_type is not None else nvg.NV2080_ENGINE_TYPE_COPY0
+     self.usb = dev.iface.pci_dev.usb                       # the ASM2464 controller
++    if _NPIPE or _SUBP or _FUSE or _FLAGF: _tgu_load(self.usb.usb)   # Prefill21: native asynchronous USB batches
+     self.sram_va = dev.iface.ctrl.get_storage().buf + 0x5000  # GPU VA of the staging window (TRANSFER_PADDR)
+     self.cq_va = dev.iface.ctrl.get_storage().buf + 0x100c    # the bridge's completion queue word (usb_cq)
+     self.slot0, self.slot_size = iface.TRANSFER_START_SLOT, iface.SLOT_SIZE
+@@ -795,11 +842,17 @@
+     pb = array.array("I", cmds).tobytes()
+     if self.pb_head + len(pb) > 0x100000: self.pb_head = 0x10000  # callers wait on each submission, so the ring is free
+     off, self.pb_head = self.pb_head, round_up(self.pb_head + len(pb), 0x100)
++    entry = (self.va + off) | ((len(pb) // 4) << 42) | (1 << 41)
++    slot = self.put % self.ENTRIES
++    fuse, self._fuse = self._fuse, None
++    if _tgu is not None and (fuse is not None or flag("subp", _SUBP)):   # Prefill21: one asynchronous USB batch (a fused arm / arm + payload rides with it)
++      self.put += 1
++      _pipe_submit(pb, self.mv.addr + off, self.mv.addr + slot * 8, entry, self.mv.addr + self.gpput_off, self.put % self.ENTRIES, self.ctx.dev.gpu_mmio.addr + 0x90, self.token,
++                   fuse[0] if fuse else None, fuse[1] if fuse else None, fuse[2] if fuse else 0)
++      return
+     _s0 = time.perf_counter()
+     self.mv[off:off + len(pb)] = pb
+     _s1 = time.perf_counter()
+-    entry = (self.va + off) | ((len(pb) // 4) << 42) | (1 << 41)
+-    slot = self.put % self.ENTRIES
+     self.mv[slot * 8:slot * 8 + 8] = struct.pack("<Q", entry)
+     _s2 = time.perf_counter()
+     self.put += 1
+@@ -838,9 +891,13 @@
+     self._submit(cmds)
+     _t2 = time.perf_counter()
+     if between is not None: between()
+-    t0 = time.perf_counter()
+-    while struct.unpack("<I", self.mv[self.sem_off:self.sem_off + 4])[0] != self.sem_value:
+-      if time.perf_counter() - t0 > 5: raise RuntimeError("async copy timeout")
++    if _tgu is not None and flag("subp", _SUBP):   # Prefill21: the semaphore poll natively (request + completion queued back to back)
++      rc = _tgu.tgu_wait_sem(self.mv.addr + self.sem_off, self.sem_value & 0xffffffff, 5000.0)
++      if rc: raise RuntimeError(f"async copy timeout (native {rc})")
++    else:
++      t0 = time.perf_counter()
++      while struct.unpack("<I", self.mv[self.sem_off:self.sem_off + 4])[0] != self.sem_value:
++        if time.perf_counter() - t0 > 5: raise RuntimeError("async copy timeout")
+     if _PROF:
+       _t3 = time.perf_counter(); p = _PROF_ACC[1 if ring_cq else 0]
+       p[0] += _t2 - _t1; p[1] += _t3 - _t2; p[2] += 1
+@@ -861,12 +918,15 @@
+ 
+   def h2d(self, dst:int, data:bytes):
+     if self.PIPE_MIN and len(data) >= self.PIPE_MIN: return self._h2d_pipe(dst, data)
++    if _tgu is not None and flag("npipe", _NPIPE) and len(data) >= flag("npmin", 32768): return self._h2d_pipe(dst, data)   # Prefill21: the native round loop also wins at 32 KiB .. 1 MiB
+     return self._h2d_rounds(dst, data)
+ 
+   def d2h(self, src:int, n:int) -> bytes:
+     if self.PIPE_MIN and n >= self.PIPE_MIN: return self._d2h_pipe(src, n)
++    if _tgu is not None and flag("npipe", _NPIPE) and n >= flag("npmin", 32768): return self._d2h_pipe(src, n)
+     return self._d2h_rounds(src, n)
+ 
++  _fuse = None
+   def _h2d_pipe(self, dst:int, data:bytes):
+     nvg, nvm = onv.nv_gpu, onv.nvm
+     SL = self.slot_size
+@@ -875,6 +935,7 @@
+     n = len(data)
+     rounds = (n + rb - 1) // rb
+     mv = memoryview(data) if not isinstance(data, memoryview) else data
++    v0, g0 = self.sem_value, self.gate_seq
+     sem = self.va + self.sem_off
+     cmds, plan = [], []
+     for i in range(rounds):
+@@ -899,6 +960,12 @@
+     self._submit(cmds)                                      # the jobs wait on their sentinels; the pushbuffer is free again once the last one has run
+     usb = self.usb.usb
+     ub = self.usb.usb
++    if _tgu is not None and flag("npipe", _NPIPE):          # Prefill21: the round loop natively (tgusb21.c): arm + bulk queued together, the next poll behind the bulk
++      if cap > len(ub._bulk_mv): ub._bulk_buf, ub._bulk_mv = _usbmod.alloc_cbuffer(cap)
++      import ctypes
++      rc = _tgu.tgu_h2d_pipe(_ptr(data if isinstance(data, bytes) else mv), n, ctypes.addressof(ub._bulk_buf), self.mv.addr + self.sem_off, v0 & 0xffffffff, g0, self.slot0, self.PIPE_SLOTS, SL, rb, 10000.0)
++      if rc: raise RuntimeError(f"tgu_h2d_pipe failed: {rc}")
++      return
+     for i, (o, m, wire, reg, gate, sv) in enumerate(plan):
+       if i >= 2: self._wait_sem(plan[i - 2][5])             # this region's previous job has drained it
+       if wire > len(ub._bulk_mv): ub._bulk_buf, ub._bulk_mv = _usbmod.alloc_cbuffer(wire)
+@@ -940,6 +1007,15 @@
+     usb = self.usb.usb
+     hmv = self.ctx.mapped_mv
+     out = into if into is not None else bytearray(n)
++    if _tgu is not None and flag("npipe", _NPIPE):          # Prefill21: the round loop natively: arm + hold poke + bulk IN queued together, the previous round's payload copied out meanwhile
++      import ctypes
++      wmax = round_up(self.prefix + R, 512)
++      if wmax > len(usb._bulk_mv): usb._bulk_buf, usb._bulk_mv = _usbmod.alloc_cbuffer(wmax)
++      if getattr(self, "_bulkB", None) is None or len(self._bulkB) < wmax: self._bulkB = (ctypes.c_ubyte * max(wmax, 1 << 20))()
++      rc = _tgu.tgu_d2h_pipe(_ptr(out), n, ctypes.addressof(usb._bulk_buf), ctypes.addressof(self._bulkB), R, self.prefix, SL, hmv.addr + self.hold_off, base_tok & 0xffffffff,
++                             self.mv.addr + self.sem_off, self.sem_value & 0xffffffff, 30000.0)
++      if rc: raise RuntimeError(f"tgu_d2h_pipe failed: {rc}")
++      return bytes(out) if into is None else None
+     for o, m, wire, tok, sv in plan:
+       usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + SL - 1) // SL) << 8))
+       hmv[self.hold_off:self.hold_off + 4] = struct.pack("<I", tok & 0xffffffff)
+@@ -967,10 +1043,13 @@
+       buf[:len(chunk)] = chunk
+       buf[wire - 8:] = struct.pack("<Q", gate)
+       _t = [0.0, 0.0, 0.0]
++      fused = _tgu is not None and flag("fuse", _FUSE)   # Prefill21: submission + arm + payload as one asynchronous USB batch
+       def send():
++        if fused: return
+         _t[0] = time.perf_counter()
+         self.usb.usb.control_write(0xF2, value=wire // 512, index=self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
+         _t[1] = time.perf_counter(); self.usb.usb.bulk_write(bytes(buf)); _t[2] = time.perf_counter()
++      if fused: self._fuse = ((wire // 512, self.slot0 | (((wire + self.slot_size - 1) // self.slot_size) << 8)), bytes(buf), 0)
+       self._copy_and_signal(dst + o, self.sram_va, len(chunk), gate=(self.sram_va + wire - 8, gate), between=send)
+       if _PROF:
+         p = _PROF_ACC[0]; p[3] += _t[1] - _t[0]; p[4] += _t[2] - _t[1]
+@@ -983,7 +1062,10 @@
+       wire = round_up(self.prefix + m, 512)
+       # arm the read first; the copy engine fills SRAM and rings the completion queue, then the bulk IN streams it
+       _ta = time.perf_counter()
+-      self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
++      if _tgu is not None and flag("fuse", _FUSE):   # Prefill21: the arm rides in front of the submission's batch
++        self._fuse = ((wire // 512 | 0x8000, 0 | (((wire + self.slot_size - 1) // self.slot_size) << 8)), None, 1)
++      else:
++        self.usb.usb.control_write(0xF2, value=(wire // 512) | 0x8000, index=0 | (((wire + self.slot_size - 1) // self.slot_size) << 8))
+       _tb = time.perf_counter()
+       self._copy_and_signal(self.sram_va, src + o, m, ring_cq=True)
+       _tc = time.perf_counter()
+diff --git a/shim/tgcudart.cpp b/shim/tgcudart.cpp
+--- a/shim/tgcudart.cpp
++++ b/shim/tgcudart.cpp
+@@ -26,6 +26,7 @@
+ 
+ bool lazy_fault(uintptr_t a, bool write);   // below, outside the anonymous namespace
+ void lazy_reap();
++void lazy_pool_drain();   // Prefill21: the lazy-shadow pool goes back to the allocator (before any other allocation / memory census)
+ namespace {
+ 
+ std::recursive_mutex g_lock;
+@@ -432,6 +433,7 @@
+ }
+ EXPORT cudaError_t cudaMalloc(void** p, size_t size) {
+   API_ENTER("cudaMalloc");
++  lazy_pool_drain();
+   long long va = g_census ? call_i("malloc_tag", "(Ks)", (unsigned long long)size, census_tag().c_str())
+                           : call_i("malloc", "(K)", (unsigned long long)size);
+   if (va <= 0) return fail(cudaErrorMemoryAllocation, "cudaMalloc");
+@@ -538,7 +540,7 @@
+ // A copy back to the device from such a range is a VRAM copy; any host access faults and the handler downloads the
+ // bytes first (then the range is plain memory again). TGCU_LAZY_D2H_MB (default 768, 0 = off) caps the shadows; past
+ // it the oldest range is downloaded.
+-struct Lazy { uintptr_t lo, hi; uint64_t shadow; uint64_t clock; long long sem; };
++struct Lazy { uintptr_t lo, hi; uint64_t shadow; uint64_t clock; long long sem; size_t cap; };
+ std::map<uintptr_t, Lazy> g_lazy;   // by lo, under g_lock
+ size_t g_lazy_bytes = 0;
+ uint64_t g_lazy_clock = 0;
+@@ -559,7 +561,34 @@
+   }
+   return true;
+ }
+-std::vector<uint64_t> g_lazy_dead;   // shadows to free once no graph that spins on a flag can be running
++// Prefill21: TGCU_LAZY_POOL=N (default 0 = off, the Decode15 behaviour): up to N dead shadows (and TGCU_LAZY_POOL_MB MiB, default 64) stay allocated for the next lazy download instead of a Python free (a forced submit + the
++// allocator's semaphore reads, ~2 ms) and malloc (~0.2 ms) per chunk-layer on the prompt lane.  A pooled block is only ever written by a copy queued after every earlier reader of it (one in-order queue), and the
++// download of a lazy range is synchronous, so reuse needs no semaphore.  The pool is returned to the allocator by cudaMalloc / cudaMemGetInfo / cuMemCreate and after TGCU_LAZY_POOL_IDLE_MS (1500) without a lazy download.
++struct PoolBlk { uint64_t va; size_t cap; };
++const int kPoolNenv = [] { const char* e = getenv("TGCU_LAZY_POOL"); return e ? atoi(e) : 0; }();
++// TGCU_P21_FLAG=<file> ("pool=3 ...", re-read every 200 ms): the pool size without a restart, for in-server A/B; keys left out keep the env value
++static int pool_n() {
++  static const char* f = getenv("TGCU_P21_FLAG");
++  if (f == nullptr) return kPoolNenv;
++  static std::chrono::steady_clock::time_point last{};
++  static int cur = kPoolNenv;
++  const auto now = std::chrono::steady_clock::now();
++  if (now - last > std::chrono::milliseconds(200)) {
++    last = now; cur = kPoolNenv;
++    if (FILE* fp = fopen(f, "r")) {
++      char k[32]; int v = 0;
++      while (fscanf(fp, " %31[a-z0-9]=%d", k, &v) == 2) if (!strcmp(k, "pool")) cur = v;
++      fclose(fp);
++    }
++  }
++  return cur;
++}
++const size_t kPoolBytes = [] { const char* e = getenv("TGCU_LAZY_POOL_MB"); return (size_t)(e ? atoll(e) : 64) << 20; }();
++const long long kPoolIdleMs = [] { const char* e = getenv("TGCU_LAZY_POOL_IDLE_MS"); return e ? atoll(e) : 1500; }();
++std::vector<PoolBlk> g_pool;
++size_t g_pool_bytes = 0;
++std::chrono::steady_clock::time_point g_pool_used;
++std::vector<PoolBlk> g_lazy_dead;   // shadows to free (or pool) once no graph that spins on a flag can be running
+ static void lazy_release(std::map<uintptr_t, Lazy>::iterator it, bool fetch) {
+   Lazy z = it->second;
+   g_lazy.erase(it);
+@@ -567,7 +596,7 @@
+   bool ours = lazy_still_protected(z);
+   mprotect((void*)z.lo, z.hi - z.lo, PROT_READ | PROT_WRITE);   // harmless on a fresh mapping, fails on an unmapped one
+   if (ours && fetch) call_i("lazy_fetch", "(KKKL)", (unsigned long long)z.lo, (unsigned long long)z.shadow, (unsigned long long)(z.hi - z.lo), z.sem);
+-  g_lazy_dead.push_back(z.shadow);
++  g_lazy_dead.push_back(PoolBlk{z.shadow, z.cap});
+   if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu %s\n", (void*)z.lo, (size_t)(z.hi - z.lo), !ours ? "stale" : fetch ? "downloaded" : "dropped");
+ }
+ // before host bytes [lo, hi) are read (fetch) or wholly overwritten: every lazy range they touch becomes plain memory
+@@ -582,14 +611,36 @@
+     lazy_release(cur, !(overwrite && inside));
+   }
+ }
+-// dead shadows are freed at an API call when no spinning graph may run (a free synchronizes, and in a signal handler
++// dead shadows are pooled (kPoolN) or freed at an API call when no spinning graph may run (a free synchronizes, and in a signal handler
+ // there is no Python at all)
++void lazy_pool_drain() {
++  if (g_pool.empty() || !call_i("lazy_ok", nullptr)) return;
++  for (const PoolBlk& b : g_pool) call_i("free", "(K)", (unsigned long long)b.va);
++  g_pool.clear(); g_pool_bytes = 0;
++}
+ static void lazy_free_dead() {
++  if (pool_n() <= 0 && !g_pool.empty()) lazy_pool_drain();
++  if (pool_n() > 0) {
++    std::vector<PoolBlk> over;
++    for (const PoolBlk& b : g_lazy_dead) {
++      if ((int)g_pool.size() < pool_n() && g_pool_bytes + b.cap <= kPoolBytes) { g_pool.push_back(b); g_pool_bytes += b.cap; }
++      else over.push_back(b);
++    }
++    g_lazy_dead.clear();
++    if (!over.empty()) {
++      if (call_i("lazy_ok", nullptr)) for (const PoolBlk& b : over) call_i("free", "(K)", (unsigned long long)b.va);
++      else g_lazy_dead = over;
++    }
++    return;
++  }
+   if (!call_i("lazy_ok", nullptr)) return;
+-  for (uint64_t sh : g_lazy_dead) call_i("free", "(K)", (unsigned long long)sh);
++  for (const PoolBlk& b : g_lazy_dead) call_i("free", "(K)", (unsigned long long)b.va);
+   g_lazy_dead.clear();
+ }
+-void lazy_reap() { if (!g_lazy_dead.empty()) lazy_free_dead(); }
++void lazy_reap() {
++  if (!g_lazy_dead.empty()) lazy_free_dead();
++  else if (!g_pool.empty() && (pool_n() <= 0 || std::chrono::steady_clock::now() - g_pool_used > std::chrono::milliseconds(kPoolIdleMs))) lazy_pool_drain();
++}
+ bool lazy_fault(uintptr_t a, bool write) {
+   std::lock_guard<std::recursive_mutex> lk(g_lock);
+   if (g_lazy.empty()) return false;
+@@ -604,7 +655,7 @@
+     g_lazy.erase(it);
+     g_lazy_bytes -= z.hi - z.lo;
+     mprotect((void*)z.lo, z.hi - z.lo, PROT_READ | PROT_WRITE);
+-    g_lazy_dead.push_back(z.shadow);
++    g_lazy_dead.push_back(PoolBlk{z.shadow, z.cap});
+     if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu reused (dropped)\n", (void*)z.lo, (size_t)(z.hi - z.lo));
+     return true;
+   }
+@@ -623,9 +674,20 @@
+     for (auto it = g_lazy.begin(); it != g_lazy.end(); ++it) if (it->second.clock < old->second.clock) old = it;
+     lazy_release(old, true);
+   }
+-  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget)
+-  uint64_t shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
+-  if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
++  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget); Prefill21: or into the pool
++  uint64_t shadow = 0; size_t cap = hi - lo;
++  if (pool_n() > 0 && !g_pool.empty()) {
++    size_t best = g_pool.size();
++    for (size_t i = 0; i < g_pool.size(); ++i)
++      if (g_pool[i].cap >= hi - lo && g_pool[i].cap <= (hi - lo) + (hi - lo) / 2 + (1u << 20) && (best == g_pool.size() || g_pool[i].cap < g_pool[best].cap)) best = i;
++    if (best < g_pool.size()) { shadow = g_pool[best].va; cap = g_pool[best].cap; g_pool_bytes -= cap; g_pool.erase(g_pool.begin() + best); }
++    else lazy_pool_drain();   // another size: the pooled blocks go back, the new block is carved fresh
++  }
++  if (!shadow) {
++    shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
++    if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
++  }
++  g_pool_used = std::chrono::steady_clock::now();
+   const uint64_t s = (uint64_t)(uintptr_t)src;
+   if (call_i("d2d", "(KKKi)", (unsigned long long)shadow, (unsigned long long)(s + (lo - d)), (unsigned long long)(hi - lo), 0) != 0) {
+     call_i("free", "(K)", (unsigned long long)shadow);
+@@ -635,7 +697,7 @@
+   if (d + n > hi) call_i("d2h", "(KKK)", (unsigned long long)hi, (unsigned long long)(s + (hi - d)), (unsigned long long)(d + n - hi));
+   const long long sem = call_i("lazy_submit", nullptr);   // the shadow copy goes now; a fetch waits for it alone
+   mprotect((void*)lo, hi - lo, PROT_NONE);
+-  g_lazy[lo] = Lazy{lo, hi, shadow, ++g_lazy_clock, sem};
++  g_lazy[lo] = Lazy{lo, hi, shadow, ++g_lazy_clock, sem, cap};
+   g_lazy_bytes += hi - lo;
+   if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu kept in VRAM\n", (void*)lo, (size_t)(hi - lo));
+   return true;
+@@ -740,6 +802,7 @@
+ }
+ EXPORT cudaError_t cudaMemGetInfo(size_t* free_b, size_t* total) {
+   API_ENTER("cudaMemGetInfo");
++  lazy_pool_drain();
+   PyObject* r;
+   if (!call_obj(&r, "mem_info", nullptr)) return fail(cudaErrorUnknown, "mem_info");
+   *free_b = PyLong_AsSize_t(PyTuple_GetItem(r, 0)); *total = PyLong_AsSize_t(PyTuple_GetItem(r, 1));
+@@ -1073,6 +1136,7 @@
+ CUresult vmm_Create(CUmemGenericAllocationHandle* h, size_t size, const CUmemAllocationProp*, unsigned long long) {
+   if (size != kVmmGran) return CUDA_ERROR_INVALID_VALUE;
+   VMM_ENTER
++  lazy_pool_drain();
+   long long r = call_i("vmm_create", nullptr);
+   if (r <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
+   *h = (CUmemGenericAllocationHandle)r;

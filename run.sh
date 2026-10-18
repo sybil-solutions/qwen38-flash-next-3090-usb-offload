@@ -9,8 +9,8 @@
 #                           Metal toolchain when the mini does not (Command Line Tools alone have no `metal` compiler), then run ./run.sh on the mini
 #   ./run.sh stop           stop the server this script started (pid file $HOME/shim/server.pid)
 # options: --force (replace differing installed files / rebuild), --restart (stop a running server first), --verify-pack (sha256 of the whole 45.8 GB
-#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-e` = config E = config D + the decode hoist (patch 0021, STRATA_D19_HOIST=1),
-#          the recommended recipe; `-d` = config D (lazy loan refill, no hoist), `-c` = config C (blocking refill, best decode), and the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
+#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-f` = config F = config E + the asynchronous USB batches (shim/0006 + libtgusb, TGCU_USB_NPIPE/SUBP/FUSE=1)
+#          and the Prefill20 prefill patches (0022/0023), the recommended recipe; `-e` = config E (decode hoist, patch 0021, STRATA_D19_HOIST=1), `-d` = config D (lazy loan refill, no hoist), `-c` = config C (blocking refill, best decode), and the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
 # env:     RUN_ROOT (default $HOME: where shim/ exl3/ strata/ ... go; the dry run on a machine that is serving should use a scratch dir),
 #          BUNDLE (default ./out), HOST (127.0.0.1), PORT (8080), KEY_FILE ($HOME/.config/strata/flashnext.key), JOBS (host compile jobs, default 4),
 #          CLANG_BIN (directory with clang/clang++ for the CUDA host compiles of the engine; needed when `clang` is older than Apple clang 21, see below)
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 CHECK=0; FORCE=0; RESTART=0; VERIFY_PACK=0; MODE=up
-CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-e}
+CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-f}
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
@@ -247,8 +247,8 @@ install_bundle() {
   local m; for m in exl3_strata exl3_strata_recon exl3_strata_pf; do install_file "$BUNDLE/fatbins/$m.fatbin" "$HOME/exl3/$m.fatbin"; done
   # the shim, exactly as shim/install.sh lays it out
   local f
-  for f in tgcu.py tgcu_api.py tgcu_prof.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h tgcu_builtin.cu tgcu_libc.ptx \
-           run-strata.sh run-d7.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh; do install_file "$REPO/shim/$f" "$HOME/shim/$f"; done
+  for f in tgcu.py tgcu_api.py tgcu_prof.py usb_drain.py pcie_cycle.py tgcudart.cpp tgcublas.cpp tgcuda_launch.h tgcu_builtin.cu tgcu_libc.ptx tgusb.c \
+           run-strata.sh run-d7.sh srv.sh ls_srv.sh mkcfg.py macbuild.py build-libcudart.sh build-libtgusb.sh; do install_file "$REPO/shim/$f" "$HOME/shim/$f"; done
   install_tree "$REPO/shim/include" "$HOME/shim/include" "shim headers"
   install_tree "$REPO/shim/x86compat" "$HOME/shim/x86compat" "shim x86 compat headers"
   install_file "$BUNDLE/fatbins/tgcu_builtin.fatbin" "$HOME/shim/tgcu_builtin.fatbin"
@@ -338,6 +338,12 @@ build_libs() {
     PY=$py_prefix CUDA_HOST=$HOME/cuda-12.8 zsh "$HOME/shim/build-libcudart.sh" "$HOME/shim" > "$CACHE/libcudart.log" 2>&1 || { tail -20 "$CACHE/libcudart.log"; die "libcudart build failed"; }
     stamp libcudart x "$h"; ok "built libcudart.dylib ($(nm -gU "$HOME/shim/libcudart.dylib" | wc -l | tr -d ' ') exported symbols; the deployed one has 136 + the tgcuHs* ones of its newer source)"
   else ok "libcudart.dylib present"; fi
+  # libtgusb (config F: the asynchronous libusb batches tgcu.py loads next to itself when TGCU_USB_NPIPE / SUBP / FUSE are set)
+  h=$(hash_files "$REPO/shim/tgusb.c" "$REPO/shim/build-libtgusb.sh")
+  if need_build libtgusb "$HOME/shim/libtgusb.dylib" "$h"; then
+    zsh "$HOME/shim/build-libtgusb.sh" "$HOME/shim" > "$CACHE/libtgusb.log" 2>&1 || { tail -20 "$CACHE/libtgusb.log"; die "libtgusb build failed"; }
+    stamp libtgusb x "$h"; ok "built libtgusb.dylib"
+  else ok "libtgusb.dylib present"; fi
   # libstrata_exl3 (host library around the EXL3 fatbins)
   h=$(hash_files "$REPO/exl3/strata_m4/exl3_strata_host.cu" "$REPO/exl3/strata_m4/exl3_strata_recon_host.cu" "$REPO/exl3/strata_m4/exl3_strata_pf_host.cu" "$BUNDLE/fatbins/exl3_strata.fatbin" "$BUNDLE/fatbins/exl3_strata_recon.fatbin" "$BUNDLE/fatbins/exl3_strata_pf.fatbin" "$HOME/shim/libcudart.dylib")
   if need_build libstrata_exl3 "$HOME/exl3/strata_m4/libstrata_exl3.dylib" "$h"; then
@@ -427,11 +433,11 @@ WIRE_CMD='sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032
 sysnum() { sysctl -n "$1" 2>/dev/null | head -1 | tr -cd '0-9'; }
 host_prereqs() {
   step "host prerequisites ($CONFIG_NAME)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 21 patches, config C/D/E's shim); see patches/README.md";; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 23 patches, config C/D/E/F's shim); see patches/README.md";; esac
   local slots; slots=$(python3 -c "import json,sys; print(json.load(open('$CONFIG'))['env'].get('STRATA_EXL3_METAL_SLOTS', '0'))")
   local bytes=$((slots * 1867776))
   info "STRATA_EXL3_METAL_SLOTS $slots: $((bytes / 1000000)) MB of mlocked, Metal-registered expert slots on the mini side (config C ships 6400)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e) if [ "$slots" != 6400 ]; then warn "config C/D/E is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f) if [ "$slots" != 6400 ]; then warn "config C/D/E/F is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
   # wired limits: the LRU is locked memory; above the default cap mlock fails (errno 35) and the slots swap out
   local wl gl ul; wl=$(sysnum iogpu.wired_limit_mb); gl=$(sysnum vm.global_user_wire_limit); ul=$(sysnum vm.user_wire_limit)
   # iogpu.wired_limit_mb 0 = the macOS default, which scales with RAM: on the 16 GiB mini it is below 14 GiB, and then vm.global_user_wire_limit (12,451 MiB by default) shows it

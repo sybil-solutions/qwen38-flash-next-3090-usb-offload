@@ -1,0 +1,26 @@
+# Config F (Prefill22, 2026-10-17) source and artifact hashes = config E + patches/strata/0022, 0023 (prefill.cpp) + patches/shim/0006 (tgcu.py, tgcudart.cpp) + shim/tgusb.c. sha256  path  [live source it equals]
+# Strata source files = Strata v0.1.41 + patches/strata/0001..0023; each equals the file the live engine strata_p22 (md5 4180585c, = strata_p21b) was compiled from (prefill.cpp: mini strata-prefill21/src/prefill/prefill.cpp; the other files are unchanged since strata_d19b, md5 8b11081b)
+600f78b3f41d7462254f170af924249bb5aef40a7e41d7612dc48ea657481eea  src/core/verify.cpp  [mini strata-fewertrips19/src/core/verify.cpp]
+1693b8dbb622326cd6d5f8b8555178aa427866bc07a74126ba2b4f9a12ddc874  src/core/expert_source.cpp  [mini strata-decode15/src/core/expert_source.cpp]
+0620c7248de174e5700e52228fbb550a2e4caddbe473b89d7d743966e8651dbb  src/core/layer.cpp  [mini strata-decode15/src/core/layer.cpp]
+1ad4009f8a5a71d97f83d235eef88178eff4ff79e88f70d415fa659a0b0322b0  src/program/generate.cpp  [mini strata-prefill18/src/program/generate.cpp]
+d92c931c0c8bac7c07770fc1a12d31cdae9ed4a505de003c4548e3c4e0fb91fb  src/prefill/prefill.cpp  [mini strata-prefill21/src/prefill/prefill.cpp]
+2b0d1c46882c948dcca1369be36c7ce4125e9cc5117109d3ba4f3b59fa612c71  src/prefill/kernels.cu  [mini strata-xport8/src/prefill/kernels.cu]
+45dc31b5c6cf74cd16ae833978e295ee6ef63699f2f64b260a5c4a9f02ee9e7f  include/strata/prefill/kernels.hpp  [mini strata-xport8/include/strata/prefill/kernels.hpp]
+bce55ac92eb3fc84dad07365841295805daa3e326b5de41f788e0cbe0b8cc86d  include/strata/prefill/xport8.hpp  [mini strata-xport8/include/strata/prefill/xport8.hpp]
+80056191cde41f64ca7589951ac45d91992e73e3d10334d4ba8f3d54551059bf  src/prefill/xport8_kernels.cuh  [mini strata-xport8/src/prefill/xport8_kernels.cuh]
+38027db7c4523117a2bf1fe4ab09cf0990906c6e956412c92eaf93e904ca5710  include/strata/prefill/path_select.hpp  [mini strata-lockstep/include/strata/prefill/path_select.hpp]
+bb9af756b75c3f3015d336cf6e1804839e51b88c398b9e9ef3da61acc039df04  src/kernels/ngram.cpp  [mini strata-lockstep/src/kernels/ngram.cpp]
+f4b281209cfcabd4ac262f0bce43f9281c49ab34b781de110a109cb804e84c67  serve/server.py  [mini strata/serve/server.py]
+2fa9e08578304443d1ebfe54b0137b5592d2a5413770dd29413de9db993fc0df  serve/prefix_replay.py  [mini strata/serve/prefix_replay.py]
+c23c34abed8455cbabccfaa84b4a362afbcce672310a4d927928caa6099d8848  serve/test_prefix_replay.py  [mini strata/serve/test_prefix_replay.py]
+# shim and data files: the repo copy IS the deployed file (md5 compared 2026-10-17 with the mini's ~/strata-prefill22/shim, ~/shim, ~/exl3/placement/d8w4/profile.bin; tgcu_api.py, tgcublas.cpp, run-d7.sh unchanged since config E)
+8283712f6ba381a22945737135d6bad26938f44704d132d6b4be867496708503  shim/tgcu.py  [md5 1d8a41792d75aac4159bcc54c142f5f3]
+c5b4429db092534798ae5d04a153c8f00a9cb674b21c1e85115ede5939085cf1  shim/tgcu_api.py  [md5 9697e39c061999f39dd6b106feb43c1b]
+cda0a3009594fea67b90c4fe7bdf856368f25774e741f57c5a28c0000e4d9726  shim/tgcublas.cpp  [md5 c8d597b46b1893dca4b39386e9c6d7fc]
+3ee78f72659f8ed49673d5f75bcce82d1d6c1a598b663cf19c21adcb0172cef0  shim/run-d7.sh  [md5 11d7d6f36036f78b034cf93b9bf6e187]
+1f39452e0282daafff2d01656c17119fb0d58de9754cd1afb49b3650fdf0d5c6  exl3/placement/d8w4/profile.bin  [md5 2ac3b7e1436c1720487993969c651c5c]
+# shim/tgcudart.cpp is the source ~/strata-prefill21/shimsrc/tgcudart.cpp (md5 36b68450) that the deployed libcudart.dylib (sha256 339d57f5d475fb4530b689f8a819da7b24627f926227d7387af8b00a1abbc0ea, md5 00771147) was built from; shim/build-libcudart.sh rebuilds a dylib that is byte-identical to it apart from the ad-hoc code signature (unsigned md5 9fdda6f2298207462628970d312a516f, 140 exported symbols)
+cc9b3a4f709d500f5e4ab5877c4077aef976dbd5d473b853f1934cc0ce8d89be  shim/tgcudart.cpp  [md5 36b68450fb27499a553dbb2f5d514d98]
+# shim/tgusb.c is the source ~/strata-prefill21/shimsrc/tgusb21.c (md5 9a87d2f9) of the deployed libtgusb.dylib (sha256 7862dcad0ab5f3245c7ef1629fec5dfc71a920c3e5a77a11e541eed407d27f6c, md5 7e3e04fd); shim/build-libtgusb.sh rebuilds one that is identical apart from the code signature (unsigned md5 35be5355eb6cf0e63ee3a9cac13b4bbb)
+13737dd0661e58d98c9bbbd640765f19995ad64d99661a13e2b3f8f47aa1b341  shim/tgusb.c  [md5 9a87d2f97bd1b8a23887a18108d1c4f9]

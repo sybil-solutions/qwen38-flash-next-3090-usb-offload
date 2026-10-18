@@ -26,6 +26,7 @@
 
 bool lazy_fault(uintptr_t a, bool write);   // below, outside the anonymous namespace
 void lazy_reap();
+void lazy_pool_drain();   // Prefill21: the lazy-shadow pool goes back to the allocator (before any other allocation / memory census)
 namespace {
 
 std::recursive_mutex g_lock;
@@ -432,6 +433,7 @@ static std::string census_tag() {
 }
 EXPORT cudaError_t cudaMalloc(void** p, size_t size) {
   API_ENTER("cudaMalloc");
+  lazy_pool_drain();
   long long va = g_census ? call_i("malloc_tag", "(Ks)", (unsigned long long)size, census_tag().c_str())
                           : call_i("malloc", "(K)", (unsigned long long)size);
   if (va <= 0) return fail(cudaErrorMemoryAllocation, "cudaMalloc");
@@ -538,7 +540,7 @@ EXPORT cudaError_t cudaHostGetFlags(unsigned* f, void* h) {
 // A copy back to the device from such a range is a VRAM copy; any host access faults and the handler downloads the
 // bytes first (then the range is plain memory again). TGCU_LAZY_D2H_MB (default 768, 0 = off) caps the shadows; past
 // it the oldest range is downloaded.
-struct Lazy { uintptr_t lo, hi; uint64_t shadow; uint64_t clock; long long sem; };
+struct Lazy { uintptr_t lo, hi; uint64_t shadow; uint64_t clock; long long sem; size_t cap; };
 std::map<uintptr_t, Lazy> g_lazy;   // by lo, under g_lock
 size_t g_lazy_bytes = 0;
 uint64_t g_lazy_clock = 0;
@@ -559,7 +561,34 @@ static bool lazy_still_protected(const Lazy& z) {   // a freed-and-reused range 
   }
   return true;
 }
-std::vector<uint64_t> g_lazy_dead;   // shadows to free once no graph that spins on a flag can be running
+// Prefill21: TGCU_LAZY_POOL=N (default 0 = off, the Decode15 behaviour): up to N dead shadows (and TGCU_LAZY_POOL_MB MiB, default 64) stay allocated for the next lazy download instead of a Python free (a forced submit + the
+// allocator's semaphore reads, ~2 ms) and malloc (~0.2 ms) per chunk-layer on the prompt lane.  A pooled block is only ever written by a copy queued after every earlier reader of it (one in-order queue), and the
+// download of a lazy range is synchronous, so reuse needs no semaphore.  The pool is returned to the allocator by cudaMalloc / cudaMemGetInfo / cuMemCreate and after TGCU_LAZY_POOL_IDLE_MS (1500) without a lazy download.
+struct PoolBlk { uint64_t va; size_t cap; };
+const int kPoolNenv = [] { const char* e = getenv("TGCU_LAZY_POOL"); return e ? atoi(e) : 0; }();
+// TGCU_P21_FLAG=<file> ("pool=3 ...", re-read every 200 ms): the pool size without a restart, for in-server A/B; keys left out keep the env value
+static int pool_n() {
+  static const char* f = getenv("TGCU_P21_FLAG");
+  if (f == nullptr) return kPoolNenv;
+  static std::chrono::steady_clock::time_point last{};
+  static int cur = kPoolNenv;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last > std::chrono::milliseconds(200)) {
+    last = now; cur = kPoolNenv;
+    if (FILE* fp = fopen(f, "r")) {
+      char k[32]; int v = 0;
+      while (fscanf(fp, " %31[a-z0-9]=%d", k, &v) == 2) if (!strcmp(k, "pool")) cur = v;
+      fclose(fp);
+    }
+  }
+  return cur;
+}
+const size_t kPoolBytes = [] { const char* e = getenv("TGCU_LAZY_POOL_MB"); return (size_t)(e ? atoll(e) : 64) << 20; }();
+const long long kPoolIdleMs = [] { const char* e = getenv("TGCU_LAZY_POOL_IDLE_MS"); return e ? atoll(e) : 1500; }();
+std::vector<PoolBlk> g_pool;
+size_t g_pool_bytes = 0;
+std::chrono::steady_clock::time_point g_pool_used;
+std::vector<PoolBlk> g_lazy_dead;   // shadows to free (or pool) once no graph that spins on a flag can be running
 static void lazy_release(std::map<uintptr_t, Lazy>::iterator it, bool fetch) {
   Lazy z = it->second;
   g_lazy.erase(it);
@@ -567,7 +596,7 @@ static void lazy_release(std::map<uintptr_t, Lazy>::iterator it, bool fetch) {
   bool ours = lazy_still_protected(z);
   mprotect((void*)z.lo, z.hi - z.lo, PROT_READ | PROT_WRITE);   // harmless on a fresh mapping, fails on an unmapped one
   if (ours && fetch) call_i("lazy_fetch", "(KKKL)", (unsigned long long)z.lo, (unsigned long long)z.shadow, (unsigned long long)(z.hi - z.lo), z.sem);
-  g_lazy_dead.push_back(z.shadow);
+  g_lazy_dead.push_back(PoolBlk{z.shadow, z.cap});
   if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu %s\n", (void*)z.lo, (size_t)(z.hi - z.lo), !ours ? "stale" : fetch ? "downloaded" : "dropped");
 }
 // before host bytes [lo, hi) are read (fetch) or wholly overwritten: every lazy range they touch becomes plain memory
@@ -582,14 +611,36 @@ static void lazy_resolve(uintptr_t lo, uintptr_t hi, bool overwrite) {
     lazy_release(cur, !(overwrite && inside));
   }
 }
-// dead shadows are freed at an API call when no spinning graph may run (a free synchronizes, and in a signal handler
+// dead shadows are pooled (kPoolN) or freed at an API call when no spinning graph may run (a free synchronizes, and in a signal handler
 // there is no Python at all)
+void lazy_pool_drain() {
+  if (g_pool.empty() || !call_i("lazy_ok", nullptr)) return;
+  for (const PoolBlk& b : g_pool) call_i("free", "(K)", (unsigned long long)b.va);
+  g_pool.clear(); g_pool_bytes = 0;
+}
 static void lazy_free_dead() {
+  if (pool_n() <= 0 && !g_pool.empty()) lazy_pool_drain();
+  if (pool_n() > 0) {
+    std::vector<PoolBlk> over;
+    for (const PoolBlk& b : g_lazy_dead) {
+      if ((int)g_pool.size() < pool_n() && g_pool_bytes + b.cap <= kPoolBytes) { g_pool.push_back(b); g_pool_bytes += b.cap; }
+      else over.push_back(b);
+    }
+    g_lazy_dead.clear();
+    if (!over.empty()) {
+      if (call_i("lazy_ok", nullptr)) for (const PoolBlk& b : over) call_i("free", "(K)", (unsigned long long)b.va);
+      else g_lazy_dead = over;
+    }
+    return;
+  }
   if (!call_i("lazy_ok", nullptr)) return;
-  for (uint64_t sh : g_lazy_dead) call_i("free", "(K)", (unsigned long long)sh);
+  for (const PoolBlk& b : g_lazy_dead) call_i("free", "(K)", (unsigned long long)b.va);
   g_lazy_dead.clear();
 }
-void lazy_reap() { if (!g_lazy_dead.empty()) lazy_free_dead(); }
+void lazy_reap() {
+  if (!g_lazy_dead.empty()) lazy_free_dead();
+  else if (!g_pool.empty() && (pool_n() <= 0 || std::chrono::steady_clock::now() - g_pool_used > std::chrono::milliseconds(kPoolIdleMs))) lazy_pool_drain();
+}
 bool lazy_fault(uintptr_t a, bool write) {
   std::lock_guard<std::recursive_mutex> lk(g_lock);
   if (g_lazy.empty()) return false;
@@ -604,7 +655,7 @@ bool lazy_fault(uintptr_t a, bool write) {
     g_lazy.erase(it);
     g_lazy_bytes -= z.hi - z.lo;
     mprotect((void*)z.lo, z.hi - z.lo, PROT_READ | PROT_WRITE);
-    g_lazy_dead.push_back(z.shadow);
+    g_lazy_dead.push_back(PoolBlk{z.shadow, z.cap});
     if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu reused (dropped)\n", (void*)z.lo, (size_t)(z.hi - z.lo));
     return true;
   }
@@ -623,9 +674,20 @@ static bool lazy_d2h(void* dst, const void* src, size_t n) {
     for (auto it = g_lazy.begin(); it != g_lazy.end(); ++it) if (it->second.clock < old->second.clock) old = it;
     lazy_release(old, true);
   }
-  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget)
-  uint64_t shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
-  if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
+  lazy_free_dead();   // Decode15: the shadow just evicted goes back to the allocator NOW, so the new one takes its place (else its block is still held and a second 112 MiB chunk is carved: 116 MiB of the pool for a one-shadow budget); Prefill21: or into the pool
+  uint64_t shadow = 0; size_t cap = hi - lo;
+  if (pool_n() > 0 && !g_pool.empty()) {
+    size_t best = g_pool.size();
+    for (size_t i = 0; i < g_pool.size(); ++i)
+      if (g_pool[i].cap >= hi - lo && g_pool[i].cap <= (hi - lo) + (hi - lo) / 2 + (1u << 20) && (best == g_pool.size() || g_pool[i].cap < g_pool[best].cap)) best = i;
+    if (best < g_pool.size()) { shadow = g_pool[best].va; cap = g_pool[best].cap; g_pool_bytes -= cap; g_pool.erase(g_pool.begin() + best); }
+    else lazy_pool_drain();   // another size: the pooled blocks go back, the new block is carved fresh
+  }
+  if (!shadow) {
+    shadow = (uint64_t)call_i("malloc", "(K)", (unsigned long long)(hi - lo));
+    if (!shadow || (long long)shadow == -1) { PyErr_Clear(); return false; }
+  }
+  g_pool_used = std::chrono::steady_clock::now();
   const uint64_t s = (uint64_t)(uintptr_t)src;
   if (call_i("d2d", "(KKKi)", (unsigned long long)shadow, (unsigned long long)(s + (lo - d)), (unsigned long long)(hi - lo), 0) != 0) {
     call_i("free", "(K)", (unsigned long long)shadow);
@@ -635,7 +697,7 @@ static bool lazy_d2h(void* dst, const void* src, size_t n) {
   if (d + n > hi) call_i("d2h", "(KKK)", (unsigned long long)hi, (unsigned long long)(s + (hi - d)), (unsigned long long)(d + n - hi));
   const long long sem = call_i("lazy_submit", nullptr);   // the shadow copy goes now; a fetch waits for it alone
   mprotect((void*)lo, hi - lo, PROT_NONE);
-  g_lazy[lo] = Lazy{lo, hi, shadow, ++g_lazy_clock, sem};
+  g_lazy[lo] = Lazy{lo, hi, shadow, ++g_lazy_clock, sem, cap};
   g_lazy_bytes += hi - lo;
   if (g_lazy_verbose) fprintf(stderr, "[tgcu] lazy range %p+%zu kept in VRAM\n", (void*)lo, (size_t)(hi - lo));
   return true;
@@ -740,6 +802,7 @@ EXPORT cudaError_t cudaMemset(void* p, int v, size_t n) {
 }
 EXPORT cudaError_t cudaMemGetInfo(size_t* free_b, size_t* total) {
   API_ENTER("cudaMemGetInfo");
+  lazy_pool_drain();
   PyObject* r;
   if (!call_obj(&r, "mem_info", nullptr)) return fail(cudaErrorUnknown, "mem_info");
   *free_b = PyLong_AsSize_t(PyTuple_GetItem(r, 0)); *total = PyLong_AsSize_t(PyTuple_GetItem(r, 1));
@@ -1073,6 +1136,7 @@ CUresult vmm_AddressFree(CUdeviceptr p, size_t size) {
 CUresult vmm_Create(CUmemGenericAllocationHandle* h, size_t size, const CUmemAllocationProp*, unsigned long long) {
   if (size != kVmmGran) return CUDA_ERROR_INVALID_VALUE;
   VMM_ENTER
+  lazy_pool_drain();
   long long r = call_i("vmm_create", nullptr);
   if (r <= 0) return CUDA_ERROR_OUT_OF_MEMORY;
   *h = (CUmemGenericAllocationHandle)r;
