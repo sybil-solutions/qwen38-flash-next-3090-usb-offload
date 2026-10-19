@@ -1,0 +1,379 @@
+diff --git i/src/core/conversation_file.cpp w/src/core/conversation_file.cpp
+index 24291be..e506620 100644
+--- i/src/core/conversation_file.cpp
++++ w/src/core/conversation_file.cpp
+@@ -443,6 +443,12 @@ private:
+     // O_DIRECT is switched on the open descriptor: a filesystem that refuses it (EINVAL, e.g. tmpfs) keeps buffered
+     // I/O, and the file is never opened twice
+     void try_direct() {
++#if defined(__APPLE__)
++        // macOS has no O_DIRECT: F_NOCACHE keeps a parked conversation's gigabyte out of the unified buffer cache (the
++        // experts' page-cache hits live there); no alignment is required, so `direct_` stays false
++        if (!buffered_forced()) (void) ::fcntl(fd_, F_NOCACHE, 1);
++        return;
++#endif
+         if (O_DIRECT == 0 || buffered_forced()) return;
+         const int fl = ::fcntl(fd_, F_GETFL);
+         direct_ = fl >= 0 && ::fcntl(fd_, F_SETFL, fl | O_DIRECT) == 0;
+diff --git i/src/program/generate.cpp w/src/program/generate.cpp
+index 4a03e27..c878895 100644
+--- i/src/program/generate.cpp
++++ w/src/program/generate.cpp
+@@ -22,6 +22,7 @@
+ #include "strata/core/expert_cache.hpp"
+ #include "strata/core/conversation_snapshot.hpp"
+ #include "strata/core/conversation_file.hpp"
++#include <filesystem>
+ #include "strata/core/conversation_memory.hpp"
+ #include "strata/core/coupled_draft.hpp"
+ #include "strata/core/expert_source.hpp"
+@@ -607,6 +608,16 @@ struct Options {
+     int64_t conversation_cache_min_free_mib = 2560;
+     /// --serve SAVE: disk space a session file must leave free where it is written (MiB; 0 = no check)
+     int64_t session_min_free_mib = 4096;
++    /// --serve (Opt24): park conversations on the SSD.  A finished conversation (>= ssd_park_min_tokens) is written as a
++    /// session file in ssd_park_dir while the engine is idle (aborted when a request that continues it arrives); a
++    /// request that continues a parked conversation the live session does not hold restores it instead of reading it.
++    std::string ssd_park_dir;               ///< "" = off
++    int64_t ssd_park_mib = 20480;           ///< bound of the parked files (LRU over conversations)
++    int64_t ssd_park_min_tokens = 6144;     ///< conversations shorter than this are not parked
++    int64_t ssd_park_min_gain = 4096;       ///< a restore must give back at least this many more tokens than the live path
++    int64_t ssd_park_min_free_mib = 6144;   ///< disk space the parked files must leave free
++    int64_t ssd_park_idle_ms = 1500;        ///< idle time after a request before the write-behind starts
++    bool ssd_park_switch_save = false;      ///< Opt24b: also save the outgoing conversation on the request path (costs prefill time); off = idle-only
+     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
+     int64_t prompt_cache_every = 16384;
+     bool prompt_cache_tail = false;   // optional extra checkpoint at an existing near-tail chunk boundary
+@@ -750,6 +761,11 @@ void usage() {
+                  "  --conversation-cache-min-free-mib N  --serve: physical RAM floor when parking or restoring a\n"
+                  "                       session file (default 2560)\n"
+                  "  --session-min-free-mib N  --serve: disk space a SAVE must leave free (default 4096; 0 = no check)\n"
++                 "  --ssd-park-dir DIR   --serve: park finished conversations as session files in DIR (written while idle,\n"
++                 "                       restored when a request continues one the live session does not hold)\n"
++                 "  --ssd-park-mib N / --ssd-park-min-tokens N / --ssd-park-min-gain N / --ssd-park-min-free-mib N /\n"
++                 "  --ssd-park-idle-ms N  bound of the files (default 20480), shortest conversation parked (6144), fewest\n"
++                 "                       extra tokens worth a restore (4096), disk left free (6144), idle wait (1500)\n"
+                  "  --vram-elastic       --serve (#533, opt-in, NVIDIA): the expert cache in segments (--vram-segment-mib,\n"
+                  "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
+                  "                       give VRAM back to other programs between requests and take it back later\n"
+@@ -1842,6 +1858,13 @@ int main(int argc, char** argv) {
+             else if (a == "--session-min-free-mib") o.session_min_free_mib = number;
+             else o.conversation_cache_slots = (int) number;
+         }
++        else if (a == "--ssd-park-dir") o.ssd_park_dir = next("--ssd-park-dir");
++        else if (a == "--ssd-park-mib") o.ssd_park_mib = std::max(0LL, std::atoll(next("--ssd-park-mib")));
++        else if (a == "--ssd-park-min-tokens") o.ssd_park_min_tokens = std::max(1LL, std::atoll(next("--ssd-park-min-tokens")));
++        else if (a == "--ssd-park-min-gain") o.ssd_park_min_gain = std::max(1LL, std::atoll(next("--ssd-park-min-gain")));
++        else if (a == "--ssd-park-min-free-mib") o.ssd_park_min_free_mib = std::max(0LL, std::atoll(next("--ssd-park-min-free-mib")));
++        else if (a == "--ssd-park-idle-ms") o.ssd_park_idle_ms = std::max(0LL, std::atoll(next("--ssd-park-idle-ms")));
++        else if (a == "--ssd-park-switch-save") o.ssd_park_switch_save = true;
+         else if (a == "--prompt-cache-tail") o.prompt_cache_tail = true;
+         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
+         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
+@@ -8929,6 +8952,213 @@ int main(int argc, char** argv) {
+             if (n > 0) d18.ms_per_slot = 0.7 * d18.ms_per_slot + 0.3 * (ms / (double) n);
+             return true;
+         };
++        // ---- Opt24: the SSD tier of the conversation cache.  Finished conversations are written as session files
++        // (the engine's own format: running state, the deepest checkpoint, every QSA layer's K/V, the draft ring) in
++        // --ssd-park-dir while the engine waits for the next request; a request that arrives is served first (the
++        // write stops at the next 16 MiB block) when it continues the live conversation, and after it when it
++        // does not (that write is then the park of the outgoing conversation).  A request whose prompt starts with
++        // a parked conversation the live session does not hold restores that file (read, validate, H2D) instead of
++        // reading the tokens again.  Index in RAM only: the directory is emptied at start.
++        struct SsdPark {
++            struct Entry {
++                std::string path;
++                std::vector<int32_t> ids;   // the conversation's tokens at save time
++                int64_t ckpt = 0;           // tokens of the checkpoint inside the file (0 = none)
++                uint64_t bytes = 0, used = 0;
++                bool cvec = true;
++            };
++            struct Match { int idx = -1; int64_t tokens = 0; bool live = false; };
++            bool on = false;
++            std::vector<Entry> entries;
++            uint64_t clock = 0, seq = 0, total = 0;
++            bool dirty = false;             // the live session is in no file yet
++            Clock::time_point ready_at{};
++            int64_t saves = 0, aborts = 0, restores = 0, evictions = 0;
++        } ssd;
++        if (!o.ssd_park_dir.empty() && o.prompt_cache > 0 && o.batch == 0 && stages.empty()) {
++            std::error_code fec;
++            std::filesystem::create_directories(o.ssd_park_dir, fec);
++            if (fec) {
++                std::fprintf(stderr, "strata ssd-park: cannot create %s: %s; the SSD tier is off\n",
++                             o.ssd_park_dir.c_str(), fec.message().c_str());
++            } else {
++                size_t gone = 0;
++                for (const auto& de : std::filesystem::directory_iterator(o.ssd_park_dir, fec))
++                    if (de.is_regular_file(fec)) { std::filesystem::remove(de.path(), fec); ++gone; }
++                ssd.on = true;
++                std::fprintf(stderr, "strata ssd-park: on, dir %s, budget %lld MiB, min %lld tokens, min gain %lld, free floor %lld MiB, idle %lld ms (%zu stale files removed)\n",
++                             o.ssd_park_dir.c_str(), (long long) o.ssd_park_mib, (long long) o.ssd_park_min_tokens,
++                             (long long) o.ssd_park_min_gain, (long long) o.ssd_park_min_free_mib,
++                             (long long) o.ssd_park_idle_ms, gone);
++            }
++        } else if (!o.ssd_park_dir.empty()) {
++            std::fprintf(stderr, "strata ssd-park: needs --prompt-cache > 0 and no --batch / layer split; the SSD tier is off\n");
++        }
++        auto ssd_drop = [&](size_t i, const char* why) {
++            std::error_code fec;
++            std::filesystem::remove(ssd.entries[i].path, fec);
++            ssd.total -= std::min(ssd.total, ssd.entries[i].bytes);
++            std::fprintf(stderr, "strata ssd-park: dropped %s (%zu tokens, %.0f MiB): %s; parked=%zu bytes=%llu\n",
++                         ssd.entries[i].path.c_str(), ssd.entries[i].ids.size(), (double) ssd.entries[i].bytes / 1048576.0,
++                         why, ssd.entries.size() - 1, (unsigned long long) ssd.total);
++            ssd.entries.erase(ssd.entries.begin() + (std::ptrdiff_t) i);
++        };
++        auto ssd_lcp = [](const std::vector<int32_t>& a, const std::vector<int32_t>& b) -> size_t {
++            const size_t m = std::min(a.size(), b.size());
++            size_t l = 0;
++            while (l < m && a[l] == b[l]) ++l;
++            return l;
++        };
++        // the parked conversation that gives this prompt the most tokens (the live ids, or the file's checkpoint)
++        auto ssd_best = [&](const std::vector<int64_t>& prompt, bool cvec) -> SsdPark::Match {
++            SsdPark::Match best;
++            for (size_t i = 0; i < ssd.entries.size(); ++i) {
++                const auto& e = ssd.entries[i];
++                if (e.cvec != cvec) continue;
++                const size_t m = std::min(e.ids.size(), prompt.size());
++                size_t l = 0;
++                while (l < m && (int64_t) e.ids[l] == prompt[l]) ++l;
++                int64_t t = 0;
++                bool lv = false;
++                if (l == e.ids.size() && e.ids.size() < prompt.size()) { t = (int64_t) l; lv = true; }
++                else if (e.ckpt > 0 && (size_t) e.ckpt <= l && (size_t) e.ckpt < prompt.size()) t = e.ckpt;
++                if (t > best.tokens) { best.idx = (int) i; best.tokens = t; best.live = lv; }
++            }
++            return best;
++        };
++        // a request line waiting in the queue: does its prompt start with (at least half of) the live conversation?
++        auto ssd_line_continues = [&](const std::string& ln) -> bool {
++            if (ln.rfind("GEN", 0) != 0) return true;                 // a command: answer it quickly
++            const size_t sp = ln.rfind(' ');
++            if (sp == std::string::npos) return true;
++            const char* p = ln.c_str() + sp + 1;
++            size_t l = 0;
++            while (*p != '\0' && l < live.size()) {
++                char* e = nullptr;
++                const long long v = std::strtoll(p, &e, 10);
++                if (e == p || v != (long long) live[l]) break;
++                ++l;
++                p = *e == ',' ? e + 1 : e;
++            }
++            return l * 2 >= live.size();
++        };
++        // write the live session to a file: 1 = saved, 0 = stopped for a request that continues it, -1 = not saved
++        auto ssd_save_live = [&](bool abortable) -> int {
++            if (!ssd.on || !ssd.dirty) return -1;
++            if (!live_ok || live.empty() || !live_imgs.empty() || (int64_t) live.size() < o.ssd_park_min_tokens) {
++                ssd.dirty = false;
++                return -1;
++            }
++            const auto t0 = Clock::now();
++            auto since = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
++            std::string e;
++            if (!ver.wait_commit(e)) { std::fprintf(stderr, "strata ssd-park: save skipped (%s)\n", e.c_str()); ssd.dirty = false; return -1; }
++            cudaDeviceSynchronize();
++            apply_pending(true);
++            strata::core::SessionFileIdentity id;
++            try {
++                if (!session_identity(id, e, {})) { std::fprintf(stderr, "strata ssd-park: save skipped (identity: %s)\n", e.c_str()); ssd.dirty = false; return -1; }
++            } catch (const std::exception& ex) {
++                std::fprintf(stderr, "strata ssd-park: save skipped (identity: %s)\n", ex.what());
++                ssd.dirty = false;
++                return -1;
++            }
++            // the deepest checkpoint goes into the file: moved out of the chain for the write, back whichever way this ends
++            const strata::core::ConversationCheckpoint* deepest = strata::core::session_deepest_checkpoint(checks);
++            const size_t di = deepest != nullptr ? (size_t) (deepest - checks.data()) : 0;
++            std::vector<ConvCheckpoint> disk_checks;
++            if (deepest != nullptr) disk_checks.push_back(std::move(checks[di]));
++            struct Back {
++                std::vector<ConvCheckpoint>& d; std::vector<ConvCheckpoint>& c; size_t i;
++                ~Back() { if (!d.empty()) c[i] = std::move(d[0]); }
++            } back{disk_checks, checks, di};
++            const int64_t ck_tokens = disk_checks.empty() ? 0 : (int64_t) disk_checks[0].ids.size();
++            const uint64_t ck_bytes = disk_checks.empty() ? 0 : (uint64_t) disk_checks[0].bytes();
++            const strata::core::ConversationView view{live, live_imgs, disk_checks, cvec_cached};
++            strata::core::SavedConversation meta;
++            std::vector<strata::core::SessionKvSource> sources;
++            try {
++                if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(), e)) {
++                    std::fprintf(stderr, "strata ssd-park: save skipped (sources: %s)\n", e.c_str());
++                    ssd.dirty = false;
++                    return -1;
++                }
++            } catch (const std::bad_alloc&) {
++                std::fprintf(stderr, "strata ssd-park: save skipped (out of memory)\n");
++                ssd.dirty = false;
++                return -1;
++            }
++            const double state_ms = since();
++            uint64_t need = (2u << 20) + 2 * ck_bytes + live.size() * 4;
++            for (const auto& s : sources) for (size_t k = 0; k < 5; ++k) need += s.sizes[k];
++            const uint64_t budget = (uint64_t) o.ssd_park_mib << 20, floor_free = (uint64_t) o.ssd_park_min_free_mib << 20;
++            if (need > budget) { std::fprintf(stderr, "strata ssd-park: save skipped (%llu MiB exceeds the %lld MiB budget)\n", (unsigned long long) (need >> 20), (long long) o.ssd_park_mib); ssd.dirty = false; return -1; }
++            auto free_now = [&]() -> uint64_t { std::error_code fec; const auto sp = std::filesystem::space(o.ssd_park_dir, fec); return fec ? 0 : (uint64_t) sp.available; };
++            while (!ssd.entries.empty() && (ssd.total + need > budget || free_now() < need + floor_free)) {
++                size_t v = 0;
++                for (size_t i = 1; i < ssd.entries.size(); ++i) if (ssd.entries[i].used < ssd.entries[v].used) v = i;
++                ssd_drop(v, "LRU, room for a new conversation");
++                ++ssd.evictions;
++            }
++            if (free_now() < need + floor_free) { std::fprintf(stderr, "strata ssd-park: save skipped (disk free %llu MiB, need %llu MiB + %lld MiB floor)\n", (unsigned long long) (free_now() >> 20), (unsigned long long) (need >> 20), (long long) o.ssd_park_min_free_mib); ssd.dirty = false; return -1; }
++            bool aborted = false, decided = false, decided_abort = false;
++            auto should_abort = [&]() -> bool {
++                if (!abortable) return false;
++                std::lock_guard<std::mutex> lk(in_mu);
++                if (in_lines.empty()) return false;
++                if (!decided) { decided = true; decided_abort = !o.ssd_park_switch_save || ssd_line_continues(in_lines.front()); }
++                return decided_abort;
++            };
++            for (auto& s : sources) {
++                auto inner = std::move(s.read);
++                s.read = [inner, &should_abort, &aborted](size_t part, size_t offset, void* dst, size_t n) -> bool {
++                    if (should_abort()) { aborted = true; return false; }
++                    return inner(part, offset, dst, n);
++                };
++            }
++            const std::string path = o.ssd_park_dir + "/p" + std::to_string(++ssd.seq) + ".sess";
++            strata::core::SessionWriteOptions wo;
++            wo.min_free_bytes = floor_free;
++            wo.durable = false;
++            wo.progress = [](uint64_t done, uint64_t) {
++                strata::core::progress_at("parking a conversation on the SSD, MiB", (int64_t) (done >> 20));
++                strata::core::progress_allow(0);
++            };
++            strata::core::SessionStatus st;
++            size_t bytes = 0;
++            strata::core::progress_allow(120);
++            bool ok = false;
++            try { ok = strata::core::session_file_write(path, meta, sources, id, bytes, e, wo, &st); }
++            catch (const std::bad_alloc&) { e = "out of memory"; }
++            strata::core::progress_allow(0);
++            if (!ok) {
++                if (aborted) {
++                    ++ssd.aborts;
++                    std::fprintf(stderr, "strata ssd-park: write of %zu tokens stopped after %.0f ms for a request that continues it\n", live.size(), since());
++                    return 0;
++                }
++                std::fprintf(stderr, "strata ssd-park: save failed (%s)\n", e.c_str());
++                ssd.dirty = false;
++                return -1;
++            }
++            // the same conversation a turn back (its tokens are a prefix of this one, or its checkpoint is) is superseded
++            for (size_t i = ssd.entries.size(); i-- > 0;) {
++                const auto& old = ssd.entries[i];
++                const size_t l = ssd_lcp(old.ids, live);
++                if (old.cvec == cvec_cached && (l == old.ids.size() || (old.ckpt > 0 && (size_t) old.ckpt <= l)))
++                    ssd_drop(i, "superseded by a longer copy of the same conversation");
++            }
++            SsdPark::Entry en;
++            en.path = path; en.ids = live; en.ckpt = ck_tokens; en.bytes = bytes; en.used = ++ssd.clock; en.cvec = cvec_cached;
++            ssd.entries.push_back(std::move(en));
++            ssd.total += bytes;
++            ssd.dirty = false;
++            ++ssd.saves;
++            std::fprintf(stderr, "strata ssd-park: saved %zu tokens (%s, checkpoint %lld) %.0f MiB in %.0f ms (state %.0f ms)%s; parked=%zu bytes=%llu MiB\n",
++                         live.size(), path.c_str(), (long long) ck_tokens, (double) bytes / 1048576.0, since(), state_ms,
++                         abortable ? " [idle]" : " [switch]", ssd.entries.size(), (unsigned long long) (ssd.total >> 20));
++            return 1;
++        };
+         auto d18_next_line = [&](std::string& out) -> bool {
+             for (;;) {
+                 {
+@@ -8936,6 +9166,15 @@ int main(int argc, char** argv) {
+                     if (!in_lines.empty()) { out = std::move(in_lines.front()); in_lines.pop_front(); return true; }
+                     if (in_eof) return false;
+                     if (!(d18.active && d18.idle && d18.next < d18.idx.size())) {
++                        if (ssd.on && ssd.dirty && live_ok) {
++                            if (Clock::now() < ssd.ready_at) {
++                                in_cv.wait_until(lk, ssd.ready_at, [&] { return !in_lines.empty() || in_eof; });
++                                continue;
++                            }
++                            lk.unlock();
++                            (void) ssd_save_live(true);
++                            continue;
++                        }
+                         in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
+                         continue;
+                     }
+@@ -9478,9 +9717,54 @@ int main(int argc, char** argv) {
+                             slot_ck = &c;
+                         }
+                 }
+-            const auto parked = conversations.best(ids, req_imgs, want_cvec);
++            auto parked = conversations.best(ids, req_imgs, want_cvec);
+             std::optional<strata::core::SavedConversation> incoming;
+             if (parked.tokens > std::max(resume, slot_tokens)) incoming.emplace(conversations.take(parked.index));
++            // Opt24: a parked conversation on the SSD that gives this prompt more than the live path does
++            bool ssd_incoming = false;
++            if (!incoming && ssd.on && req_imgs.empty()) {
++                const auto sm = ssd_best(ids, want_cvec);
++                if (sm.idx >= 0 && sm.tokens >= std::max(resume, slot_tokens) + o.ssd_park_min_gain) {
++                    const auto tl = Clock::now();
++                    const std::string spath = ssd.entries[(size_t) sm.idx].path;
++                    strata::core::SessionFileIdentity sid;
++                    strata::core::SavedConversation img;
++                    size_t fbytes = 0;
++                    std::string le;
++                    bool lok = false;
++                    try {
++                        if (session_identity(sid, le, {})) {
++                            strata::core::SessionReadLimits limits;
++                            limits.progress = [](uint64_t done, uint64_t) {
++                                strata::core::progress_at("reading a parked conversation, MiB", (int64_t) (done >> 20));
++                                strata::core::progress_allow(0);
++                            };
++                            if (strata::core::conversation_session_read_limits(limits, ss, g, mtp.kv_state(), (uint64_t) o.max_context,
++                                                                               (uint64_t) std::max(o.prompt_cache, 1), le)) {
++                                strata::core::progress_allow(300);
++                                strata::core::SessionStatus sst;
++                                lok = strata::core::session_file_read(spath, sid, img, fbytes, le, limits, &sst);
++                                strata::core::progress_allow(0);
++                            }
++                        }
++                    } catch (const std::exception& ex) { le = ex.what(); }
++                    if (!lok) {
++                        std::fprintf(stderr, "strata ssd-park: restore of %s failed (%s)\n", spath.c_str(), le.c_str());
++                        ssd_drop((size_t) sm.idx, "unreadable");
++                    } else {
++                        ssd.entries[(size_t) sm.idx].used = ++ssd.clock;
++                        ++ssd.restores;
++                        incoming.emplace(std::move(img));
++                        parked.tokens = sm.tokens;
++                        parked.live = sm.live;
++                        ssd_incoming = true;
++                        std::fprintf(stderr, "strata ssd-park: read %s (%zu tokens, %.0f MiB, gives %lld of this prompt's %lld tokens, live path %lld) in %.0f ms\n",
++                                     spath.c_str(), incoming->live.ids.size(), (double) fbytes / 1048576.0, (long long) sm.tokens,
++                                     (long long) n, (long long) resume,
++                                     std::chrono::duration<double, std::milli>(Clock::now() - tl).count());
++                    }
++                }
++            }
+             if (incoming) slot_source = -1;
+             // Reject the entire image before parking/overwriting the outgoing
+             // state. Invalid entries can safely fall back to its existing prefix.
+@@ -9516,6 +9800,11 @@ int main(int argc, char** argv) {
+                 resume == req_pin && live_ok)
+                 for (const ConvCheckpoint& c : checks)
+                     if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
++            if (ssd.on && ssd.dirty && live_ok && !pin_sibling && o.ssd_park_switch_save) {   // Opt24: the outgoing conversation reaches the SSD before anything overwrites it
++                int64_t deepest_ck = 0;
++                for (const ConvCheckpoint& c : checks) deepest_ck = std::max<int64_t>(deepest_ck, (int64_t) c.ids.size());
++                if (ssd_incoming || (!from_live && resume < std::max<int64_t>(deepest_ck, 1))) (void) ssd_save_live(false);
++            }
+             if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && !park_current(incoming ? incoming->bytes() : 0)) {
+                 std::printf("ERR %s\n", err.c_str());
+                 return 1;
+@@ -11415,6 +11704,8 @@ int main(int argc, char** argv) {
+                 live.swap(consumed);
+                 live_imgs = imgs_below(req_imgs, (int64_t) live.size());
+                 live_ok = o.prompt_cache > 0 && req_ckpt;   // ckpt=0: nothing to continue or park (#830)
++                ssd.dirty = live_ok;
++                ssd.ready_at = Clock::now() + std::chrono::milliseconds(o.ssd_park_idle_ms);
+             }
+             static const bool state_hash = std::getenv("STRATA_STATE_HASH") != nullptr;
+             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)
