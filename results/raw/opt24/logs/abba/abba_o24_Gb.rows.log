@@ -1,0 +1,8 @@
+{"tag": "abba_o24_Gb", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 11123, "tok_s": 230.6, "wall_s": 11.19, "ts": "2026-10-19T18:14:09Z"}
+{"tag": "abba_o24_Gb", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 10101, "tok_s": 253.9, "wall_s": 10.17, "ts": "2026-10-19T18:14:19Z"}
+{"tag": "abba_o24_Gb", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 14180, "tok_s": 565.4, "wall_s": 14.25, "ts": "2026-10-19T18:14:34Z"}
+{"tag": "abba_o24_Gb", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 12344, "tok_s": 649.5, "wall_s": 12.41, "ts": "2026-10-19T18:14:46Z"}
+{"tag": "abba_o24_Gb", "target": 18000, "run": 1, "prompt_n": 19547, "cache_n": 0, "prompt_ms": 29002, "tok_s": 674.0, "wall_s": 29.07, "ts": "2026-10-19T18:15:15Z"}
+{"tag": "abba_o24_Gb", "target": 18000, "run": 2, "prompt_n": 19547, "cache_n": 0, "prompt_ms": 26630, "tok_s": 734.0, "wall_s": 26.69, "ts": "2026-10-19T18:15:42Z"}
+{"tag": "abba_o24_Gb", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 46114, "tok_s": 733.9, "wall_s": 46.29, "ts": "2026-10-19T18:16:28Z"}
+{"tag": "abba_o24_Gb", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 42541, "tok_s": 795.5, "wall_s": 42.61, "ts": "2026-10-19T18:17:11Z"}

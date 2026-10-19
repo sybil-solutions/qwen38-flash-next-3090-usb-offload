@@ -5,6 +5,8 @@ results (2026-10-12). Anything marked **not pinned** could not be recovered from
 reconstructed from build files and logs but not executed again for this repo. Steps that were re-run card-free are listed in
 [results.md](results.md) section 8 and are runnable with `scripts/verify-card-free.sh`.
 
+**Config H (2026-10-19):** the recommended recipe is `configs/strata-exl3-full512-h.json.tmpl` = config G + patch `strata/0025` (idle-only SSD-parked conversation cache, [`park-cache.md`](park-cache.md)); no other artifact changes. `./run.sh --config g` is config G.
+
 **Config G (2026-10-18):** the recommended recipe is `configs/strata-exl3-full512-g.json.tmpl` (= config F + patch `strata/0024`, `exl3/exl3_o23.cu` -> `libstrata_o23.dylib`, and the fused-decode Metal library; what was rebuilt and compared with the live files: [`results/verification/config-g-repro.md`](../results/verification/config-g-repro.md)). Earlier configs stay selectable with `./run.sh --config f|e|d|c`.
 
 **Config C (2026-10-15):** the recommended recipe is `configs/strata-exl3-full512-c.json.tmpl` (patches `strata/0001`-`0019`, `shim/`, `exl3/placement/d8w4/profile.bin`); sections 1-10 were written for the host-tail step and still describe the toolchain; what changes for config C is in [section 11](#11-config-c-what-was-reproduced).

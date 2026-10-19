@@ -1,0 +1,41 @@
+usercheck21: no foreign requests since mark   847530
+ready 08:47:23 wired_MiB 12588 swap: total = 1024.00M used = 134.75M free = 889.25M (encrypted)
+config md5 d8bc54cfdaf8103b3116b37978779b03 engine /Users/sero/strata-opt24/bin/strata_o24a
+usercheck21: no foreign requests since mark   847584
+{"name": "p26", "flag": 7, "prompt_n": 8915, "ttft_s": 15.11, "n": 300, "tok_s": 35.2, "wall_s": 23.6, "md5": "e9a1f60f"}
+{"name": "p22", "flag": 7, "prompt_n": 6429, "ttft_s": 14.21, "n": 300, "tok_s": 34.2, "wall_s": 22.9, "md5": "69e51894"}
+{"name": "p10", "flag": 7, "prompt_n": 7369, "ttft_s": 15.43, "n": 300, "tok_s": 32.2, "wall_s": 24.7, "md5": "a5d2e551"}
+{"name": "p15", "flag": 7, "prompt_n": 8163, "ttft_s": 16.39, "n": 300, "tok_s": 31.7, "wall_s": 25.8, "md5": "25cb6640"}
+{"name": "p11", "flag": 7, "prompt_n": 3755, "ttft_s": 12.54, "n": 300, "tok_s": 34.8, "wall_s": 21.1, "md5": "8534d1c3"}
+{"name": "p06", "flag": 7, "prompt_n": 6383, "ttft_s": 12.9, "n": 300, "tok_s": 29.8, "wall_s": 22.9, "md5": "4635a121"}
+{"name": "p02", "flag": 7, "prompt_n": 5863, "ttft_s": 13.72, "n": 300, "tok_s": 33.2, "wall_s": 22.7, "md5": "2d709f10"}
+{"name": "p24", "flag": 7, "prompt_n": 6463, "ttft_s": 13.89, "n": 300, "tok_s": 33.9, "wall_s": 22.7, "md5": "052f54cd"}
+{"name": "p07", "flag": 7, "prompt_n": 7807, "ttft_s": 15.65, "n": 300, "tok_s": 37.7, "wall_s": 23.6, "md5": "c31f8e56"}
+{"name": "p13", "flag": 7, "prompt_n": 6375, "ttft_s": 14.22, "n": 300, "tok_s": 34.3, "wall_s": 22.9, "md5": "04d42883"}
+{"name": "p14", "flag": 7, "prompt_n": 7448, "ttft_s": 15.01, "n": 296, "tok_s": 31.4, "wall_s": 24.4, "md5": "1bddfa2f"}
+{"name": "p17", "flag": 7, "prompt_n": 8139, "ttft_s": 17.49, "n": 300, "tok_s": 37.0, "wall_s": 25.6, "md5": "8ceb34fd"}
+{"name": "p27", "flag": 7, "prompt_n": 19770, "ttft_s": 34.15, "n": 300, "tok_s": 33.6, "wall_s": 43.0, "md5": "6eba5f0f"}
+{"name": "p25", "flag": 7, "prompt_n": 5691, "ttft_s": 14.34, "n": 300, "tok_s": 31.3, "wall_s": 23.9, "md5": "21436b22"}
+{"name": "p04", "flag": 7, "prompt_n": 6357, "ttft_s": 12.91, "n": 300, "tok_s": 36.8, "wall_s": 21.0, "md5": "49750b68"}
+{"name": "p29", "flag": 7, "prompt_n": 16399, "ttft_s": 32.01, "n": 134, "tok_s": 19.1, "wall_s": 39.0, "md5": "3a5dbb9c"}
+{"name": "p09", "flag": 7, "prompt_n": 5936, "ttft_s": 14.87, "n": 300, "tok_s": 36.2, "wall_s": 23.1, "md5": "03c85b42"}
+{"name": "p23", "flag": 7, "prompt_n": 4127, "ttft_s": 12.51, "n": 300, "tok_s": 34.5, "wall_s": 21.2, "md5": "8b4e72b8"}
+{"name": "p01", "flag": 7, "prompt_n": 6023, "ttft_s": 12.54, "n": 300, "tok_s": 37.1, "wall_s": 20.6, "md5": "f0972bd9"}
+{"name": "p03", "flag": 7, "prompt_n": 6679, "ttft_s": 13.88, "n": 300, "tok_s": 37.4, "wall_s": 21.9, "md5": "69210ce8"}
+{"name": "p28", "flag": 7, "prompt_n": 15379, "ttft_s": 32.09, "n": 300, "tok_s": 27.3, "wall_s": 43.0, "md5": "8614926a"}
+{"name": "p21", "flag": 7, "prompt_n": 6240, "ttft_s": 14.71, "n": 300, "tok_s": 31.1, "wall_s": 24.3, "md5": "9c404a42"}
+{"name": "p16", "flag": 7, "prompt_n": 6425, "ttft_s": 13.59, "n": 300, "tok_s": 34.4, "wall_s": 22.3, "md5": "cabcd0a8"}
+{"name": "p20", "flag": 7, "prompt_n": 5856, "ttft_s": 13.54, "n": 300, "tok_s": 34.0, "wall_s": 22.3, "md5": "6b15c57b"}
+{"name": "p12", "flag": 7, "prompt_n": 6264, "ttft_s": 13.78, "n": 300, "tok_s": 36.5, "wall_s": 22.0, "md5": "2fb04198"}
+{"name": "p05", "flag": 7, "prompt_n": 6287, "ttft_s": 13.89, "n": 300, "tok_s": 37.7, "wall_s": 21.8, "md5": "7f36f8ee"}
+{"name": "p18", "flag": 7, "prompt_n": 6157, "ttft_s": 13.27, "n": 300, "tok_s": 28.7, "wall_s": 23.7, "md5": "10d114fd"}
+{"name": "p19", "flag": 7, "prompt_n": 5822, "ttft_s": 13.37, "n": 300, "tok_s": 30.8, "wall_s": 23.1, "md5": "04db3fab"}
+{"name": "p08", "flag": 7, "prompt_n": 6288, "ttft_s": 13.05, "n": 300, "tok_s": 33.7, "wall_s": 21.9, "md5": "8f00c57e"}
+after_seq 08:59:25 wired_MiB 12696 swap: total = 1024.00M used = 134.75M free = 889.25M (encrypted)
+usercheck21: no foreign requests since mark   847848
+after_probe 09:01:48 wired_MiB 12723 swap: total = 1024.00M used = 134.75M free = 889.25M (encrypted)
+usercheck21: no foreign requests since mark   847901
+after_rows 09:05:10 wired_MiB 12710 swap: total = 1024.00M used = 134.75M free = 889.25M (encrypted)
+usercheck21: no foreign requests since mark   847964
+after_small 09:06:21 wired_MiB 12924 swap: total = 1024.00M used = 134.75M free = 889.25M (encrypted)
+o24_H0b done:       29 seq requests, probe mean 28.92 (12), GPU timeouts 0

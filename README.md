@@ -29,12 +29,12 @@ tinygrad's NV backend.
 ```sh
 docker compose run --rm build      # any machine with Docker (linux/arm64): the pinned CUDA 13.4 build -> ./out (fatbins, patched Strata, configure tree); 3 min cold on an M-series Mac, seconds when cached
 docker compose --profile fetch run --rm fetch all    # optional, ~130 GB: experts (sha256-checked against results/pack/exl3_pack.json) + dense GGUF and mmproj (sha256-checked)
-./run.sh                           # on the Mac mini: installs the bundle, builds the macOS libraries and the engine, renders config G, checks the host prerequisites, starts the server
+./run.sh                           # on the Mac mini: installs the bundle, builds the macOS libraries and the engine, renders config H, checks the host prerequisites, starts the server
 ./run.sh --check                   # the same, without starting the engine or touching USB
 ./run.sh --config final-g4-lru-ht  # an older config (fallbacks, see below)
 ```
 
-(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config G** (config F = `--config f`, config E = `--config e`, config D = `--config d`, config C = `--config c`; G adds the Opt23 doorbell, patch 0024 + `libstrata_o23` (x pulled as fp16, device-side skip of rings with no cold expert), and the fused-decode Metal prefill GEMM to F; F adds the asynchronous USB batches of the shim, `shim/0006` + `libtgusb`, and the Prefill20/21 patches 0022/0023 to E's decode hoist, patch 0021, and D's lazy refill, patch 0020) (`configs/strata-exl3-full512-g.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
+(`docker compose build build` first when the repo changed: `run` reuses the image.) `./run.sh` defaults to **config H** (config G = `--config g`; H = G + the idle-only SSD-parked conversation cache, patch 0025, [`docs/park-cache.md`](docs/park-cache.md); config F = `--config f`, config E = `--config e`, config D = `--config d`, config C = `--config c`; G adds the Opt23 doorbell, patch 0024 + `libstrata_o23` (x pulled as fp16, device-side skip of rings with no cold expert), and the fused-decode Metal prefill GEMM to F; F adds the asynchronous USB batches of the shim, `shim/0006` + `libtgusb`, and the Prefill20/21 patches 0022/0023 to E's decode hoist, patch 0021, and D's lazy refill, patch 0020) (`configs/strata-exl3-full512-h.json.tmpl`, below), the recommended recipe. Host prerequisites it checks and prints
 (nothing is stored, no password is asked for):
 
 ```sh
@@ -47,7 +47,13 @@ The serving runtime is native macOS (the engine drives the 3090 over USB through
 USB passthrough of this dock, so Docker makes the build and the model download one command but cannot run the server; `./run.sh` is the one native step. Two Metal binaries need Xcode's Metal toolchain,
 which the mini's Command Line Tools lack: `./run.sh --build-metal` builds them on any Mac that has it (into `./out/metal`; copy that directory to the mini). What was run and what was not: [docs/reproduce.md](docs/reproduce.md#10-one-click-what-was-run) and [section 11](docs/reproduce.md#11-config-c-what-was-reproduced).
 
-## Results: config G (default), config F, config E, config D and config C
+## Results: config H (default), config G, config F, config E, config D and config C
+
+### Config H
+
+Config H = config G + the SSD-parked conversation cache (`patches/strata/0025`, flags `--ssd-park-mib 8192 --ssd-park-dir $HOME/strata-park`; engine `strata_o24b` md5 `b3a275ad`, live config md5 `fa0860bc`): a finished conversation is written to the SSD while the engine is idle, and switching back to it restores it instead of re-prefilling. Switch-back (A, 15 s pause, B, A): 30K 3.1 s vs 41-49 s, 100K 5.95 s vs 133-146 s, same text. Idle-only: a switch before the idle write finishes (~1.5 s + 2-5 s) is not parked. ABBA vs G: decode 33.47 vs 33.50 tok/s (neutral), prefill and regression equal (190K needle 273 s, 5 x 32K, image, tool reuse), quality gate 705/705 positions, p99 KL 0, soak PASS. Raw logs: [`results/raw/opt24/`](results/raw/opt24/); details [`docs/park-cache.md`](docs/park-cache.md); table: [`docs/results.md`](docs/results.md) section 0.00000.
+
+### Config G
 
 Config G = config F + the Opt23 doorbell (`patches/strata/0024`, `STRATA_O23=3`, `exl3/exl3_o23.cu` -> `libstrata_o23.dylib`: the card publishes x as fp16 into per-ring payload slots and skips the wait for the mini's rows on rings with no cold expert; bit-exact) + the fused-decode Metal prefill GEMM (`EXL3M_PF_FD=2`, `exl3/metal`: the EXL3 decode runs inside the GEMM's weight-tile load, no decoded-weight round trip through DRAM; bit-identical); template `configs/strata-exl3-full512-g.json.tmpl`, live config md5 `ff78909a`, engine `strata_o23b` md5 `05ec22e5`.
 Measured 2026-10-18 on the mini (Opt23), ABBA with a fresh restart per arm (F G G F; 29 realistic prompts, 300 tokens, + 12 probes, prefill rows x4, agent turns): **decode 32.64 (F) -> 33.38 tok/s (+2.33 %, paired 26/29 prompts faster, se 0.51 %)**, probes 28.19 -> 28.91 (+2.56 %); **prefill 2,565 / 8,018 / 19,547 / 33,842 tokens 234 / 497 / 562 / 621 -> 240 / 606 / 703 / 762 tok/s (+2.6 / +22 / +25 / +22.7 %)**; agent turns 0.5-1.0 s faster at 60-400 new tokens. Full regression on the final config (75 requests): realistic 33.43 tok/s (TTFT 15.1 s, F 19.7 s), prefill 236 / 233, 564 / 650, 635 / 692, 741 / 795 tok/s (2,565 / 8,018 / 18,330 / 33,842 tokens, 2 runs each), tool reuse PASS (3,379 reused), image PASS, 190K needle found (276 s, F 352 s), 5 x 32K needles found, 5 x 33K soak 5/5, 0 GPU timeouts; quality gate vs the saved baseline (705 positions): top-1 97.73 %, mean KL 0.005474, p99 KL 0.0817 (PASS), log-probabilities identical to config F.

@@ -1,0 +1,11 @@
+base 3073 tokens 12748 ms
+{"tag": "abba_o24_H1b", "want_new": 30, "read": 52, "cache_n": 3078, "prompt_ms": 2348, "wall_s": 2.55}
+{"tag": "abba_o24_H1b", "want_new": 60, "read": 93, "cache_n": 3123, "prompt_ms": 2875, "wall_s": 3.08}
+{"tag": "abba_o24_H1b", "want_new": 100, "read": 151, "cache_n": 3219, "prompt_ms": 3748, "wall_s": 3.93}
+{"tag": "abba_o24_H1b", "want_new": 150, "read": 203, "cache_n": 3373, "prompt_ms": 4358, "wall_s": 4.54}
+{"tag": "abba_o24_H1b", "want_new": 200, "read": 219, "cache_n": 3579, "prompt_ms": 4574, "wall_s": 4.81}
+{"tag": "abba_o24_H1b", "want_new": 250, "read": 254, "cache_n": 3802, "prompt_ms": 4666, "wall_s": 4.87}
+{"tag": "abba_o24_H1b", "want_new": 300, "read": 364, "cache_n": 4059, "prompt_ms": 5600, "wall_s": 5.78}
+{"tag": "abba_o24_H1b", "want_new": 400, "read": 398, "cache_n": 4426, "prompt_ms": 5905, "wall_s": 6.05}
+{"tag": "abba_o24_H1b", "want_new": 600, "read": 678, "cache_n": 4827, "prompt_ms": 8739, "wall_s": 8.9}
+{"tag": "abba_o24_H1b", "want_new": 1000, "read": 1019, "cache_n": 5508, "prompt_ms": 8745, "wall_s": 8.89}
