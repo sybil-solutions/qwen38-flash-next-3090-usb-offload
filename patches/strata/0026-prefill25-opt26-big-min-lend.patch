@@ -1,0 +1,37 @@
+# Prefill25 + Opt26 (2026-10-20 / 10-29): STRATA_PF_BIG_MIN=N (opt-in). prefill.cpp (Prefill25): a prompt shorter than N tokens is cut at 2048-token chunks even
+# when the prefill buffers are sized for a bigger --prefill. generate.cpp (Opt26): lend() sizes the prompt's VRAM loan for that same chunk (2048 when N > prompt
+# tokens) instead of --prefill (before, an 8K prompt under --prefill 3072 lent 2816-token buffers, ~300 extra slots). Config S2 runs --prefill 3072 with
+# STRATA_PF_BIG_MIN=28000: 3072-token chunks only for prompts >= 28K tokens (33K +3.6/+8.0 % in ABBA H I26 I26 H), every shorter prompt keeps the 2048 chunking.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0025. Source: the mini's strata_o26a sources (generate.cpp md5 32a85883 = the generate.cpp linked into
+# strata_o26a/o28b/o29a/o37a; prefill.cpp md5 1fe416e5). o25a's generate.cpp was o24b's unchanged.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -2278,7 +2278,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+     const int64_t Tc = [&]() -> int64_t {
+         static const bool even = [] { const char* v = std::getenv("STRATA_PF_EVEN"); return v == nullptr || std::atoi(v) != 0; }();
+         if (!pf_mac_enabled() || hand_in_ != nullptr || next_ != nullptr) return m.T;
+-        int64_t tc = strata::prefill::even_chunk(n, m.T, even);
++        // Prefill25: STRATA_PF_BIG_MIN=N (opt-in): a prompt shorter than N tokens is cut at 2048-token chunks even when the buffers are sized for a bigger --prefill (bigger chunks only pay on long prompts: the per-chunk-layer fixed cost amortises, 33K +4..10%, but 8K/19.5K lose)
++        static const int64_t big_min = [] { const char* v = std::getenv("STRATA_PF_BIG_MIN"); return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 0; }();
++        int64_t tc = strata::prefill::even_chunk(n, (big_min > 0 && n < big_min) ? std::min<int64_t>(m.T, 2048) : m.T, even);
+         static const int64_t min_chunks_env = [] { const char* v = std::getenv("STRATA_PF_MIN_CHUNKS"); return v != nullptr ? (int64_t) std::max(1, std::atoi(v)) : (int64_t) 1; }();   // pair jobs want deep groups: a prompt of >= min_chunks * 512 tokens is cut into at least that many chunks
+         const int64_t min_chunks = pf_dyn().mc >= 1 ? (int64_t) pf_dyn().mc : min_chunks_env;
+         const int64_t mc_div = pf_dyn().div >= 16 ? (int64_t) pf_dyn().div : (int64_t) 512;
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -10530,7 +10530,12 @@ int main(int argc, char** argv) {
+                 const auto t_ln = Clock::now();
+                 // what this segment needs, capped by the configured chunk: a request lends only what its own
+                 // prompt needs, so a large chunk costs a short prompt nothing
+-                const int64_t want_full = equal_chunk(tokens, o.prefill_chunk);
++                // Opt26: STRATA_PF_BIG_MIN=N (Prefill25, prefill.cpp) cuts a prompt shorter than N tokens at 2048-token chunks even when
++                // the buffers are sized for a bigger --prefill; lend for THAT chunk, not for --prefill (else an 8K prompt under --prefill 3072
++                // lent 2816-token buffers it never used: ~300 extra slots streamed during the prompt and refilled after it)
++                static const int64_t pf_big_min = [] { const char* v = std::getenv("STRATA_PF_BIG_MIN"); return v != nullptr ? (int64_t) std::atoll(v) : (int64_t) 0; }();
++                const int64_t lend_cap = (pf_big_min > 0 && tokens < pf_big_min) ? std::min<int64_t>(o.prefill_chunk, 2048) : o.prefill_chunk;
++                const int64_t want_full = equal_chunk(tokens, lend_cap);
+                 // #340: a short enough request reads in the stages' own S-token chunks (nothing lent)
+                 const int64_t want = split_small > 0 && tokens <= split_small_max ? std::min(want_full, split_small)
+                                                                                  : want_full;

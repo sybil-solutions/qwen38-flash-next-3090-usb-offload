@@ -1,0 +1,321 @@
+# Opt28 (2026-10-29): b-bit lane transport. STRATA_PF_XPORT_BITS=4..7 (unset/8 = the int8 block-32 transport of 0008, unchanged): the Mac lane's x and y rows
+# cross the USB link as block-32 offset-binary codes packed into b u32 words per block + an fp16 scale (5-bit = 0.6875 B/value, -35 % link bytes vs int8).
+# Card side: quantb_kernel (warp-shuffle pack) / dequantb_kernel in xport8_kernels.cuh (compiled into the prefill kernels.cu fatbin); host side: quantb/dequantb
+# in xport8.hpp (NEON arithmetic + scalar pack, bit-identical to the emulation). Also STRATA_PF_XQ_EMU=<bits> / STRATA_PF_XQ_EMU_HAD (quality emulation:
+# fake-quantises x/y after/before the int8 transport; research only, not set in any config). Config S2 sets STRATA_PF_XPORT_BITS=5.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0026. Source: engine strata_o28b (campaign copies: prefill.cpp md5 f3ff7a93, xport8.hpp md5 8e3ad9ab,
+# xport8_kernels.cuh md5 b2595ce4; their bases xport8.hpp.orig / xport8_kernels.cuh.orig equal config G's files).
+diff --git a/include/strata/prefill/xport8.hpp b/include/strata/prefill/xport8.hpp
+--- a/include/strata/prefill/xport8.hpp
++++ b/include/strata/prefill/xport8.hpp
+@@ -21,6 +21,7 @@
+ #include <cmath>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ 
+ #if defined(__ARM_NEON)
+@@ -36,8 +37,15 @@ inline constexpr int64_t kBlock = 32;
+ inline constexpr float kQMax = 127.0f;
+ inline constexpr float kHalfMax = 65504.0f;
+ 
+-// bytes of the packed form of n values (n % 32 == 0): n int8 + n / 32 fp16 scales
+-inline constexpr size_t packed_bytes(int64_t n) { return (size_t) n + (size_t) (n / kBlock) * 2; }
++// Opt28 STRATA_PF_XPORT_BITS = 4..7 (unset or 8 = the int8 form above): b-bit block-32 form.  Same block quantisation with qmax = 2^(b-1) - 1 (scale fp16(amax / qmax),
++// q = clamp(rne(x / sf), -qmax, qmax)); code c = q + qmax (b bits, unsigned), the 32 codes of a block packed little-endian into b uint32 words (value i = bits [i*b, i*b+b) of
++// the block's bit stream).  Wire: [ nb x b uint32 ][ nb x fp16 scale ] = n*b/8 + n/16 bytes.  Must match the card side (xport8_kernels.cuh xport_bits, same variable).
++inline int xport_bits() {
++    static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT_BITS"); const int b = e ? std::atoi(e) : 8; return b >= 4 && b <= 7 ? b : 8; }();
++    return v;
++}
++// bytes of the packed form of n values (n % 32 == 0): n int8 + n / 32 fp16 scales (b-bit: n * b / 8 + n / 32 fp16 scales)
++inline size_t packed_bytes(int64_t n) { const int b = xport_bits(); return (b == 8 ? (size_t) n : (size_t) (n / kBlock) * 4 * b) + (size_t) (n / kBlock) * 2; }
+ inline constexpr bool packable(int64_t n) { return n > 0 && n % kBlock == 0; }
+ 
+ inline float h2f(uint16_t h) { _Float16 v; std::memcpy(&v, &h, 2); return (float) v; }
+@@ -155,6 +163,82 @@ inline void dequant_blocks(const uint8_t* in, uint16_t* out, int64_t n, int64_t
+ #endif
+ }
+ 
++// ---- b-bit form (STRATA_PF_XPORT_BITS), blocks [b0, b1) of n values; NEON for the arithmetic (vdivq_f32 = IEEE division, vcvtnq = rne, as the int8 path), scalar packing
++inline void quantb_blocks(const uint16_t* x, uint8_t* out, int64_t n, int64_t b0, int64_t b1, int bits) {
++    uint32_t* w = reinterpret_cast<uint32_t*>(out);
++    uint8_t* sc = out + (size_t) (n / kBlock) * 4 * bits;
++    const int qm = (1 << (bits - 1)) - 1;
++    const float qmax = (float) qm;
++    for (int64_t b = b0; b < b1; ++b) {
++        const uint16_t* xb = x + b * kBlock;
++        int32_t q[kBlock];
++#if defined(__ARM_NEON)
++        float32x4_t v[8];
++        for (int j = 0; j < 4; ++j) {
++            const float16x8_t h = vreinterpretq_f16_u16(vld1q_u16(xb + 8 * j));
++            v[2 * j] = vcvt_f32_f16(vget_low_f16(h));
++            v[2 * j + 1] = vcvt_high_f32_f16(h);
++        }
++        float32x4_t m = vabsq_f32(v[0]);
++        for (int j = 1; j < 8; ++j) m = vmaxnmq_f32(m, vabsq_f32(v[j]));
++        const float amax = vmaxnmvq_f32(m);
++        const uint16_t sh = f2h(amax / qmax);
++        const float sf = h2f(sh);
++        std::memcpy(sc + b * 2, &sh, 2);
++        if (sf == 0.0f) { std::memset(q, 0, sizeof q); }
++        else {
++            const float32x4_t vs = vdupq_n_f32(sf);
++            for (int j = 0; j < 8; ++j) {
++                int32x4_t a = vcvtnq_s32_f32(vdivq_f32(v[j], vs));
++                a = vminq_s32(vmaxq_s32(a, vdupq_n_s32(-qm)), vdupq_n_s32(qm));
++                vst1q_s32(q + 4 * j, a);
++            }
++        }
++#else
++        float amax = 0.0f;
++        for (int i = 0; i < kBlock; ++i) { const float a = std::fabs(h2f(xb[i])); if (a > amax) amax = a; }
++        const uint16_t sh = f2h(amax / qmax);
++        const float sf = h2f(sh);
++        std::memcpy(sc + b * 2, &sh, 2);
++        for (int i = 0; i < kBlock; ++i) {
++            int qi = 0;
++            if (sf != 0.0f) { float r = h2f(xb[i]) / sf; if (r == r) { r = std::nearbyint(r); r = r > qmax ? qmax : (r < -qmax ? -qmax : r); qi = (int) r; } }
++            q[i] = qi;
++        }
++#endif
++        uint32_t* wb = w + b * bits;
++        uint64_t acc = 0;
++        int nbits = 0, wi = 0;
++        for (int i = 0; i < kBlock; ++i) {
++            acc |= (uint64_t) (uint32_t) (q[i] + qm) << nbits;
++            nbits += bits;
++            if (nbits >= 32) { wb[wi++] = (uint32_t) acc; acc >>= 32; nbits -= 32; }
++        }
++    }
++}
++inline void dequantb_blocks(const uint8_t* in, uint16_t* out, int64_t n, int64_t b0, int64_t b1, int bits) {
++    const uint32_t* w = reinterpret_cast<const uint32_t*>(in);
++    const uint8_t* sc = in + (size_t) (n / kBlock) * 4 * bits;
++    const int qm = (1 << (bits - 1)) - 1;
++    const uint32_t mask = (1u << bits) - 1u;
++    for (int64_t b = b0; b < b1; ++b) {
++        uint16_t sh;
++        std::memcpy(&sh, sc + b * 2, 2);
++        const float sf = h2f(sh);
++        const uint32_t* wb = w + b * bits;
++        uint64_t acc = 0;
++        int nbits = 0, wi = 0;
++        for (int i = 0; i < kBlock; ++i) {
++            if (nbits < bits) { acc |= (uint64_t) wb[wi++] << nbits; nbits += 32; }
++            const int c = (int) (acc & mask);
++            acc >>= bits; nbits -= bits;
++            float v = (float) (c - qm) * sf;
++            v = v > kHalfMax ? kHalfMax : (v < -kHalfMax ? -kHalfMax : v);
++            out[b * kBlock + i] = f2h(v);
++        }
++    }
++}
++
+ // ---- over all blocks, split over `threads` (dispatch_apply on macOS; serial elsewhere or for small arrays)
+ namespace detail {
+ struct Job {
+@@ -166,6 +250,12 @@ struct Job {
+ inline void run_part(const Job& j, int64_t part) {
+     const int64_t b0 = part * j.per, b1 = std::min(j.nb, b0 + j.per);
+     if (b0 >= b1) return;
++    const int bits = xport_bits();
++    if (bits != 8) {
++        if (j.is_quant) quantb_blocks((const uint16_t*) j.in, (uint8_t*) j.out, j.n, b0, b1, bits);
++        else dequantb_blocks((const uint8_t*) j.in, (uint16_t*) j.out, j.n, b0, b1, bits);
++        return;
++    }
+     if (j.is_quant) quant_blocks((const uint16_t*) j.in, (uint8_t*) j.out, j.n, b0, b1);
+     else dequant_blocks((const uint8_t*) j.in, (uint16_t*) j.out, j.n, b0, b1);
+ }
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -259,6 +259,60 @@ inline int pf_xport8_threads() {
+     static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT8_THREADS"); return e ? std::clamp(std::atoi(e), 1, 16) : 4; }();
+     return v;
+ }
++// Opt28 STRATA_PF_XQ_EMU=<bits> (2..7; unset/0 = off, the default path is unchanged): QUALITY EMULATION of a narrower lane transport.  The lane's x rows (after the int8
++// dequant) and y rows (before the int8 quant) are fake-quantised in place, block 32: [orthonormal Walsh-Hadamard (STRATA_PF_XQ_EMU_HAD, default 1)] -> symmetric
++// <bits>-bit with one fp16 scale (amax / qmax, rne) -> dequant [-> inverse WHT] -> fp16.  Only for the quality gate; the wire format is still int8.
++inline int pf_xq_emu_bits() {
++    static const int v = [] { const char* e = std::getenv("STRATA_PF_XQ_EMU"); const int b = e ? std::atoi(e) : 0; return b >= 2 && b <= 7 ? b : 0; }();
++    return v;
++}
++inline bool pf_xq_emu_had() {
++    static const bool v = [] { const char* e = std::getenv("STRATA_PF_XQ_EMU_HAD"); return e == nullptr || std::atoi(e) != 0; }();
++    return v;
++}
++namespace xq_emu {
++inline void wht32(float* v) {   // orthonormal: H / sqrt(32), its own inverse
++    for (int h = 1; h < 32; h <<= 1)
++        for (int i = 0; i < 32; i += h << 1)
++            for (int j = i; j < i + h; ++j) { const float a = v[j], b = v[j + h]; v[j] = a + b; v[j + h] = a - b; }
++    for (int i = 0; i < 32; ++i) v[i] *= 0.17677669529663687f;
++}
++struct Job { uint16_t* x; int64_t nb, per; int bits; bool had; };
++inline void run_part(const Job& j, int64_t part) {
++    const int64_t b0 = part * j.per, b1 = std::min(j.nb, b0 + j.per);
++    const float qmax = (float) ((1 << (j.bits - 1)) - 1);
++    for (int64_t b = b0; b < b1; ++b) {
++        uint16_t* xb = j.x + b * 32;
++        float v[32];
++        for (int i = 0; i < 32; ++i) { _Float16 h; std::memcpy(&h, &xb[i], 2); v[i] = (float) h; }
++        if (j.had) wht32(v);
++        float amax = 0.0f;
++        for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(v[i]));
++        const float sf = (float) (_Float16) (amax / qmax);
++        for (int i = 0; i < 32; ++i) {
++            float q = sf != 0.0f ? std::nearbyint(v[i] / sf) : 0.0f;
++            q = q != q ? 0.0f : std::clamp(q, -qmax, qmax);
++            v[i] = q * sf;
++        }
++        if (j.had) wht32(v);
++        for (int i = 0; i < 32; ++i) { const _Float16 h = (_Float16) std::clamp(v[i], -65504.0f, 65504.0f); std::memcpy(&xb[i], &h, 2); }
++    }
++}
++#if defined(__APPLE__)
++inline void apply_fn(void* ctx, size_t i) { run_part(*static_cast<const Job*>(ctx), (int64_t) i); }
++#endif
++inline void apply(uint16_t* x, int64_t n, int threads) {
++    const int bits = pf_xq_emu_bits();
++    if (bits == 0 || n % 32 != 0) return;
++    Job j{x, n / 32, 0, bits, pf_xq_emu_had()};
++    const int64_t parts = std::max<int64_t>(1, std::min<int64_t>(threads, j.nb / 1024));
++    j.per = (j.nb + parts - 1) / parts;
++#if defined(__APPLE__)
++    if (parts > 1) { dispatch_apply_f((size_t) parts, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &j, apply_fn); return; }
++#endif
++    for (int64_t p = 0; p < parts; ++p) run_part(j, p);
++}
++}  // namespace xq_emu
+ inline bool pf_mac_stats() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_MAC_STATS"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+@@ -4318,6 +4372,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             if (pr_role != 0) xdst = ps->x16 + (size_t) pr_x_off * N;
+                             if (mac_x8) strata::prefill::xport8::dequant(m.mac_x8, xdst, (int64_t) (T * N), pf_xport8_threads());   // NEON: the lane's fp16 input rows
+                             else if (xdst != m.mac_x16) std::memcpy(xdst, m.mac_x16, (size_t) T * N * 2);
++                            if (pf_xq_emu_bits()) xq_emu::apply(xdst, (int64_t) (T * N), pf_xport8_threads());   // Opt28 quality emulation (x)
+                             const double xdq_ms = std::chrono::duration<double, std::milli>(Clk::now() - t1).count();
+                             if (!half_path) { const _Float16* h = (const _Float16*) m.mac_x16; float* d = m.mac_x32; for (int64_t i = 0; i < T * N; ++i) d[i] = (float) h[i]; }
+                             std::vector<int32_t>& eidx = m.mac_eidx;
+@@ -4439,6 +4494,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                     std::fprintf(stderr, "strata pf-mac: HCHK L%lld c%d rc %d mismatching fp16 words %lld of %lld\n", (long long) l, lj, rc, (long long) bad, (long long) (T * N));
+                                 }
+                                 if (xp8_y) {
++                                    if (pf_xq_emu_bits()) xq_emu::apply(const_cast<uint16_t*>(y16src), (int64_t) (T * N), pf_xport8_threads());   // Opt28 quality emulation (y)
+                                     strata::prefill::xport8::quant(y16src, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());   // NEON: 53% of the fp16 bytes go up
+                                     t3c = Clk::now();
+                                     pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
+@@ -4454,6 +4510,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 }
+                                 t3c = Clk::now();
+                                 if (xp8_y) {
++                                    if (pf_xq_emu_bits()) xq_emu::apply(m.mac_y16h, (int64_t) (T * N), pf_xport8_threads());   // Opt28 quality emulation (y)
+                                     strata::prefill::xport8::quant(m.mac_y16h, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());
+                                     t3c = Clk::now();
+                                     pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
+diff --git a/src/prefill/xport8_kernels.cuh b/src/prefill/xport8_kernels.cuh
+--- a/src/prefill/xport8_kernels.cuh
++++ b/src/prefill/xport8_kernels.cuh
+@@ -7,6 +7,7 @@
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+ #include <cstdint>
++#include <cstdlib>
+ 
+ namespace strata::prefill::xp8 {
+ 
+@@ -41,13 +42,89 @@ __global__ void dequant_kernel(const int8_t* __restrict__ q, const uint16_t* __r
+     out[i] = __half_as_ushort(__float2half_rn(v));
+ }
+ 
++// Opt28 b-bit form (STRATA_PF_XPORT_BITS = 4..7; format: include/strata/prefill/xport8.hpp).  quant: one warp per block, the same arithmetic as quant_kernel with
++// qmax = 2^(B-1) - 1; lane w < B assembles word w of the block's bit stream from the codes of the lanes that overlap it (warp shuffles).  dequant: one thread per value.
++template <int B>
++__global__ void quantb_kernel(const uint16_t* __restrict__ x, uint32_t* __restrict__ wq, uint16_t* __restrict__ sc, int64_t nb) {
++    const int64_t b = ((int64_t) blockIdx.x * blockDim.x + threadIdx.x) >> 5;
++    if (b >= nb) return;   // whole warps leave together
++    constexpr int QM = (1 << (B - 1)) - 1;
++    const int lane = threadIdx.x & 31;
++    const float v = __half2float(__ushort_as_half(x[b * 32 + lane]));
++    float a = fabsf(v);
++    a = (a == a) ? a : 0.0f;
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, o));
++    const uint16_t sh = __half_as_ushort(__float2half_rn(__fdiv_rn(a, (float) QM)));
++    const float sf = __half2float(__ushort_as_half(sh));
++    int qi = 0;
++    if (sf != 0.0f) { qi = __float2int_rn(__fdiv_rn(v, sf)); qi = min(max(qi, -QM), QM); }
++    const uint32_t c = (uint32_t) (qi + QM);
++    const int i0 = (32 * lane) / B, i1 = (32 * lane + 31) / B;   // lanes whose bits overlap word `lane` (meaningful for lane < B)
++    uint32_t word = 0;
++#pragma unroll
++    for (int j = 0; j < 32 / B + 2; ++j) {
++        const int src = min(i0 + j, 31);
++        const uint32_t cv = __shfl_sync(0xffffffffu, c, src);
++        if (lane < B && i0 + j <= i1) {
++            const int s = src * B - 32 * lane;
++            word |= s >= 0 ? (cv << s) : (cv >> -s);
++        }
++    }
++    if (lane < B) wq[b * B + lane] = word;
++    if (lane == 0) sc[b] = sh;
++}
++template <int B>
++__global__ void dequantb_kernel(const uint32_t* __restrict__ wq, const uint16_t* __restrict__ sc, uint16_t* __restrict__ out, int64_t n) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    constexpr int QM = (1 << (B - 1)) - 1;
++    const int64_t b = i >> 5;
++    const int p = (int) (i & 31) * B, w = p >> 5, s = p & 31;
++    const uint32_t* wb = wq + b * B;
++    uint32_t bits = wb[w] >> s;
++    if (s + B > 32) bits |= wb[w + 1] << (32 - s);
++    const int c = (int) (bits & ((1u << B) - 1u));
++    float v = (float) (c - QM) * __half2float(__ushort_as_half(sc[b]));
++    v = fminf(fmaxf(v, -65504.0f), 65504.0f);
++    out[i] = __half_as_ushort(__float2half_rn(v));
++}
++inline int xport_bits() {   // host side; same variable and parse as xport8.hpp
++    static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT_BITS"); const int b = e ? std::atoi(e) : 8; return b >= 4 && b <= 7 ? b : 8; }();
++    return v;
++}
++template <int B>
++inline void launch_quantb(const uint16_t* x16, uint8_t* out, int64_t n, cudaStream_t stream) {
++    const int64_t nb = n / 32;
++    quantb_kernel<B><<<(unsigned) ((nb * 32 + 255) / 256), 256, 0, stream>>>(x16, reinterpret_cast<uint32_t*>(out), reinterpret_cast<uint16_t*>(out + (size_t) nb * 4 * B), nb);
++}
++template <int B>
++inline void launch_dequantb(const uint8_t* in, uint16_t* out16, int64_t n, cudaStream_t stream) {
++    const int64_t nb = n / 32;
++    dequantb_kernel<B><<<(unsigned) ((n + 255) / 256), 256, 0, stream>>>(reinterpret_cast<const uint32_t*>(in), reinterpret_cast<const uint16_t*>(in + (size_t) nb * 4 * B), out16, n);
++}
++
+ // launchers (n % 32 == 0; `in` / `out` of the packed form: n bytes of q, then n / 16 bytes of scales, 2-byte aligned)
+ inline void launch_quant(const uint16_t* x16, uint8_t* out, int64_t n, cudaStream_t stream) {
++    switch (xport_bits()) {
++        case 4: launch_quantb<4>(x16, out, n, stream); return;
++        case 5: launch_quantb<5>(x16, out, n, stream); return;
++        case 6: launch_quantb<6>(x16, out, n, stream); return;
++        case 7: launch_quantb<7>(x16, out, n, stream); return;
++        default: break;
++    }
+     const int64_t nb = n / 32;
+     const unsigned blocks = (unsigned) ((nb * 32 + 255) / 256);
+     quant_kernel<<<blocks, 256, 0, stream>>>(x16, reinterpret_cast<int8_t*>(out), reinterpret_cast<uint16_t*>(out + n), nb);
+ }
+ inline void launch_dequant(const uint8_t* in, uint16_t* out16, int64_t n, cudaStream_t stream) {
++    switch (xport_bits()) {
++        case 4: launch_dequantb<4>(in, out16, n, stream); return;
++        case 5: launch_dequantb<5>(in, out16, n, stream); return;
++        case 6: launch_dequantb<6>(in, out16, n, stream); return;
++        case 7: launch_dequantb<7>(in, out16, n, stream); return;
++        default: break;
++    }
+     dequant_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, stream>>>(reinterpret_cast<const int8_t*>(in), reinterpret_cast<const uint16_t*>(in + n), out16, n);
+ }
+ 

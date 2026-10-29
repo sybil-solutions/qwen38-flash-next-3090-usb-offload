@@ -15,7 +15,96 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.00000 Latest configuration: `configs/strata-exl3-full512-h.json.tmpl` (config H, Opt24, 2026-10-19)
+## 0.000000 Latest configuration: `configs/strata-exl3-full512-s2.json.tmpl` (config S2, Opt42, 2026-10-29)
+
+Lineage since config G: **H** (section 0.00000: G + the idle-only SSD-parked conversation cache, `patches/strata/0025`, engine `strata_o24b`, `--ssd-park-mib 8192`) -> **P35** (2026-10-29T13:25Z) = H + `--prefill 3072` with `STRATA_PF_BIG_MIN=28000` (Prefill25 / Opt26 incl. the `lend()` cap, `0026`) + `STRATA_PF_GRP_FIT=1` (Opt29, `0028`) + the 5-bit lane transport `STRATA_PF_XPORT_BITS=5` (Opt28, `0027`), engine `strata_o29a` md5 `29cd1bbe`, live config md5 `60d3be11` -> **S2** (2026-10-29T16:02Z) = P35 + `STRATA_PF_SPLIT2=1` (Opt37, `0029`), engine `strata_o37a`, live config md5 `6e897d7a687fcf161e576dcd8bc40084`. Every new knob is inert unless set; decode, the weights (3.05 bpw, all 512 experts, no pruning), 200K context, vision and MTP are unchanged.
+**Source of these numbers:** the campaign log (plan entries 2026-10-29T03:40Z .. 16:05Z, Opt26 .. Opt42), transcribed. Unlike the sections below, the raw logs (`abba_o26_*`, `abba_o31_*`, `abba_o32_*`, `abba_o40_*`, `final35.log`, `final42.log`, `soak37.log`, `soak42.log`, the `q21_*` / `xq30` quality logs, `pf*33_33000.*` profiles) are still on the mini and are **not yet in this repo**. Config H's own measurements against G are in section 0.00000 (raw: `results/raw/opt24/`); below, H is the control arm of the 10-29 ABBAs.
+
+Method: as above; every ABBA arm starts from a fresh server restart (`arm23.sh`); a row is the mean of the two arms of a config; "run1 / run2" = the first (cold) and second (warm) request of the same prompt size; prefill prompt sizes 2,565 / 8,018 / ~18K / ~33K tokens.
+
+### 0.000000.1 Prefill rows, ABBA (tok/s, run1 / run2)
+
+| ABBA | arms | 2.5K | 8K | 18K | 33K |
+|---|---|---|---|---|---|
+| ABBA26 (H I26 I26 H) | H | 230.9/261.2, 225.9/252.6 | 566.4/652.3, 565.4/651.8 | 672.6/734.6, 671.6/733.4 | 731.8/795.6, 731.9/795.7 |
+| | I26 (H + `--prefill 3072`, BIG_MIN 28000, `strata_o26a`) | 229.9/258.9, 230.1/257.2 | 556.6/638.1, 556.4/639.6 (-1.7/-2.1 %) | 666.8/726.9, 665.5/728.3 (-0.9 %) | 756.9/858.3, 760.0/861.1 (+3.6/+8.0 %) |
+| ABBA31 (H XB XM XM XB H) | H | 225.4/250.6 | 566.0/653.0 | 672.2/734.5 | 732.3/792.9 |
+| | XB (H + 5-bit, `strata_o28b`) | 227.0/252.0 (+0.7/+0.5 %) | 585.0/682.8 (+3.4/+4.6 %) | 688.8/755.8 (+2.5/+2.9 %) | 764.3/831.6 (+4.4/+4.9 %) |
+| | XM (XB + M27 Metal lib) | - | 683.5/683.2 (warm, per arm) | - | 832.3/833.8 (warm, per arm): = XB |
+| ABBA32 (H IG CX CX IG H) | H | 225.8/251.0 | 561.8/654.9 | 672.4/735.5 | 731.9/794.5 |
+| | IG (I26 + GRP_FIT, `strata_o29a`) | 225.9/251.3 | 569.0/661.5 (+1.3/+1.0 %) | 672.5/734.0 (0/-0.2 %) | 759.8/861.2 (+3.8/+8.4 %) |
+| | CX (IG + 5-bit + M27 lib; = P35 numerics + M27) | 225.8/251.3 | 592.0/689.7 (+5.4/+5.3 %) | 691.8/759.8 (+2.9/+3.3 %) | 815.4/931.9 (+11.4/+17.3 %) |
+| ABBA40 (P S S P) | P35 | 225.4/249.9 | 587.1/686.0 | 687.8/756.0 | 811.5/928.5 |
+| | **S2** (P35 + SPLIT2, `strata_o37a`) | 225.2/251.6 (0/+0.7 %) | 596.1/702.2 (+1.5/+2.4 %) | 697.8/767.5 (+1.4/+1.5 %) | 833.0/950.0 (+2.7/+2.3 %) |
+
+ABBA40 per arm at 33K warm: Pa 928.1, Pb 928.9, Sa 947.9, Sb 952.0 (no overlap). Cumulative H -> S2 (warm): 8K 654.9 -> 702.2 (+7.2 %), 33K 794.5 -> 950.0 (+19.6 %); 2.5K unchanged. 0 GPU timeouts in every arm.
+
+### 0.000000.2 Decode, TTFT, agent turns (same ABBAs)
+
+| ABBA | config | decode realistic (tok/s, arm A / arm B) | TTFT (s) | agent-turn set `small_sum` (s) | probes (tok/s) |
+|---|---|---|---|---|---|
+| ABBA26 | H / I26 | 33.83/33.41 / 33.50/33.63 | 15.03/15.07 / 15.18/15.15 | 52.71/53.74 / 54.28/54.09 | noise |
+| ABBA31 | H / XB | 33.38/33.31 / 33.47/33.35 | 15.13/15.12 / 14.90/14.91 | 53.99/53.90 / 53.64/53.53 | 28.88/29.33 / 28.65/29.31 |
+| ABBA32 | H / IG / CX | 33.28/33.23 / 33.66/33.76 / 33.29/33.24 | 15.11/15.12 / 15.07/15.06 / 14.80/14.82 | 53.98/54.11 / 54.53/54.05 / 54.03/54.07 | 29.10/29.08 / 29.18/28.53 / 28.50/29.20 |
+| ABBA40 | P35 / S2 | 33.57/32.87 / 33.44/33.22 | 14.89/14.90 / 14.81/14.81 | 54.23/54.35 / 54.01/54.00 | noise |
+
+Decode is unchanged within noise along the whole lineage (the changes are prefill-only). IG's +0.55 s on the agent-turn set (ABBA32) is a refill debt: the agent turns run right after the 33K rows, and a prompt >= BIG_MIN lends 1,375 VRAM slots (H: 884), so ~1,075 slots are still pending refill when the next turns arrive; the long prompt itself saved ~3 s.
+
+### 0.000000.3 Quality
+
+Teacher-forced gate (705 positions, vs the saved baseline with the lane transport off, gate: top-1 >= 97 %, mean KL < 0.01, p99 KL < 0.1):
+
+| arm | top-1 | mean KL | p99 KL | verdict |
+|---|---|---|---|---|
+| H (int8 transport, = G) | 97.73 % | 0.005474 | 0.081680 | PASS |
+| x6 emulation (`STRATA_PF_XQ_EMU=6`, double quantisation) | 98.72 % | 0.004660 | 0.063791 | PASS |
+| x5 emulation (`STRATA_PF_XQ_EMU=5`) | 97.73 % | 0.007146 | 0.087304 | PASS |
+| xb5 (real 5-bit codec, `strata_o28b`) | 98.01 % | 0.006181 | 0.095506 | PASS, thin p99 margin |
+| hg (H + `strata_o29a` + GRP_FIT) vs config F | 100.00 % | 0 | 0 | EXACT |
+| cx (I26 + o29a + GRP_FIT + 5-bit + M27) | 98.16 % | 0.006072 | 0.095506 | PASS |
+| p37n (P35 on `strata_o37a`, SPLIT2 off) | 98.01 % | 0.006181 | 0.095506 | identical to xb5 |
+
+Because the 705-position p99 of xb5 sat at 0.0955, a wider panel was run before promotion (Opt33: 24 prompts = 8 kinds x 3 variants with new seeds and shifted excerpts, **2,139 scored positions**, reference = the fp16 lane `STRATA_PF_XPORT8=0`; qualification bar: mean KL <= 1.5 x int8's):
+
+| transport | vs fp16: top-1 / mean KL / p99 KL | vs int8: top-1 / mean KL / p99 KL |
+|---|---|---|
+| int8 (H, P35's predecessor) | 98.50 % / 0.003590 / 0.055040 | - |
+| 6-bit | 98.27 % / 0.003765 / 0.057354 | 98.55 % / 0.003698 / 0.044137 |
+| **5-bit (P35, S2)** | **98.27 % / 0.004077 / 0.045874** (1.14 x int8 mean KL) | 98.55 % / 0.003938 / 0.056647 |
+| X6/Y5 | 97.85 % / 0.004667 / 0.065392 | 98.50 % / 0.004084 / 0.040101 |
+
+All pass; 5-bit qualifies (bar 0.005385) and has a lower p99 than int8 on 2,139 positions, so the 0.0955 on the narrow gate was a single-panel tail. X6/Y5 scoring worse than 5/5 shows the panel's noise floor (~+-0.0005 nats between widths of near-equal error).
+S2 vs P35 (`lpcmp` p37n vs s2, Opt38): top-1 99.86 %, mean KL 0.000145, p99 0.002632. Per prompt: code-cpp (3,610 tokens), code-py, agentic (4,236), long-9K (9,542), chat, math, code-cu (3,552) bit-exact; docs (3,068 tokens) 98.96 % / 0.001063: it is cut into 2 chunks, below `STRATA_PF_SPLITF_MIN` 4, so the SPLIT2 order is never reached there and the drift is run-to-run residency (refill timing decides GPU vs Metal rounding). Every prompt that takes the SPLIT2 order is exact. (A gate run of S2 itself against the transport-off baseline is not recorded separately; S2's numerics are P35's.)
+Note on cx: the M27 Metal library is bit-exact on the `pfx_test4` bench but **not** inside the engine (p37n vs cx 99.86 % / 0.000204 / 0.002723); it was never promoted.
+
+### 0.000000.4 Regression and soak
+
+| | P35 (`final35.log`, Opt35) | S2 (`final42.log`, Opt42) |
+|---|---|---|
+| realistic 29 prompts: tok/s / TTFT / wall | 32.94 / 14.89 s / 23.81 s | 33.50 / 14.80 s / 23.55 s |
+| decode probes (mean) | 29.37 | 29.25 |
+| deterministic probe md5s | repeat (8af670ad, f60e112b) | post-soak probes repeat (f60e112b x2) |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| prefill rows (run1/run2) | 2.5K 237.8/238.4, 8K 594.8/683.8, 17K 650.9/710.6, 33K 808.0/928.0 | (see ABBA40) |
+| ~190K needle | FOUND, 260 s (config F 352 s) | FOUND, 255 s |
+| 5 x 32K needles | FOUND, 51/49/32/39/37 s | FOUND, 51/49/32/38/36 s |
+| GPU timeouts | 0 | 0 |
+| swap (2 GB) at the end | 1.41 GB (798 MB -> 1,414 MB, step at the 190K needle) | 1.48 GB |
+| soak (14 x 32K needles + 190K) | `soak37`: 14/14 FOUND (21-63 s), 190K FOUND 234 s, 0 GPU timeouts, wired 12.7-13.0 GB flat, swap 0.88 -> 1.40 GB then flat | `soak42`: 14/14 FOUND (22-63 s), 190K FOUND 230 s, 0 GPU timeouts, swap held 1.28 GB |
+
+Both regressions and both soaks PASS. Watch item: ~0.5-0.7 GB of swap headroom left after a 190K prompt.
+
+### 0.000000.5 Where the 33K period goes, and what did not work
+
+- Opt34 (33K, `TGCU_PROF` + pf-mac stats, H vs XB5, per chunk-layer, 748 chunk-layers): front 32.7 -> 32.9 ms, x fetch 14.7 -> 9.5 (-35 %, the byte cut), y push 20.4 -> 19.1 (-6 % only), period 49.9 -> 45.7 (-8.4 %). The y push span includes waiting for the card behind the front, so the byte cut shows up mostly on x. The model that predicted +13-25 % for 5-bit assumed the link was the binding resource; measured +3-5 % (2048 chunks) and +8 % (3072 chunks).
+- Opt41 (33K, 3072-token chunks, 528 chunk-layers): period P35 58.8 ms vs S2 57.1 (-2.9 %, = the ABBA40 +2.3 %); x fetch 13.5 / 13.5, y push 24.9 / 25.6, link x+y 38.4 / 39.1 ms (68 % of the period). ~12 ms of each y push is a wait on the card through the single y landing buffer (present with and without SPLIT2).
+- **SPLIT2 was modelled at +15-25 % (card front of chunk i+1 under chunk i's x download) and measured +2.3 %**: the period is host-serial (y push ~19 ms + x fetch 9.5 ms + ~17 ms host work), not card-bound. Kept because it is exact and a small real win.
+- **M27 Metal kernel (super-chunk GEMM + aliased epilogue tile): neutral twice** (ABBA27 H M27 M27 H: 33K 794 vs 793 warm; ABBA31 XM vs XB: equal), although -22.6 % on the M1 Max bench and -4.5..-6.8 % on the M4 bench: Metal is ~66 % busy and not the binding term in situ. Also not bit-exact inside the engine (above). Not shipped; its library is not in this repo.
+- Prefill25 alone (config I, 10-20: `--prefill 3072` + BIG_MIN without the table fit) lost 2-3 % on 8K/19.5K; the Opt26 `lend()` fix did not change that (I26 = I within 0.3 %); the cause was the mapped routing-group table sized for 3072-token chunks and pulled whole by the shim after every synchronize (+1.0 ms per chunk-layer at 8K), fixed by `STRATA_PF_GRP_FIT=1`.
+- `STRATA_PREFILL_TIMING=1` is not faithful over tgcu (its per-phase events serialise the stream over USB: 33K wall 95 s vs ~42 s); only its shares were used.
+- Next experiment (not part of S2): `STRATA_PF_YRING` (two y landing buffers, engine `strata_o37b`) against the single-buffer y push wait.
+
+## 0.00000 Previous configuration: `configs/strata-exl3-full512-h.json.tmpl` (config H, Opt24, 2026-10-19)
 
 = config G (section 0.0000) + patch `strata/0025` (SSD-parked conversation cache, `--ssd-park-mib 8192 --ssd-park-dir`; see [`park-cache.md`](park-cache.md)). Engine `strata_o24b` md5 `b3a275ad2feb61495f019e30ac104d41`, live config md5 `fa0860bc9774632d0b3f8093d5b3a720`; all other artifacts are config G's. Raw: [`results/raw/opt24/`](../results/raw/opt24/); hashes: [`results/verification/config-h-sha256.txt`](../results/verification/config-h-sha256.txt). Note: the patch was generated from the Opt24 sources against the v0.1.41 + `0001`..`0024` tree, which reconstructs the live G sources exactly (md5 `dd67d1a1` for `generate.cpp`); applying it reproduces the sources of `strata_o24b` (md5 `80e56c46`, `3ae62b93`). The engine binary itself was built on the mini with `build24.sh`, not re-built from the repo.
 Switch-back (A1 cold, pause 15 s, B1 other document, A2 = A1's prefix + a new question; `results/raw/opt24/logs/switch/`):
@@ -409,5 +498,6 @@ Full record: [`results/verification/config-c-repro.md`](../results/verification/
   (`STRATA_PF_MAC_Y16=1`); an earlier A/B had the fp16 lane diverge from the fp32 lane at character 127 of a 48-token comparison.
 - **Approximate (config C):** `STRATA_PF_XPORT8=1` sends the lane's x and y rows as int8 + one fp16 scale per 32 values: rel RMS 0.55-0.65 % round trip on real MoE inputs, 0.80-0.83 % on the cold partial sum (Xport8 card-free tests, plan entry 2026-10-12T14:35Z). It is gated by the teacher-forced test of section 0.3 (top-1 98.01 %, mean KL 0.0041, p99 KL 0.058 against the
   stack with it off). The lossy `STRATA_MISS_TOL` is in the engine source and off.
+- **Approximate (config S2):** `STRATA_PF_XPORT_BITS=5` narrows that lane transport to 5-bit codes + one fp16 scale per 32 values (rel RMS 4.69 % on real x rows, int8 0.56 %); gated on the 705-position test and on a 2,139-position panel against the fp16 lane (section 0.000000.3: mean KL 0.004077 vs int8's 0.003590, p99 0.0459 vs 0.0550). `STRATA_PF_GRP_FIT` (a table size) and `STRATA_PF_SPLIT2` (the turn order) are exact; `--prefill 3072` with `STRATA_PF_BIG_MIN=28000` changes the chunking of prompts of >= 28K tokens only, which is rounding-level like any chunk-size change (the fp32 association and residency effects above).
 - **Not measured:** KL or top-1 agreement against stock exllamav3 for any of these configs; GPQA Diamond; tool-calling benchmarks; concurrency above 1 with the shipped engine (section 0.4 measured the batch engine, which is slower); the host-tail config on the 190K needle
   (config C: found, 189,481 tokens); a vision run after the LRU change of the host-tail step as a raw log (config C: image PASS in `d15_final.log`, `newA.image.log`, `newB.image.log`).

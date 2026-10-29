@@ -1,0 +1,125 @@
+# Opt37 (2026-10-29): STRATA_PF_SPLIT2=1 (inert unless set; needs the split order STRATA_PF_SPLITF, the packed x transport, >= 2 chunks and lag >= 2): the F2 turn
+# of the lockstep prefill is cut into F2a (routing readback, grouping, resident-expert launch, parked partial sums and the SH/SG/INJ copies) and F2b (x touch,
+# dequant, pair lists, Mac submit), ordered F1(i) F2b(i-1) B(i-lag) F2a(i), so the next chunk's front is queued on the 3090 before chunk i's x crosses the link.
+# Modelled +15-25 % at 33K, measured +1.5..+2.7 % (ABBA P S S P): the 33K period is host-serial (y push + x fetch + host work), not card-bound. Exact on every
+# prompt that takes the SPLIT2 order. Config S2 sets STRATA_PF_SPLIT2=1.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0028. Source: engine strata_o37a (campaign copy prefill.split2.cpp, md5 3fe3b496). The later
+# experimental STRATA_PF_YRING (two y landing buffers, strata_o37b) is NOT in this patch and not in production.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -362,23 +362,35 @@ inline bool pf_splitf() {
+ // Mac job runs behind the next chunks' F turns.  A turn runs on that chunk's own stack (its locals live across layers), so the layer body is the unchanged
+ // single-chunk body; the device state that outlives a turn (the residual stream R, the QSA step table, the layer's resident partial sum / shared term /
+ // hyper-connection injection) is per chunk, swapped in by `bind`.
++// STRATA_PF_SPLIT2=1 (needs the split order, the int8/b-bit x transport, >= 2 chunks and lag >= 2): F2 is cut in two turns, F2a (routing readback, grouping, the resident
++// experts, the parked partial sums) and F2b (the x download, the pair lists, the Mac submit), ordered F1(i) F2b(i - 1) B(i - lag) F2a(i): the next chunk's front is queued
++// on the 3090 before chunk i's x crosses the link, so the card works through it while the host blocks on the download.
++inline bool pf_split2() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_PF_SPLIT2"); return v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
+ struct Lockstep {
+-    Lockstep(int n_, int64_t nl, int lag, bool split_) : n(n_), split(split_) {
++    Lockstep(int n_, int64_t nl, int lag, bool split_, bool split2_ = false) : split(split_), split2(split_ && split2_), n(n_) {
+         for (int c = 0; c < n; ++c) order.push_back({c, 0});
+         const int64_t total = nl * n;
+         for (int64_t i = 0; i < total; ++i) {
+             order.push_back({(int) (i % n), sF1(i / n)});
++            if (split2 && i >= 1) order.push_back({(int) ((i - 1) % n), sF2b((i - 1) / n)});
+             if (i >= lag) { const int64_t j = i - lag; order.push_back({(int) (j % n), sB(j / n)}); }
+             if (split) order.push_back({(int) (i % n), sF2(i / n)});
+         }
++        if (split2 && total >= 1) order.push_back({(int) ((total - 1) % n), sF2b((total - 1) / n)});
+         for (int64_t j = std::max<int64_t>(0, total - lag); j < total; ++j) order.push_back({(int) (j % n), sB(j / n)});
+         for (int c = 0; c < n; ++c) order.push_back({c, sTail(nl)});
+     }
+-    int64_t sF1(int64_t k) const { return split ? 1 + 3 * k : 1 + 2 * k; }
+-    int64_t sF2(int64_t k) const { return 2 + 3 * k; }                       // split only
+-    int64_t sB(int64_t k) const { return split ? 3 + 3 * k : 2 + 2 * k; }
+-    int64_t sTail(int64_t nl) const { return split ? 1 + 3 * nl : 1 + 2 * nl; }
++    int per() const { return split2 ? 4 : split ? 3 : 2; }
++    int64_t sF1(int64_t k) const { return 1 + per() * k; }
++    int64_t sF2(int64_t k) const { return 2 + per() * k; }                   // split only (F2a when split2)
++    int64_t sF2b(int64_t k) const { return 3 + per() * k; }                  // split2 only
++    int64_t sB(int64_t k) const { return per() + per() * k; }
++    int64_t sTail(int64_t nl) const { return 1 + per() * nl; }
+     const bool split;
++    const bool split2;
+     int n;
+     std::vector<std::pair<int, int64_t>> order;   // (chunk, step)
+     std::mutex mu;
+@@ -2876,6 +2888,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         for (int64_t l = LB; l < LE; ++l) {
+             if (ls != nullptr && !bind(ls->sF1(l - LB))) return false;   // F (F1 when split) turn of this layer
+             bool b_taken = false;                          // the layer's B turn was entered (a Mac job was parked)
++            bool parked_early = false;                     // STRATA_PF_SPLIT2: the F2b turn was entered (the partial sums parked at the end of F2a)
+             float* inj_saved = nullptr;                    // split: m.inj while the B turn points it at the parked injection
+             const auto tl0 = std::chrono::steady_clock::now();   // this layer's F turn starts (the stats line's `front` runs until the cold experts' x is wanted)
+             static std::chrono::steady_clock::time_point pf_prev_tl0;   // (turns are serial: the wall period between two F turns = one chunk-layer of the whole pipeline)
+@@ -4365,6 +4378,21 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                         // M4: the layer's batched resident EXL3 experts, one grouped launch set
+                         if (!pf_blob.empty() && !pf_run(pf_blob.data(), pf_cnt.data(), pf_off.data(), (int) pf_blob.size()))
+                             return false;
++                        if (mac_layer && ls != nullptr && ls->split2) {   // F2a ends: park the shared-scratch reads on the stream before the next chunk's F1 overwrites them
++                            if (!mac_x8) { err = "prefill: STRATA_PF_SPLIT2 needs the packed x transport (STRATA_PF_XPORT8=1)"; return false; }
++                            const int64_t rows_res = T * K - rows_cpu;
++                            const size_t sj = (size_t) lj;
++                            if (pf_mac_y16())
++                                moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                            else
++                                moe_combine_peer(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                            cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
++                            cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                            cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
++                            parked_early = true;
++                            ls->done();
++                            if (!bind(ls->sF2b(l - LB))) return false;
++                        }
+                         if (mac_layer) {   // STRATA_PF_MAC: this layer's routed experts that are not in VRAM, on the Apple GPU (expert_source.cpp PfMac)
+                             using Clk = std::chrono::steady_clock;
+                             const bool half_path = pf_mac_y16() && strata_pf_mac_half_ok() != 0;   // x16 rows in, fp16 rows out: no host widening, no host clamp/cast (the lane's own GPU does both)
+@@ -4432,13 +4460,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 // term, its gate and the injection, start the Mac job, and give the turn to the next chunk; the B turn collects the job
+                                 const int64_t rows_res = T * K - rows_cpu;
+                                 const size_t sj = (size_t) lj;
+-                                if (pf_mac_y16())
+-                                    moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+-                                else
+-                                    moe_combine_peer(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+-                                cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
+-                                cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
+-                                cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                if (!parked_early) {
++                                    if (pf_mac_y16())
++                                        moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                                    else
++                                        moe_combine_peer(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                                    cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                    cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                    cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                }
+                                 void* job = nullptr;
+                                 const auto tsb0 = Clk::now();
+                                 int rcs = 0;
+@@ -4691,6 +4721,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
+             }
+             if (ls != nullptr) {
++                if (!b_taken && ls->split2 && !parked_early) { ls->done(); if (!bind(ls->sF2b(l - LB))) return false; }   // no Mac job in this layer: the F2b turn is empty too
+                 if (!b_taken) { ls->done(); if (!bind(ls->sB(l - LB))) return false; }   // no Mac job in this layer: the B turn is empty
+                 if (inj_saved != nullptr) { m.inj = inj_saved; inj_saved = nullptr; }
+                 if (lj == ls->n - 1 && mac_pf && m.T >= 512) {   // every chunk's job of layer l is collected: its slot set is free for layer l + nsets
+@@ -4840,9 +4871,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             const int jobs_eff = pf_pair() ? pf_pair_k() * pf_jobs() : pf_jobs();   // an N-chunk job covers N chunks: Mac jobs in flight = lag / N
+             const int lag = split ? std::clamp(pf_lag_req(G), 1, std::min(gn - 1, jobs_eff))
+                                   : std::clamp(pf_lag_req(G), 0, std::min(gn - 1, jobs_eff - 1));   // Mac jobs in flight = lag + 1 (lag when split) <= the Metal context's job slots
+-            Lockstep ls(gn, LE - LB, lag, split);
++            const bool split2 = split && pf_split2() && gn >= 2 && lag >= 2;   // the last member's submit (F2b) is one turn-row later: its job's first B needs lag >= ke + 1
++            Lockstep ls(gn, LE - LB, lag, split, split2);
+             int ke = pf_pair() && pf_mac_y16() ? std::min(pf_pair_k(), gn) : 1;   // jobs of ke chunks at most: a job's first member's B turn must come after its last member's submit (F2 when split)
+-            while (ke > 1 && lag < (split ? ke : ke - 1)) --ke;
++            while (ke > 1 && lag < (split2 ? ke + 1 : split ? ke : ke - 1)) --ke;
+             ls.pair = ke >= 2;
+             if (ls.pair) { const int nj = (gn + ke - 1) / ke; ls.jb.assign(1, 0); for (int q = 0; q < nj; ++q) ls.jb.push_back(ls.jb.back() + gn / nj + (q < gn % nj ? 1 : 0)); }
+             {   // another lockstep group follows (>= 2 lane-sized chunks left)?  Its first layers' reads start behind this group's last layers

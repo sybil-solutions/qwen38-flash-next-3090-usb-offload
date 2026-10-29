@@ -1,0 +1,163 @@
+# Opt29 (2026-10-29): (1) per-direction transport widths STRATA_PF_XPORT_BITS_X (card quant + host dequant of x) / STRATA_PF_XPORT_BITS_Y (host quant + card dequant
+# of y), each overriding STRATA_PF_XPORT_BITS (not set in config S2); buffers are sized for the wider one. (2) STRATA_PF_GRP_FIT=1: the mapped routing-group table
+# (ids | slot | src | bounds) is re-allocated for the prompt's chunk size instead of the --prefill size; the tgcu shim pulls every touched GPU-written mapped
+# allocation whole after each synchronize, so a table sized for 3072-token chunks cost +1 ms per chunk-layer on prompts that run at 2048 (the 8K row loss of
+# --prefill 3072). Falls back to the copies path on an allocation failure. Bit-exact (q23 vs config F: top-1 100 %, KL 0). Config S2 sets STRATA_PF_GRP_FIT=1.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0027. Source: engine strata_o29a (campaign copies: prefill.cpp md5 063673b4, xport8.hpp md5 7b721a8e,
+# xport8_kernels.cuh md5 33f0775c).
+diff --git a/include/strata/prefill/xport8.hpp b/include/strata/prefill/xport8.hpp
+--- a/include/strata/prefill/xport8.hpp
++++ b/include/strata/prefill/xport8.hpp
+@@ -40,12 +40,21 @@ inline constexpr float kHalfMax = 65504.0f;
+ // Opt28 STRATA_PF_XPORT_BITS = 4..7 (unset or 8 = the int8 form above): b-bit block-32 form.  Same block quantisation with qmax = 2^(b-1) - 1 (scale fp16(amax / qmax),
+ // q = clamp(rne(x / sf), -qmax, qmax)); code c = q + qmax (b bits, unsigned), the 32 codes of a block packed little-endian into b uint32 words (value i = bits [i*b, i*b+b) of
+ // the block's bit stream).  Wire: [ nb x b uint32 ][ nb x fp16 scale ] = n*b/8 + n/16 bytes.  Must match the card side (xport8_kernels.cuh xport_bits, same variable).
++inline int xport_bits_env(const char* name, int dflt) { const char* e = std::getenv(name); if (!e) return dflt; const int b = std::atoi(e); return b >= 4 && b <= 7 ? b : 8; }
+ inline int xport_bits() {
+-    static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT_BITS"); const int b = e ? std::atoi(e) : 8; return b >= 4 && b <= 7 ? b : 8; }();
++    static const int v = xport_bits_env("STRATA_PF_XPORT_BITS", 8);
+     return v;
+ }
+-// bytes of the packed form of n values (n % 32 == 0): n int8 + n / 32 fp16 scales (b-bit: n * b / 8 + n / 32 fp16 scales)
+-inline size_t packed_bytes(int64_t n) { const int b = xport_bits(); return (b == 8 ? (size_t) n : (size_t) (n / kBlock) * 4 * b) + (size_t) (n / kBlock) * 2; }
++// Opt29: per direction, STRATA_PF_XPORT_BITS_X (x rows, card -> Mac: device quant, host dequant) and STRATA_PF_XPORT_BITS_Y (y rows, Mac -> card: host quant, device
++// dequant) override STRATA_PF_XPORT_BITS.  Must match the card side (xport8_kernels.cuh, same variables).
++inline int xport_bits_x() { static const int v = xport_bits_env("STRATA_PF_XPORT_BITS_X", xport_bits()); return v; }
++inline int xport_bits_y() { static const int v = xport_bits_env("STRATA_PF_XPORT_BITS_Y", xport_bits()); return v; }
++// bytes of the packed form of n values (n % 32 == 0) at b bits: n int8 + n / 32 fp16 scales (b < 8: n * b / 8 + n / 32 fp16 scales)
++inline size_t packed_bytes_b(int64_t n, int b) { return (b == 8 ? (size_t) n : (size_t) (n / kBlock) * 4 * b) + (size_t) (n / kBlock) * 2; }
++inline size_t packed_bytes_x(int64_t n) { return packed_bytes_b(n, xport_bits_x()); }
++inline size_t packed_bytes_y(int64_t n) { return packed_bytes_b(n, xport_bits_y()); }
++// buffer sizing: the wider of the two directions
++inline size_t packed_bytes(int64_t n) { return packed_bytes_b(n, std::max(xport_bits_x(), xport_bits_y())); }
+ inline constexpr bool packable(int64_t n) { return n > 0 && n % kBlock == 0; }
+ 
+ inline float h2f(uint16_t h) { _Float16 v; std::memcpy(&v, &h, 2); return (float) v; }
+@@ -246,11 +255,12 @@ struct Job {
+     void* out;
+     int64_t n, nb, per;
+     bool is_quant;
++    int bits;
+ };
+ inline void run_part(const Job& j, int64_t part) {
+     const int64_t b0 = part * j.per, b1 = std::min(j.nb, b0 + j.per);
+     if (b0 >= b1) return;
+-    const int bits = xport_bits();
++    const int bits = j.bits;
+     if (bits != 8) {
+         if (j.is_quant) quantb_blocks((const uint16_t*) j.in, (uint8_t*) j.out, j.n, b0, b1, bits);
+         else dequantb_blocks((const uint8_t*) j.in, (uint16_t*) j.out, j.n, b0, b1, bits);
+@@ -276,13 +286,13 @@ inline void run(const Job& j, int threads) {
+ }
+ }  // namespace detail
+ 
+-// x16[n] -> out[packed_bytes(n)]
+-inline void quant(const uint16_t* x16, uint8_t* out, int64_t n, int threads = 1) {
+-    detail::run(detail::Job{x16, out, n, n / kBlock, 0, true}, threads);
++// x16[n] -> out[packed_bytes_b(n, bits)]; the host quantises the y rows (default: the y width)
++inline void quant(const uint16_t* x16, uint8_t* out, int64_t n, int threads = 1, int bits = xport_bits_y()) {
++    detail::run(detail::Job{x16, out, n, n / kBlock, 0, true, bits}, threads);
+ }
+-// in[packed_bytes(n)] -> out16[n]
+-inline void dequant(const uint8_t* in, uint16_t* out16, int64_t n, int threads = 1) {
+-    detail::run(detail::Job{in, out16, n, n / kBlock, 0, false}, threads);
++// in[packed_bytes_b(n, bits)] -> out16[n]; the host widens the x rows (default: the x width)
++inline void dequant(const uint8_t* in, uint16_t* out16, int64_t n, int threads = 1, int bits = xport_bits_x()) {
++    detail::run(detail::Job{in, out16, n, n / kBlock, 0, false, bits}, threads);
+ }
+ 
+ }  // namespace strata::prefill::xport8
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -2341,6 +2341,26 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         if (min_chunks > 1 && n >= min_chunks * mc_div && (n + tc - 1) / tc < min_chunks) tc = std::min<int64_t>(tc, (((n + min_chunks - 1) / min_chunks) + 15) & ~(int64_t) 15);
+         return tc;
+     }();
++    // Opt29 STRATA_PF_GRP_FIT=1 (opt-in): the mapped routing-group table (ids | slot | src | bounds, written by the GPU and the host each chunk-layer) is sized for
++    // THIS prompt's chunk instead of the --prefill chunk it was allocated for.  The tgcu shim pulls a GPU-written mapped allocation WHOLE after every synchronize
++    // (~2.6 pulls per chunk-layer): at --prefill 3072 an 8K prompt (6 chunks of 1335) pulled 3 x 3072 x 8 int32s each time (+68 MB, +1 ms per chunk-layer vs 2048).
++    if (std::getenv("STRATA_PF_GRP_FIT") != nullptr && m.grp_host != nullptr && Tc > 0 && m.grp_tk != (size_t) (Tc * K)) {
++        const size_t need = 3 * (size_t) Tc * K + (size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2));
++        cudaStreamSynchronize((cudaStream_t) m.cs);   // the previous prompt's last reads of the table are done
++        cudaFreeHost(m.grp_host);
++        m.grp_host = m.grp_dev = nullptr;
++        m.grp_n = m.grp_tk = 0;
++        void *h = nullptr, *d = nullptr;
++        if (cudaHostAlloc(&h, need * 4, cudaHostAllocMapped | (core::peer_portable() ? cudaHostAllocPortable : 0)) == cudaSuccess && cudaHostGetDevicePointer(&d, h, 0) == cudaSuccess) {
++            m.grp_host = (int32_t*) h;
++            m.grp_dev = (int32_t*) d;
++            m.grp_n = need;
++            m.grp_tk = (size_t) Tc * K;
++        } else {   // the copies path (grp_host == nullptr), as with STRATA_GROUP_COPY=1
++            if (h) cudaFreeHost(h);
++            cudaGetLastError();
++        }
++    }
+     const bool helped = single_chunk && bind_stage_helper(n);
+     if (helped) std::swap(m.pp, m.help_pp);
+     struct HelpScope {
+@@ -3480,7 +3500,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             if (any_cold) {
+                                 if (xp8_x) {
+                                     strata::prefill::xport8_quant(m.mixed_h, m.x8_dev, (int64_t) (T * N), m.cs);   // 53% of the fp16 bytes cross the link
+-                                    cudaMemcpyAsync(m.mac_x8, m.x8_dev, (strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16383) & ~(size_t) 16383, cudaMemcpyDeviceToHost, m.cs);   // whole pages: no tail edge for the lazy download
++                                    cudaMemcpyAsync(m.mac_x8, m.x8_dev, (strata::prefill::xport8::packed_bytes_x((int64_t) (T * N)) + 16383) & ~(size_t) 16383, cudaMemcpyDeviceToHost, m.cs);   // whole pages: no tail edge for the lazy download
+                                     mac_x8 = true;
+                                 } else {
+                                     cudaMemcpyAsync(m.mac_x16, m.mixed_h, (size_t) T * N * 2, cudaMemcpyDeviceToHost, m.cs);
+@@ -4497,7 +4517,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                     if (pf_xq_emu_bits()) xq_emu::apply(const_cast<uint16_t*>(y16src), (int64_t) (T * N), pf_xport8_threads());   // Opt28 quality emulation (y)
+                                     strata::prefill::xport8::quant(y16src, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());   // NEON: 53% of the fp16 bytes go up
+                                     t3c = Clk::now();
+-                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
++                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes_y((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
+                                 } else {
+                                     pf_push_y(y16src, (size_t) T * N * 2);
+                                 }
+@@ -4513,7 +4533,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                     if (pf_xq_emu_bits()) xq_emu::apply(m.mac_y16h, (int64_t) (T * N), pf_xport8_threads());   // Opt28 quality emulation (y)
+                                     strata::prefill::xport8::quant(m.mac_y16h, m.mac_y8h, (int64_t) (T * N), pf_xport8_threads());
+                                     t3c = Clk::now();
+-                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
++                                    pf_push_y(m.mac_y8h, strata::prefill::xport8::packed_bytes_y((int64_t) (T * N)), (size_t) T * N * 2, (int64_t) (T * N));
+                                 } else {
+                                     pf_push_y(m.mac_y16h, (size_t) T * N * 2);
+                                 }
+diff --git a/src/prefill/xport8_kernels.cuh b/src/prefill/xport8_kernels.cuh
+--- a/src/prefill/xport8_kernels.cuh
++++ b/src/prefill/xport8_kernels.cuh
+@@ -89,10 +89,13 @@ __global__ void dequantb_kernel(const uint32_t* __restrict__ wq, const uint16_t*
+     v = fminf(fmaxf(v, -65504.0f), 65504.0f);
+     out[i] = __half_as_ushort(__float2half_rn(v));
+ }
+-inline int xport_bits() {   // host side; same variable and parse as xport8.hpp
+-    static const int v = [] { const char* e = std::getenv("STRATA_PF_XPORT_BITS"); const int b = e ? std::atoi(e) : 8; return b >= 4 && b <= 7 ? b : 8; }();
++inline int xport_bits_env(const char* name, int dflt) { const char* e = std::getenv(name); if (!e) return dflt; const int b = std::atoi(e); return b >= 4 && b <= 7 ? b : 8; }
++inline int xport_bits() {   // host side; same variables and parse as xport8.hpp
++    static const int v = xport_bits_env("STRATA_PF_XPORT_BITS", 8);
+     return v;
+ }
++inline int xport_bits_x() { static const int v = xport_bits_env("STRATA_PF_XPORT_BITS_X", xport_bits()); return v; }   // the card quantises the x rows
++inline int xport_bits_y() { static const int v = xport_bits_env("STRATA_PF_XPORT_BITS_Y", xport_bits()); return v; }   // the card widens the y rows
+ template <int B>
+ inline void launch_quantb(const uint16_t* x16, uint8_t* out, int64_t n, cudaStream_t stream) {
+     const int64_t nb = n / 32;
+@@ -106,7 +109,7 @@ inline void launch_dequantb(const uint8_t* in, uint16_t* out16, int64_t n, cudaS
+ 
+ // launchers (n % 32 == 0; `in` / `out` of the packed form: n bytes of q, then n / 16 bytes of scales, 2-byte aligned)
+ inline void launch_quant(const uint16_t* x16, uint8_t* out, int64_t n, cudaStream_t stream) {
+-    switch (xport_bits()) {
++    switch (xport_bits_x()) {
+         case 4: launch_quantb<4>(x16, out, n, stream); return;
+         case 5: launch_quantb<5>(x16, out, n, stream); return;
+         case 6: launch_quantb<6>(x16, out, n, stream); return;
+@@ -118,7 +121,7 @@ inline void launch_quant(const uint16_t* x16, uint8_t* out, int64_t n, cudaStrea
+     quant_kernel<<<blocks, 256, 0, stream>>>(x16, reinterpret_cast<int8_t*>(out), reinterpret_cast<uint16_t*>(out + n), nb);
+ }
+ inline void launch_dequant(const uint8_t* in, uint16_t* out16, int64_t n, cudaStream_t stream) {
+-    switch (xport_bits()) {
++    switch (xport_bits_y()) {
+         case 4: launch_dequantb<4>(in, out16, n, stream); return;
+         case 5: launch_dequantb<5>(in, out16, n, stream); return;
+         case 6: launch_dequantb<6>(in, out16, n, stream); return;

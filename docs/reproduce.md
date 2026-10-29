@@ -5,6 +5,8 @@ results (2026-10-12). Anything marked **not pinned** could not be recovered from
 reconstructed from build files and logs but not executed again for this repo. Steps that were re-run card-free are listed in
 [results.md](results.md) section 8 and are runnable with `scripts/verify-card-free.sh`.
 
+**Config S2 (2026-10-29):** the recommended recipe is `configs/strata-exl3-full512-s2.json.tmpl` (= config H + patches `strata/0026`-`0029`, `--prefill 3072`, `STRATA_PF_BIG_MIN=28000`, `STRATA_PF_XPORT_BITS=5`, `STRATA_PF_GRP_FIT=1`, `STRATA_PF_SPLIT2=1`, no new shim, Metal or `exl3/` artifact). The patched `generate.cpp`, `conversation_file.cpp` and prefill sources equal the production engine's byte for byte (see [patches/README.md](../patches/README.md), Config S2). The S2 engine was not rebuilt from this repo and compared with the live binary. Configs H and G stay selectable with `./run.sh --config h|g`.
+
 **Config H (2026-10-19):** the recommended recipe is `configs/strata-exl3-full512-h.json.tmpl` = config G + patch `strata/0025` (idle-only SSD-parked conversation cache, [`park-cache.md`](park-cache.md)); no other artifact changes. `./run.sh --config g` is config G.
 
 **Config G (2026-10-18):** the recommended recipe is `configs/strata-exl3-full512-g.json.tmpl` (= config F + patch `strata/0024`, `exl3/exl3_o23.cu` -> `libstrata_o23.dylib`, and the fused-decode Metal library; what was rebuilt and compared with the live files: [`results/verification/config-g-repro.md`](../results/verification/config-g-repro.md)). Earlier configs stay selectable with `./run.sh --config f|e|d|c`.
