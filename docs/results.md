@@ -15,7 +15,61 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.000000 Latest configuration: `configs/strata-exl3-full512-s2.json.tmpl` (config S2, Opt42, 2026-10-29)
+## 0.0000000 Latest configuration: `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
+
+Config **AM** = config S2 (section 0.000000) + `STRATA_PF_ALIGN=131072` with `STRATA_PF_ALIGN_MAXT=2048` (`patches/strata/0030`, engine `strata_o37f`), production on the mini since 2026-10-30T05:10Z.
+The prompt path borrows GPU expert-cache slots for its buffers (1,862,400 B each, not page-aligned), so every buffer's page offset - and the shim's 256 KiB lazy-download rounds - moved with
+the loan's first slot. AM starts every borrowed buffer of >= 2 MiB on a 128 KiB boundary for 2048-token chunks (prompts < 28K tokens); the 3072-token chunks of >= 28K prompts keep S2's layout.
+Nothing else changes (no decode, weight, context, vision or MTP change).
+
+**Source of these numbers:** the campaign log (plan entries 2026-10-30T00:30Z .. 05:30Z, Opt52 .. Opt57), transcribed; raw logs (`abba_o55_*`, `final57.log`, `soak57.log`, `q21_am.log`) are on the mini and not yet in `results/raw/`.
+
+### 0.0000000.1 Prefill rows, ABBA55 (S AM AM S, fresh restart per arm; tok/s, run1 / run2)
+
+| arm | 2.5K | 8K | 18K | 33K |
+|---|---|---|---|---|
+| Sa (S2, `strata_o37a`) | 227.6/250.7 | 598.2/703.9 | 697.7/765.7 | 831.2/949.8 |
+| Aa (**AM**, `strata_o37f`) | 224.8/250.9 | 604.3/710.2 | 714.7/788.1 | 832.0/947.2 |
+| Ab (**AM**) | 227.3/253.6 | 596.0/709.8 | 713.9/787.5 | 833.8/948.1 |
+| Sb (S2) | 227.4/250.5 | 599.3/703.7 | 699.1/768.4 | 831.0/951.9 |
+| **AM vs S2, warm (mean of 2 arms)** | **252.3 vs 250.6 (+0.7 %)** | **710.0 vs 703.8 (+0.9 %)** | **787.8 vs 767.1 (+2.7 %)** | **947.7 vs 950.9 (-0.3 %)** |
+
+33K: within S2's own spread (ten S2 arms on 2026-10-29/30 at 33K warm: mean 951.2, sd ~2); the 3072-token chunks are laid out as in S2. 0 GPU timeouts, 0 fit fallbacks in every arm.
+Live check right after the promotion (fresh restart, then the rows; not comparable with ABBA arms, which run 29 decode requests and probes first - fresh-restart rows are higher for every config, S2 18K ~793): 2.5K 220.2/248.2, 8K 604.9/734.3, 18K 750.6/791.7, 33K 831.1/962.4.
+Before it (same day): ALIGN 64 KiB on every chunk 33K -0.6 %; ALIGN 128 KiB on every chunk 8K +0.8 %, 18K +2.4 %, 33K -0.4 % (ABBA52) -> MAXT 2048.
+
+### 0.0000000.2 Decode, TTFT, quality
+
+| arm | decode realistic (tok/s) | TTFT (s) | probes (tok/s) |
+|---|---|---|---|
+| Sa / Aa / Ab / Sb | 33.55 / 33.40 / 33.32 / 33.26 | 14.77 / 14.73 / 14.74 / 14.81 | 29.28 / 28.88 / 28.84 / 28.87 |
+
+Quality (705-position teacher-forced gate, `q23.sh`): AM vs p-off top-1 98.16 %, mean KL 0.006144, p99 0.0955 - PASS, the same as S2 vs p-off (98.16 % / 0.006096 / 0.0955); AM vs S2 top-1 99.72 %, mean KL 0.000135.
+The p99 of 0.0955 is near the 0.1 gate for every 5-bit-transport config (S2 and `xb5` give the same value); it comes from the transport, not from 0030.
+
+### 0.0000000.3 Regression and soak (`final21.sh` + 14-prompt soak, chain57)
+
+| check | AM | S2 (chain42) |
+|---|---|---|
+| realistic decode, 29 requests | 33.71 tok/s, TTFT 14.76 s | 33.50, 14.80 |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| 190K needle (depth 50 %) | FOUND, 257 s | FOUND, 255 s |
+| 5 x 32K needles | FOUND 51/48/32/37/36 s | FOUND 51/49/32/38/36 s |
+| soak: 14 x 32K + 190K | 14/14 FOUND, 190K FOUND 231 s, engine alive | 14/14, 230 s |
+| decode probe after the soak (mean of 6) | 28.8 tok/s | 28.3 |
+| swap after prompt 14 (engine MALLOC_LARGE swapped) | 1462 MB (587 MB) | 1282 MB (587 MB) |
+| GPU timeouts | 0 | 0 |
+
+### 0.0000000.4 What did not work (2026-10-29/30, all on S2)
+
+| experiment | result |
+|---|---|
+| `STRATA_PF_YRING` (two y landing buffers) | no effect (exact; the loan size it needed was the only difference) |
+| `STRATA_D18_K=0` (no refill before the first token) | decode -4.3 % |
+| `STRATA_PF_MAC_DEMOTE` 1-in-8 / 1-in-4 (GPU-resident experts moved to the Mac during prefill) | 33K -2.7 % / -3.1 %, 18K -5.1 % / -5.5 %: the 3090/Mac split is balanced at 33K |
+| lockstep group 7 / 8 (`STRATA_PF_GROUP` + `STRATA_EXL3_METAL_JOBS`) | 7 = S2; 8: 33K -1.4 %, decode -2 %, more swap, fails the p-off gate (p99 0.131) |
+
+## 0.000000 Previous configuration: `configs/strata-exl3-full512-s2.json.tmpl` (config S2, Opt42, 2026-10-29)
 
 Lineage since config G: **H** (section 0.00000: G + the idle-only SSD-parked conversation cache, `patches/strata/0025`, engine `strata_o24b`, `--ssd-park-mib 8192`) -> **P35** (2026-10-29T13:25Z) = H + `--prefill 3072` with `STRATA_PF_BIG_MIN=28000` (Prefill25 / Opt26 incl. the `lend()` cap, `0026`) + `STRATA_PF_GRP_FIT=1` (Opt29, `0028`) + the 5-bit lane transport `STRATA_PF_XPORT_BITS=5` (Opt28, `0027`), engine `strata_o29a` md5 `29cd1bbe`, live config md5 `60d3be11` -> **S2** (2026-10-29T16:02Z) = P35 + `STRATA_PF_SPLIT2=1` (Opt37, `0029`), engine `strata_o37a`, live config md5 `6e897d7a687fcf161e576dcd8bc40084`. Every new knob is inert unless set; decode, the weights (3.05 bpw, all 512 experts, no pruning), 200K context, vision and MTP are unchanged.
 **Source of these numbers:** the campaign log (plan entries 2026-10-29T03:40Z .. 16:05Z, Opt26 .. Opt42), transcribed. Unlike the sections below, the raw logs (`abba_o26_*`, `abba_o31_*`, `abba_o32_*`, `abba_o40_*`, `final35.log`, `final42.log`, `soak37.log`, `soak42.log`, the `q21_*` / `xq30` quality logs, `pf*33_33000.*` profiles) are still on the mini and are **not yet in this repo**. Config H's own measurements against G are in section 0.00000 (raw: `results/raw/opt24/`); below, H is the control arm of the 10-29 ABBAs.

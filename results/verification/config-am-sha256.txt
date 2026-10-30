@@ -1,0 +1,39 @@
+# Config AM (2026-10-30) source hashes = config S2 (config-s2-sha256.txt) + patches/strata/0030: only src/prefill/prefill.cpp changes (S2 prefill.split2.cpp 3fe3b496 -> AM prefill.align2.cpp 63c591d8).
+# Checked on the MacBook 2026-10-30: 0030 applies to the S2 prefill.cpp and gives the AM source byte for byte; the engine strata_o37f was built on the mini from that source, not rebuilt from the repo.
+# Config S2 (2026-10-29) source hashes = config H (config-h-sha256.txt) + patches/strata/0026..0029. sha256  path  [source it equals]
+# Strata source files = Strata v0.1.41 + patches/strata/0001..0029, checked on the MacBook 2026-10-29: the series applies to a pristine v0.1.41 export and gives byte for byte
+# the production S2 sources (generate.cpp md5 32a85883, conversation_file.cpp 3ae62b93, prefill.cpp 3fe3b496, xport8.hpp 7b721a8e, xport8_kernels.cuh 33f0775c; copies
+# fetched from the mini on 2026-10-29). Lines not listed as changed are config H's (H's manifest notes apply); S2 changes no shim, exl3/ or Metal file.
+# Not done: an S2 engine rebuilt from this repo and compared with the live strata_o37a (the prefill kernels.cu fatbin changes: it includes the new xport8_kernels.cuh).
+15a8d26814723334c697d3deab6001e588d46c5170c07ff0c1f8ed7bbcc1e1e3  src/core/verify.cpp  [mini strata-opt23/src/core/verify.cpp]
+1693b8dbb622326cd6d5f8b8555178aa427866bc07a74126ba2b4f9a12ddc874  src/core/expert_source.cpp  [mini strata-decode15/src/core/expert_source.cpp]
+0620c7248de174e5700e52228fbb550a2e4caddbe473b89d7d743966e8651dbb  src/core/layer.cpp  [mini strata-decode15/src/core/layer.cpp]
+6253574747bfce0c5508c48ad16b06eeeba65d9c2c48cca5087c6500d44a147e  src/program/generate.cpp  [mini strata_o26a generate.cpp, md5 32a85883 = the generate.cpp linked into strata_o26a/o28b/o29a/o37a]
+dc468d9578e1aa8d03325a45cc8441073bb826d37ce283011cea8cd8adc4fdb7  src/core/conversation_file.cpp  [mini strata-opt24/src/core/conversation_file.cpp, md5 3ae62b93ea6c011c70ce4f5eadf43b35]
+04aa91f76b1ab340dddd77e20e3990fda034dd662466ee5aa282f9be07cb3c4a  src/prefill/prefill.cpp  [campaign runs/opt37/src/prefill.align2.cpp, md5 63c591d8 = strata_o37f]
+2b0d1c46882c948dcca1369be36c7ce4125e9cc5117109d3ba4f3b59fa612c71  src/prefill/kernels.cu  [mini strata-xport8/src/prefill/kernels.cu]
+45dc31b5c6cf74cd16ae833978e295ee6ef63699f2f64b260a5c4a9f02ee9e7f  include/strata/prefill/kernels.hpp  [mini strata-xport8/include/strata/prefill/kernels.hpp]
+fe1a8c34c870911f0eb6c703822315f357be10fde3120ecd1a41e1cbc3bbe1c0  include/strata/prefill/xport8.hpp  [campaign runs/opt37/src/xport8.hpp, md5 7b721a8e = strata_o29a/o37a]
+c0ca2d367227dff808afc15d37669047beb793f1dd55ead53e724d189bdd05e9  src/prefill/xport8_kernels.cuh  [campaign runs/opt37/src/xport8_kernels.cuh, md5 33f0775c = strata_o29a/o37a]
+38027db7c4523117a2bf1fe4ab09cf0990906c6e956412c92eaf93e904ca5710  include/strata/prefill/path_select.hpp  [mini strata-lockstep/include/strata/prefill/path_select.hpp]
+bb9af756b75c3f3015d336cf6e1804839e51b88c398b9e9ef3da61acc039df04  src/kernels/ngram.cpp  [mini strata-lockstep/src/kernels/ngram.cpp]
+f4b281209cfcabd4ac262f0bce43f9281c49ab34b781de110a109cb804e84c67  serve/server.py  [mini strata/serve/server.py]
+2fa9e08578304443d1ebfe54b0137b5592d2a5413770dd29413de9db993fc0df  serve/prefix_replay.py  [mini strata/serve/prefix_replay.py]
+c23c34abed8455cbabccfaa84b4a362afbcce672310a4d927928caa6099d8848  serve/test_prefix_replay.py  [mini strata/serve/test_prefix_replay.py]
+# shim and data files: the repo copy IS the deployed file (md5 compared 2026-10-17 with the mini's ~/strata-prefill22/shim, ~/shim, ~/exl3/placement/d8w4/profile.bin; tgcu_api.py, tgcublas.cpp, run-d7.sh unchanged since config E)
+8283712f6ba381a22945737135d6bad26938f44704d132d6b4be867496708503  shim/tgcu.py  [md5 1d8a41792d75aac4159bcc54c142f5f3]
+c5b4429db092534798ae5d04a153c8f00a9cb674b21c1e85115ede5939085cf1  shim/tgcu_api.py  [md5 9697e39c061999f39dd6b106feb43c1b]
+cda0a3009594fea67b90c4fe7bdf856368f25774e741f57c5a28c0000e4d9726  shim/tgcublas.cpp  [md5 c8d597b46b1893dca4b39386e9c6d7fc]
+3ee78f72659f8ed49673d5f75bcce82d1d6c1a598b663cf19c21adcb0172cef0  shim/run-d7.sh  [md5 11d7d6f36036f78b034cf93b9bf6e187]
+1f39452e0282daafff2d01656c17119fb0d58de9754cd1afb49b3650fdf0d5c6  exl3/placement/d8w4/profile.bin  [md5 2ac3b7e1436c1720487993969c651c5c]
+# shim/tgcudart.cpp is the source ~/strata-prefill21/shimsrc/tgcudart.cpp (md5 36b68450) that the deployed libcudart.dylib (sha256 339d57f5d475fb4530b689f8a819da7b24627f926227d7387af8b00a1abbc0ea, md5 00771147) was built from; shim/build-libcudart.sh rebuilds a dylib that is byte-identical to it apart from the ad-hoc code signature (unsigned md5 9fdda6f2298207462628970d312a516f, 140 exported symbols)
+cc9b3a4f709d500f5e4ab5877c4077aef976dbd5d473b853f1934cc0ce8d89be  shim/tgcudart.cpp  [md5 36b68450fb27499a553dbb2f5d514d98]
+# shim/tgusb.c is the source ~/strata-prefill21/shimsrc/tgusb21.c (md5 9a87d2f9) of the deployed libtgusb.dylib (sha256 7862dcad0ab5f3245c7ef1629fec5dfc71a920c3e5a77a11e541eed407d27f6c, md5 7e3e04fd); shim/build-libtgusb.sh rebuilds one that is identical apart from the code signature (unsigned md5 35be5355eb6cf0e63ee3a9cac13b4bbb)
+13737dd0661e58d98c9bbbd640765f19995ad64d99661a13e2b3f8f47aa1b341  shim/tgusb.c  [md5 9a87d2f97bd1b8a23887a18108d1c4f9]
+# config G device / Metal sources: the repo copy IS the file the live artifacts were built from (md5 compared 2026-10-18 with the mini's ~/strata-opt23/lib and the driver's runs/opt23/metal)
+b3bdcd6ac269518212e54ba8daf9e7df4b649e7c4b57536ca5e4b0744a12770d  exl3/exl3_o23.cu  [md5 2026578a0a0caa401f10047e0cdf1b1f; mini ~/strata-opt23/lib/exl3_o23.cu]
+2c86f5be5b0f0031c8a2813113892fb7601c17ce3247921fdcfb5caf9dce1585  exl3/strata_m4/exl3_o23_host.cu  [md5 77ac59fb70f8ad000b4de76aea253561; mini ~/strata-opt23/lib/exl3_o23_host.cu]
+dad54f20cd03f8f07d97de42d72dd4ad9ba5475f3c0d139009fdbb1dfa611e57  exl3/metal/exl3_metal.metal  [md5 874b759c19b120b563cbebda95c5a39b; source of the live libexl3metal_g.dylib]
+de1f2b7246464466db6070b540ed8aabf103104c3b3724feb39deb6972cdada5  exl3/metal/exl3_metal.mm  [md5 9385a533c2b2bd30dfb4bbdc776ef0c5; source of the live libexl3metal_g.dylib]
+# live config S2 on the mini (2026-10-29, informational): engine strata_o37a; live config file md5 6e897d7a687fcf161e576dcd8bc40084 (rendered configs/strata-exl3-full512-s2.json.tmpl;
+#   host, key, allowed_hosts, the engine path and the park directory differ)

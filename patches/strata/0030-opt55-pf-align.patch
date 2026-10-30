@@ -1,0 +1,65 @@
+# Opt52/Opt55 (2026-10-30): STRATA_PF_ALIGN=<bytes> (a power of two; inert unless set) starts every borrowed prompt-path buffer of >= 2 MiB on that address boundary;
+# STRATA_PF_ALIGN_MAXT=<tokens> limits it to chunks of at most that many tokens.  The prompt path borrows GPU expert-cache slots (1,862,400 B each, not page-aligned),
+# so without it each buffer's page offset - and the shim's 256 KiB lazy-download rounds - move with the loan's first slot; the offset is padded out of bytes_needed's
+# 8 MiB slack.  Config AM sets ALIGN=131072 + MAXT=2048 (the 2048-token chunks of prompts < 28K; the 3072-token chunks of >= 28K prompts are left as S2 lays them out:
+# 128 KiB on those cost 0.4 % at 33K, ABBA52).  ABBA55 (S AM AM S, fresh restart per arm): 2.5K +0.7 %, 8K +0.9 %, 18K +2.7 %, 33K -0.3 % (within S2's spread),
+# decode and TTFT unchanged; quality gate vs p-off PASS (705 positions: top-1 98.16 %, mean KL 0.006144, p99 0.0955 = S2's 98.16 % / 0.006096 / 0.0955; vs S2
+# top-1 99.72 %, mean KL 0.000135: a different loan layout moves GPU-vs-Metal residency, not the math).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0029. Source: engine strata_o37f (campaign copy prefill.align2.cpp, md5 63c591d8).
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -365,6 +365,18 @@ inline bool pf_splitf() {
+ // STRATA_PF_SPLIT2=1 (needs the split order, the int8/b-bit x transport, >= 2 chunks and lag >= 2): F2 is cut in two turns, F2a (routing readback, grouping, the resident
+ // experts, the parked partial sums) and F2b (the x download, the pair lists, the Mac submit), ordered F1(i) F2b(i - 1) B(i - lag) F2a(i): the next chunk's front is queued
+ // on the 3090 before chunk i's x crosses the link, so the card works through it while the host blocks on the download.
++// STRATA_PF_ALIGN=<bytes> (a power of two, e.g. 16384): the prompt path's borrowed buffers of >= 2 MiB start on that boundary.  The loan begins at a cache
++// slot (1,862,400 B: not page-aligned), so without it every buffer's page offset - and the shim's lazy-download page edges - moves with the loan's first slot.
++inline uint64_t pf_align() {
++    static const uint64_t v = [] { const char* e = std::getenv("STRATA_PF_ALIGN"); const long long a = e != nullptr ? std::atoll(e) : 0; return a > 0 && (a & (a - 1)) == 0 ? (uint64_t) a : 0ull; }();
++    return v;
++}
++// STRATA_PF_ALIGN_MAXT=<tokens>: STRATA_PF_ALIGN only for chunks of at most that many tokens (ABBA52: 128 KiB helps the 2048-token chunks, 8K +0.8 % / 18K +2.4 %,
++// and costs the 3072-token chunks of the >= 28K prompts 0.4 %).  Unset: every chunk.
++inline int64_t pf_align_maxt() {
++    static const int64_t v = [] { const char* e = std::getenv("STRATA_PF_ALIGN_MAXT"); return e != nullptr && std::atoll(e) > 0 ? (int64_t) std::atoll(e) : INT64_MAX; }();
++    return v;
++}
+ inline bool pf_split2() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_SPLIT2"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+@@ -639,6 +651,7 @@ struct Alloc {
+     uint64_t failed_bytes = 0;          ///< the take that could not be allocated; the failure message names it
+     uint64_t granule = 0;               ///< count_only: each take rounds up to this (cudaMalloc's 2 MiB pages: owned buffers)
+     bool count_only = false;
++    uint64_t align_big = 0;             ///< STRATA_PF_ALIGN: a borrowed take of >= 2 MiB starts on this address boundary (a power of two)
+     std::vector<void*>* owned = nullptr;
+     template <typename T> T* take(size_t n, bool& ok) {
+         uint64_t bytes = ((uint64_t) n * sizeof(T) + 256 + 255) & ~255ull;
+@@ -648,6 +661,10 @@ struct Alloc {
+             return nullptr;
+         }
+         if (base != nullptr) {
++            if (align_big > 0 && (uint64_t) n * sizeof(T) >= (2ull << 20)) {   // >= 2 MiB: not the ring's 1.86 MB blob slots; the pad comes out of bytes_needed's 8 MiB slack
++                const uint64_t a = (uint64_t) (uintptr_t) (base + used);
++                used += ((a + align_big - 1) & ~(align_big - 1)) - a;
++            }
+             if (used + bytes > cap) { ok = false; failed_bytes = bytes; return nullptr; }
+             T* p = (T*) (base + used);
+             used += bytes;
+@@ -1412,6 +1429,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
+     Alloc o;
+     o.base = (uint8_t*) borrow;
+     o.cap = borrow_bytes;
++    o.align_big = chunk <= pf_align_maxt() ? pf_align() : 0;
+     o.owned = &m.owned;
+     {
+         uint16_t* gs = o.take<uint16_t>((size_t) GEMM_SCRATCH, ok);
+@@ -1571,6 +1589,7 @@ bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::
+     Alloc o;
+     o.base = (uint8_t*) borrow;
+     o.cap = borrow_bytes;
++    o.align_big = chunk <= pf_align_maxt() ? pf_align() : 0;
+     o.owned = &m.owned;
+     uint16_t* gs = o.take<uint16_t>((size_t) GEMM_SCRATCH, ok);
+     void* ws = o.take<uint8_t>(GEMM_WS, ok);

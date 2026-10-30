@@ -5,7 +5,9 @@ results (2026-10-12). Anything marked **not pinned** could not be recovered from
 reconstructed from build files and logs but not executed again for this repo. Steps that were re-run card-free are listed in
 [results.md](results.md) section 8 and are runnable with `scripts/verify-card-free.sh`.
 
-**Config S2 (2026-10-29):** the recommended recipe is `configs/strata-exl3-full512-s2.json.tmpl` (= config H + patches `strata/0026`-`0029`, `--prefill 3072`, `STRATA_PF_BIG_MIN=28000`, `STRATA_PF_XPORT_BITS=5`, `STRATA_PF_GRP_FIT=1`, `STRATA_PF_SPLIT2=1`, no new shim, Metal or `exl3/` artifact). The patched `generate.cpp`, `conversation_file.cpp` and prefill sources equal the production engine's byte for byte (see [patches/README.md](../patches/README.md), Config S2). The S2 engine was not rebuilt from this repo and compared with the live binary. Configs H and G stay selectable with `./run.sh --config h|g`.
+**Config AM (2026-10-30):** the recommended recipe is `configs/strata-exl3-full512-am.json.tmpl` (= config S2 + patch `strata/0030`, `STRATA_PF_ALIGN=131072`, `STRATA_PF_ALIGN_MAXT=2048`); the engine was built on the mini (`strata_o37f`), not rebuilt from this repo; the patch series reproduces its sources (`results/verification/config-am-sha256.txt`).
+
+**Config S2 (2026-10-29):** the previous recipe is `configs/strata-exl3-full512-s2.json.tmpl` (= config H + patches `strata/0026`-`0029`, `--prefill 3072`, `STRATA_PF_BIG_MIN=28000`, `STRATA_PF_XPORT_BITS=5`, `STRATA_PF_GRP_FIT=1`, `STRATA_PF_SPLIT2=1`, no new shim, Metal or `exl3/` artifact). The patched `generate.cpp`, `conversation_file.cpp` and prefill sources equal the production engine's byte for byte (see [patches/README.md](../patches/README.md), Config S2). The S2 engine was not rebuilt from this repo and compared with the live binary. Configs H and G stay selectable with `./run.sh --config h|g`.
 
 **Config H (2026-10-19):** the recommended recipe is `configs/strata-exl3-full512-h.json.tmpl` = config G + patch `strata/0025` (idle-only SSD-parked conversation cache, [`park-cache.md`](park-cache.md)); no other artifact changes. `./run.sh --config g` is config G.
 
