@@ -15,12 +15,67 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
+## 0.000000000 Latest configuration: `configs/strata-exl3-full512-lq.json.tmpl` (config LQ, chain82-84, 2026-10-30)
+
+Config **LQ** = config L without `0031`: config AM (section 0.0000000) + `STRATA_PF_MAC_QMIN_TOK=3000` (`patches/strata/0032`), engine `strata_o37j` (the config L build,
+patches 0001-0032, sources `results/verification/config-l-sha256.txt`) with `STRATA_KVT_LAZY` unset, so `0031` does nothing. Production on the mini since 2026-10-30T18:52Z.
+Prompts under 3000 tokens read only the experts they route to, on demand at each layer, instead of the three-layers-ahead read-ahead (section 0.00000000, "0032").
+After a long prompt the trimmed K/V's slots refill before the next request starts, as in AM, which is what keeps LQ inside the quality gate where L fails (0.00000000.5).
+
+**Source of these numbers:** the campaign log (chain82, chain83, chain84; 2026-10-30), transcribed; raw logs (`q21_lq81.log`, `q21_lq.log`, `abba_o83_*`, `final83.log`,
+`soak83.log`, `d84_*.jsonl`, `chain84.summary`) are on the mini and not yet in `results/raw/`.
+
+### 0.000000000.1 Quality
+
+| check | LQ | AM | L |
+|---|---|---|---|
+| `q23.sh`, fresh restart: top-1 / mean KL / p99 KL | 98.01 % / 0.006181 / 0.0955 PASS | 98.16 % / 0.006144 / 0.0955 PASS | 98.01 % / 0.006181 / 0.0955 PASS |
+| `q81_lp.py`, each panel prompt right after a fresh 33K prompt | 97.45 % / 0.005850 / **0.0655 PASS** | 0.0779, 0.0527 PASS (2 runs) | **0.1063, 0.1123 FAIL** (2 runs) |
+
+### 0.000000000.2 ABBA83 (AM LQ LQ AM, fresh restart per arm; prefill tok/s run1 / run2)
+
+| arm | 2.5K | 8K | 18K | 33K | decode realistic | TTFT | probes | agent turns (`small_sum`) |
+|---|---|---|---|---|---|---|---|---|
+| Aa (AM, `strata_o37f`) | 227.5/253.7 | 601.7/710.5 | 716.0/786.7 | 832.3/952.5 | 33.33 | 14.76 | 29.04 | 54.32 s |
+| Qa (**LQ**, `strata_o37j`) | 224.9/251.4 | 605.3/708.3 | 718.4/787.7 | 830.9/953.5 | 33.50 | 14.76 | 29.07 | 51.66 s |
+| Qb (**LQ**) | 226.6/253.6 | 604.0/710.4 | 715.2/786.6 | 832.0/946.8 | 32.68 | 14.74 | 29.05 | 51.62 s |
+| Ab (AM) | 222.8/251.2 | 602.1/709.2 | 715.6/787.6 | 833.4/951.7 | 33.67 | 14.72 | 29.15 | 53.90 s |
+| **LQ vs AM (mean of 2 arms, run 2)** | 252.5 vs 252.5 | 709.4 vs 709.9 | 787.2 vs 787.2 | 950.2 vs 952.1 | 33.09 vs 33.50 | 14.75 vs 14.74 | 29.06 vs 29.10 | **51.64 vs 54.11 s (-4.6 %)** |
+
+The 1000-token prompt is not in this ABBA; `STRATA_PF_MAC_QMIN_TOK=3000` alone took it from 8.51 to 7.19 s (+18 %, section 0.00000000.1). 0 GPU timeouts, 0 fit fallbacks.
+
+### 0.000000000.3 Decode ABBA84 (AM LQ LQ AM, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 tok/s (TTFT) | pass 2 tok/s (TTFT) |
+|---|---|---|
+| Aa (AM) | 33.42 (14.74) | 33.10 (14.35) |
+| Qa (**LQ**) | 33.05 (14.74) | 33.20 (14.36) |
+| Qb (**LQ**) | 33.58 (14.73) | 33.86 (14.37) |
+| Ab (AM) | 32.89 (14.77) | 33.08 (14.43) |
+| **LQ vs AM** | **33.42 vs 33.12 tok/s**; paired per prompt: mean +0.90 %, median +1.01 %, LQ slower on 10 of 29 | |
+
+ABBA83's decode column (-1.2 %) and the regression's realistic set (33.27 vs AM's 33.71 in chain57) had pointed the other way; with 4 passes per config there is no decode cost.
+0 GPU timeouts.
+
+### 0.000000000.4 Regression and soak (`final21.sh` + 14-prompt soak, chain83)
+
+| check | LQ | AM (chain57) |
+|---|---|---|
+| realistic decode, 29 requests | 33.27 tok/s, TTFT 14.73 s | 33.71, 14.76 |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| 190K needle (depth 50 %) | FOUND, 256 s | FOUND, 257 s |
+| 5 x 32K needles | FOUND 51/48/32/37/36 s | FOUND 51/48/32/37/36 s |
+| soak: 14 x 32K + 190K | 14/14 FOUND (21-63 s), 190K FOUND 232 s, engine alive | 14/14, 231 s |
+| decode probe after the soak (mean of 6) | 28.7 tok/s | 28.8 |
+| swap after prompt 14 (engine MALLOC_LARGE swapped) | 1502 MB (588 MB) | 1462 MB (587 MB) |
+| GPU timeouts | 0 | 0 |
+
 ## 0.00000000 Withdrawn as the default: `configs/strata-exl3-full512-l.json.tmpl` (config L, Opt73, 2026-10-30)
 
-**Withdrawn as the default on 2026-10-30 (18:10Z; the mini runs config AM again): requests that follow a long prompt fail the quality gate under L (section 0.00000000.5).**
+**Withdrawn as the default on 2026-10-30 (13:52Z; the mini went back to config AM, then to config LQ at 18:52Z, section 0.000000000): requests that follow a long prompt fail the quality gate under L (section 0.00000000.5).**
 
 Config **L** = config AM (section 0.0000000) + `STRATA_KVT_LAZY=0` (`patches/strata/0031`) + `STRATA_PF_MAC_QMIN_TOK=3000` (`patches/strata/0032`), engine `strata_o37j`,
-production on the mini since 2026-10-30T11:49Z. Both knobs are inert unless set; nothing else changes (no weight, context, vision, MTP or transport change).
+production on the mini 2026-10-30T11:49Z-13:52Z. Both knobs are inert unless set; nothing else changes (no weight, context, vision, MTP or transport change).
 - **0031, lazy K/V-trim refill.** A long prompt grows the elastic K/V into the expert cache; the next request trims it back and, in AM, copies every freed slot's expert
   back to the GPU before that request starts (747-792 slots after a 128K prompt, ~7 s). With 0031 the freed slots join the D18 pending refill that the prompt loan's
   slots already use (idle time, decode pieces); until they are back those experts are computed by the Mac's Metal lane, as for the loan's pending slots.
@@ -92,7 +147,7 @@ those experts on the Mac's Metal lane (other rounding) on top of the slots the p
 `0032` alone (a change to which blobs are read, not to what is computed) passes in that state. 0 GPU timeouts in every arm. From now on a candidate runs this check
 as well as `q23.sh` before it becomes the default.
 
-## 0.0000000 Latest configuration (the default again since 2026-10-30T18:10Z): `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
+## 0.0000000 Previous configuration (the default again 2026-10-30 13:52Z-18:52Z): `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
 
 Config **AM** = config S2 (section 0.000000) + `STRATA_PF_ALIGN=131072` with `STRATA_PF_ALIGN_MAXT=2048` (`patches/strata/0030`, engine `strata_o37f`), production on the mini since 2026-10-30T05:10Z.
 The prompt path borrows GPU expert-cache slots for its buffers (1,862,400 B each, not page-aligned), so every buffer's page offset - and the shim's 256 KiB lazy-download rounds - moved with
