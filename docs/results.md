@@ -15,7 +15,9 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.00000000 Latest configuration: `configs/strata-exl3-full512-l.json.tmpl` (config L, Opt73, 2026-10-30)
+## 0.00000000 Withdrawn as the default: `configs/strata-exl3-full512-l.json.tmpl` (config L, Opt73, 2026-10-30)
+
+**Withdrawn as the default on 2026-10-30 (18:10Z; the mini runs config AM again): requests that follow a long prompt fail the quality gate under L (section 0.00000000.5).**
 
 Config **L** = config AM (section 0.0000000) + `STRATA_KVT_LAZY=0` (`patches/strata/0031`) + `STRATA_PF_MAC_QMIN_TOK=3000` (`patches/strata/0032`), engine `strata_o37j`,
 production on the mini since 2026-10-30T11:49Z. Both knobs are inert unless set; nothing else changes (no weight, context, vision, MTP or transport change).
@@ -55,7 +57,7 @@ The standard rows are unchanged (the ABBA has no 1000-token row). Agent turns (s
 
 ### 0.00000000.3 Quality
 
-705-position teacher-forced gate (`q23.sh`) vs p-off: **L top-1 98.01 %, mean KL 0.006181, p99 0.0955 - PASS** (AM 98.16 % / 0.006144 / 0.0955); `STRATA_KVT_LAZY=0` alone 98.16 % / 0.006072 / 0.0955.
+705-position teacher-forced gate (`q23.sh`, fresh restart) vs p-off: **L top-1 98.01 %, mean KL 0.006181, p99 0.0955 - PASS** (after a long prompt L fails: section 0.00000000.5) (AM 98.16 % / 0.006144 / 0.0955); `STRATA_KVT_LAZY=0` alone 98.16 % / 0.006072 / 0.0955.
 Rejected on this gate the same day: `STRATA_D18_K=200` (fewer slots refilled before the first token; single arms 2.5K +7 %): p99 0.154, FAIL - more experts on the Metal lane in the panel's decode.
 
 ### 0.00000000.4 Regression and soak (`final21.sh` + 14-prompt soak, chain74)
@@ -71,7 +73,26 @@ Rejected on this gate the same day: `STRATA_D18_K=200` (fewer slots refilled bef
 | swap after prompt 14 (engine MALLOC_LARGE swapped) | 1286 MB (674 MB) | 1462 MB (587 MB) |
 | GPU timeouts | 0 | 0 |
 
-## 0.0000000 Previous configuration: `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
+### 0.00000000.5 Quality after a long prompt (chain81 / chain82): why L was withdrawn
+
+The quality gate (`q23.sh`, 705 teacher-forced positions vs p-off) restarts the server and scores the panel from that fresh state. A server in use is often in another state:
+the request before was a long prompt, so the K/V has just been trimmed back and the expert slots the prompt path borrowed are still being refilled. `q81_lp.py` scores
+the same panel with a fresh ~33K-token prompt of another conversation sent before each of the 8 panel prompts (same lpcmp vs p-off, same thresholds).
+
+| config | panel state | top-1 | mean KL | p99 KL | gate (p99 < 0.1) |
+|---|---|---|---|---|---|
+| AM | fresh restart (section 0.0000000) | 98.16 % | 0.006144 | 0.0955 | PASS |
+| L | fresh restart (0.00000000.3) | 98.01 % | 0.006181 | 0.0955 | PASS |
+| AM | after a 33K prompt, run 1 / run 2 | 97.59 / 98.30 % | 0.004726 / 0.005848 | **0.0779 / 0.0527** | PASS / PASS |
+| L | after a 33K prompt, run 1 / run 2 | 97.45 / 98.01 % | 0.008550 / 0.007063 | **0.1063 / 0.1123** | **FAIL / FAIL** |
+| AM + `0032` only (`STRATA_PF_MAC_QMIN_TOK=3000`, no `0031`) | after a 33K prompt | 97.45 % | 0.005850 | 0.0655 | PASS |
+
+The cause is `0031` (`STRATA_KVT_LAZY=0`): after a long prompt the expert slots the trimmed K/V gives back are left to the idle refill, so the next requests decode
+those experts on the Mac's Metal lane (other rounding) on top of the slots the prompt's own loan left pending; AM refills them before the next request starts.
+`0032` alone (a change to which blobs are read, not to what is computed) passes in that state. 0 GPU timeouts in every arm. From now on a candidate runs this check
+as well as `q23.sh` before it becomes the default.
+
+## 0.0000000 Latest configuration (the default again since 2026-10-30T18:10Z): `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
 
 Config **AM** = config S2 (section 0.000000) + `STRATA_PF_ALIGN=131072` with `STRATA_PF_ALIGN_MAXT=2048` (`patches/strata/0030`, engine `strata_o37f`), production on the mini since 2026-10-30T05:10Z.
 The prompt path borrows GPU expert-cache slots for its buffers (1,862,400 B each, not page-aligned), so every buffer's page offset - and the shim's 256 KiB lazy-download rounds - moved with

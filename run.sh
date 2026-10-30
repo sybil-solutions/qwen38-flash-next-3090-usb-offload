@@ -9,8 +9,8 @@
 #                           Metal toolchain when the mini does not (Command Line Tools alone have no `metal` compiler), then run ./run.sh on the mini
 #   ./run.sh stop           stop the server this script started (pid file $HOME/shim/server.pid)
 # options: --force (replace differing installed files / rebuild), --restart (stop a running server first), --verify-pack (sha256 of the whole 45.8 GB
-#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-l` = config L = config AM + STRATA_KVT_LAZY=0 (patch 0031: after a long prompt the freed K/V slots refill at idle, not before
-#          the next request) and STRATA_PF_MAC_QMIN_TOK=3000 (0032: prompts under 3000 tokens read only their routed experts), the recommended recipe; `-am` = config AM = config S2 + STRATA_PF_ALIGN=131072 with
+#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-am` = config AM, the recommended recipe; `-l` = config L = config AM + STRATA_KVT_LAZY=0 (patch 0031) and
+#          STRATA_PF_MAC_QMIN_TOK=3000 (0032), WITHDRAWN as the default on 2026-10-30: requests that follow a long prompt fail the quality gate (docs/results.md 0.00000000.5); config AM = config S2 + STRATA_PF_ALIGN=131072 with
 #          STRATA_PF_ALIGN_MAXT=2048 (patch 0030: borrowed prompt buffers of >= 2 MiB start on a 128 KiB boundary for 2048-token chunks); `-s2` = config S2 = config H + --prefill 3072 with STRATA_PF_BIG_MIN=28000 (patch 0026), the 5-bit lane
 #          transport STRATA_PF_XPORT_BITS=5 (0027), STRATA_PF_GRP_FIT=1 (0028) and STRATA_PF_SPLIT2=1 (0029); `-h` = config H = config G + the idle-only SSD-parked conversation cache (patch 0025, --ssd-park-dir $HOME/strata-park, 8 GiB bound); `-g` = config G = config F + the Opt23 doorbell (patch 0024 + libstrata_o23: x pulled as fp16, device-side skip of rings with no cold expert, STRATA_O23=3)
 #          and the fused-decode Metal prefill kernels (EXL3M_PF_FD=2, exl3/metal), the recommended recipe; `-f` = config F (asynchronous USB batches, shim/0006 + libtgusb, TGCU_USB_NPIPE/SUBP/FUSE=1, and the Prefill20 prefill patches 0022/0023); `-e` = config E (decode hoist, patch 0021, STRATA_D19_HOIST=1), `-d` = config D (lazy loan refill, no hoist), `-c` = config C (blocking refill, best decode), and the older ones stay as fallbacks: final, final-g4, final-g4-lru, final-g4-lru-ht, see docs/reproduce.md section 6)
@@ -27,7 +27,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 CHECK=0; FORCE=0; RESTART=0; VERIFY_PACK=0; MODE=up
-CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-l}
+CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-am}
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
