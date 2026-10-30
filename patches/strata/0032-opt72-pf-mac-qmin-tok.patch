@@ -1,0 +1,50 @@
+# Opt72 (2026-10-30): STRATA_PF_MAC_QMIN_TOK=<tokens> (inert unless set; config D sets 3000): a prompt chunk, or a lockstep group (chunk tokens x chunks), under that many
+# tokens does not queue the reads of every expert the GPU does not hold 3 layers ahead; it reads only the experts it routes to, on demand at each layer. A 1000-token
+# chunk routes to ~219 cold experts per layer, about half of them already in the Mac LRU, while the read-ahead read all ~223 the LRU lacks (9,830 blobs = 18 GB per
+# prompt on a ~2.3 GB/s SSD). Measured single arms: 1000 tok 8.51 -> 7.19 s (+18 %), 2.5K 10.17 -> 10.04 s, 400 and 8K unchanged, 0 GPU timeouts.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0031. Source: campaign prefill.opt72.cpp (md5 0ba4f1cc), engine strata_o37j.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 967b528..cf915e7 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -99,6 +99,13 @@ void experts_native(const Batch&, const NativeGeom&, int, int64_t, const void*,
+ 
+ extern "C" int strata_pf_mac_init(void*, const int32_t*, int64_t);
+ extern "C" int strata_pf_mac_prefetch(void*, int, int, const int32_t*, int);
++// Opt72 (STRATA_PF_MAC_QMIN_TOK=N, default 0 = off): a chunk (a lockstep group: all its chunks) of fewer than N tokens does not queue the
++// reads of EVERY cold expert 3 layers ahead; it reads only the experts it routes to, on demand at each layer (fewer bytes, not overlapped).
++// At ~1000 tokens a chunk routes to ~220 cold experts per layer, about half of them in the Mac LRU; the read-ahead reads all ~223 the LRU lacks.
++static int64_t pf_mac_qmin_tok() {
++    static const int64_t v = [] { const char* e = std::getenv("STRATA_PF_MAC_QMIN_TOK"); return e != nullptr && std::atoll(e) > 0 ? (int64_t) std::atoll(e) : (int64_t) 0; }();
++    return v;
++}
+ extern "C" void strata_pf_mac_release();
+ extern "C" int strata_pf_mac_compute(void*, int, int, const int32_t*, int, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, float*, double*);
+ extern "C" int strata_pf_mac_submit(void*, int, int, const int32_t*, int, const float*, int, int64_t, const int32_t*, const int32_t*, const float*, float*, void**, double*);
+@@ -2896,7 +2903,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             }
+             if (dq_n > 0) strata::prefill::xport8_dequant(dst, reinterpret_cast<uint16_t*>(m.mac_y_dev), dq_n, m.cs);
+         };
+-        if (mac_pf && T >= 512 && (ls == nullptr || lj == 0) && m.mac_ahead == 0 && std::getenv("STRATA_PF_NOEARLYQ") == nullptr) {   // the group's first reads start before layer 0's front (the SSD join of the first layers hides behind the setup + front)
++        if (mac_pf && T >= 512 && T * (ls != nullptr ? (int64_t) ls->n : 1) >= pf_mac_qmin_tok() && (ls == nullptr || lj == 0) && m.mac_ahead == 0 && std::getenv("STRATA_PF_NOEARLYQ") == nullptr) {   // the group's first reads start before layer 0's front (the SSD join of the first layers hides behind the setup + front)
+             for (int64_t ll = LB; ll < std::min<int64_t>(LE, LB + (ls != nullptr ? (int64_t) strata_pf_mac_nsets() : 2)); ++ll) pf_queue_reads(ll);
+             m.mac_ahead = std::min<int64_t>(LE - LB, ls != nullptr ? (int64_t) strata_pf_mac_nsets() : 2);
+         }
+@@ -3539,7 +3546,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 }
+                                 mac_x_issued = true;
+                             }
+-                            if (any_cold && T >= 512 && (ls == nullptr || (lj == 0 && l == LB))) {   // (a lockstep group queues the first two layers' reads here; layer l + 2's are queued once every job of layer l is done)
++                            if (any_cold && T >= 512 && T * (ls != nullptr ? (int64_t) ls->n : 1) >= pf_mac_qmin_tok() && (ls == nullptr || (lj == 0 && l == LB))) {   // (a lockstep group queues the first two layers' reads here; layer l + 2's are queued once every job of layer l is done)
+                                 const int64_t ahead = ls != nullptr ? (int64_t) strata_pf_mac_nsets() - 1 : 1;   // a group starts with every slot set reading
+                                 for (int64_t ll = l; ll <= l + ahead && ll < LE; ++ll) {
+                                     if (ll == m.mac_pref_l || ll < LB + m.mac_ahead) continue;
+@@ -4743,7 +4750,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                 if (!b_taken && ls->split2 && !parked_early) { ls->done(); if (!bind(ls->sF2b(l - LB))) return false; }   // no Mac job in this layer: the F2b turn is empty too
+                 if (!b_taken) { ls->done(); if (!bind(ls->sB(l - LB))) return false; }   // no Mac job in this layer: the B turn is empty
+                 if (inj_saved != nullptr) { m.inj = inj_saved; inj_saved = nullptr; }
+-                if (lj == ls->n - 1 && mac_pf && m.T >= 512) {   // every chunk's job of layer l is collected: its slot set is free for layer l + nsets
++                if (lj == ls->n - 1 && mac_pf && m.T >= 512 && m.T * (int64_t) ls->n >= pf_mac_qmin_tok()) {   // every chunk's job of layer l is collected: its slot set is free for layer l + nsets
+                     const int64_t nsets_l = strata_pf_mac_nsets();
+                     if (l + nsets_l < LE) pf_queue_reads(l + nsets_l);
+                     else if (ls->more) {   // the next group's first layers: the same sets, read behind this group's last layers (no group starts with an SSD join)

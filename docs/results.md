@@ -15,7 +15,63 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.0000000 Latest configuration: `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
+## 0.00000000 Latest configuration: `configs/strata-exl3-full512-l.json.tmpl` (config L, Opt73, 2026-10-30)
+
+Config **L** = config AM (section 0.0000000) + `STRATA_KVT_LAZY=0` (`patches/strata/0031`) + `STRATA_PF_MAC_QMIN_TOK=3000` (`patches/strata/0032`), engine `strata_o37j`,
+production on the mini since 2026-10-30T11:49Z. Both knobs are inert unless set; nothing else changes (no weight, context, vision, MTP or transport change).
+- **0031, lazy K/V-trim refill.** A long prompt grows the elastic K/V into the expert cache; the next request trims it back and, in AM, copies every freed slot's expert
+  back to the GPU before that request starts (747-792 slots after a 128K prompt, ~7 s). With 0031 the freed slots join the D18 pending refill that the prompt loan's
+  slots already use (idle time, decode pieces); until they are back those experts are computed by the Mac's Metal lane, as for the loan's pending slots.
+- **0032, read-ahead threshold.** For chunks of >= 512 tokens the Mac lane queues the reads of every expert the GPU does not hold, three layers ahead. A 1000-token chunk
+  routes to ~219 such experts per layer, about half of them already in the Mac's RAM LRU, but the read-ahead read all ~223 the LRU lacked (9,830 blobs, ~18 GB per prompt,
+  on an SSD that tops out at ~2.3 GB/s for any thread count). Under 3000 prompt tokens L reads only the routed experts, on demand at each layer.
+
+**Source of these numbers:** the campaign log (plan entries 2026-10-30T08:40Z .. 13:50Z, Opt63 .. Opt74), transcribed; raw logs (`kvt63_*`, `q72_*` rows, `abba_o73_*`,
+`final74.log`, `soak74.log`, `q21_dd.log`, `q21_kv0.log`) are on the mini and not yet in `results/raw/`.
+
+### 0.00000000.1 What each change does (single arms, fresh restart per arm)
+
+| measurement | AM | L's change | arm |
+|---|---|---|---|
+| first 94-token request of another conversation right after a 128K prompt: prompt time (2 reps) | 11.5 / 12.2 s (11.0 / 11.65 s in the closing AM arm) | **4.4 / 4.6 s** | `STRATA_KVT_LAZY=0` (300: 7.0 / 7.4 s) |
+| ... that request's decode / the next request's decode | 32.0 / 33.0 tok/s | 30.7 / 30.2 tok/s (-4 % / -7 %, until the idle refill: 7.6-10 s) | same |
+| 1000-token prompt (2 runs) | 8.54 / 8.48 s (117.6 tok/s) | **7.18 / 7.20 s (139.2 tok/s, +18 %)** | `STRATA_PF_MAC_QMIN_TOK=3000` |
+| 2.5K / 400 / 8K prompt | 10.17 / 4.52 / 10.87 s | 10.04 (+1.2 %) / 4.49 / 10.86 s | same; 2048 instead of 3000: 2.5K unchanged, 1000 tok 7.28 s |
+
+0 GPU timeouts in every arm. Reader threads (`STRATA_PF_MAC_THREADS` 4 / 16 / 32 vs 8) change nothing: the SSD is the limit for 2.5K-8K prompts (~19 GB of expert reads per lockstep group pass).
+
+### 0.00000000.2 ABBA73 (AM L L AM, fresh restart per arm; prefill tok/s run1 / run2)
+
+| arm | 2.5K | 8K | 18K | 33K | decode realistic | TTFT | probes | agent turns (`small_sum`) |
+|---|---|---|---|---|---|---|---|---|
+| Aa (AM, `strata_o37f`) | 223.0/251.7 | 599.0/710.0 | 716.5/787.2 | 830.9/952.8 | 33.48 | 14.76 | 29.08 | 54.36 s |
+| La (**L**, `strata_o37j`) | 224.9/250.3 | 596.9/714.7 | 714.9/787.5 | 829.8/949.7 | 33.09 | 14.74 | 28.72 | 52.23 s |
+| Lb (**L**) | 228.4/252.3 | 600.7/708.7 | 717.4/787.1 | 830.2/952.5 | 33.30 | 14.70 | 28.95 | 52.60 s |
+| Ab (AM) | 226.7/251.5 | 602.3/710.5 | 715.4/788.0 | 832.4/949.8 | 33.23 | 14.74 | 29.30 | 54.11 s |
+| **L vs AM (mean of 2 arms)** | 251.3 vs 251.6 | 711.7 vs 710.3 | 787.3 vs 787.6 | 951.1 vs 951.3 | **33.20 vs 33.36 (-0.5 %)** | 14.72 vs 14.75 | **28.84 vs 29.19 (-1.2 %)** | **52.42 vs 54.24 s (-3.4 %)** |
+
+The standard rows are unchanged (the ABBA has no 1000-token row). Agent turns (short requests after the 33K rows) are 3.4 % faster; decode is within AM's own spread
+(the two AM arms differ by 0.75 %); the probes, run right after the long rows, are 1.2 % slower while the trimmed slots still wait for the idle refill. 0 GPU timeouts, 0 fit fallbacks.
+
+### 0.00000000.3 Quality
+
+705-position teacher-forced gate (`q23.sh`) vs p-off: **L top-1 98.01 %, mean KL 0.006181, p99 0.0955 - PASS** (AM 98.16 % / 0.006144 / 0.0955); `STRATA_KVT_LAZY=0` alone 98.16 % / 0.006072 / 0.0955.
+Rejected on this gate the same day: `STRATA_D18_K=200` (fewer slots refilled before the first token; single arms 2.5K +7 %): p99 0.154, FAIL - more experts on the Metal lane in the panel's decode.
+
+### 0.00000000.4 Regression and soak (`final21.sh` + 14-prompt soak, chain74)
+
+| check | L | AM (chain57) |
+|---|---|---|
+| realistic decode, 29 requests | 33.17 tok/s, TTFT 14.71 s | 33.71, 14.76 |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| 190K needle (depth 50 %) | FOUND, 256 s | FOUND, 257 s |
+| 5 x 32K needles | FOUND 53/48/31/37/34 s | FOUND 51/48/32/37/36 s |
+| soak: 14 x 32K + 190K | 14/14 FOUND (22-56 s), 190K FOUND 232 s, engine alive | 14/14, 231 s |
+| decode probe after the soak (mean of 6) | 27.6 tok/s | 28.8 |
+| swap after prompt 14 (engine MALLOC_LARGE swapped) | 1286 MB (674 MB) | 1462 MB (587 MB) |
+| GPU timeouts | 0 | 0 |
+
+## 0.0000000 Previous configuration: `configs/strata-exl3-full512-am.json.tmpl` (config AM, Opt57, 2026-10-30)
 
 Config **AM** = config S2 (section 0.000000) + `STRATA_PF_ALIGN=131072` with `STRATA_PF_ALIGN_MAXT=2048` (`patches/strata/0030`, engine `strata_o37f`), production on the mini since 2026-10-30T05:10Z.
 The prompt path borrows GPU expert-cache slots for its buffers (1,862,400 B each, not page-aligned), so every buffer's page offset - and the shim's 256 KiB lazy-download rounds - moved with

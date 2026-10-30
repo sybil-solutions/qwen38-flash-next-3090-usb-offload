@@ -1,0 +1,74 @@
+# Opt63 (2026-10-30): STRATA_KVT_LAZY=<N> (inert unless set; config D sets 0): when the elastic K/V is trimmed at the start of a request (a long prompt earlier left it
+# grown), only the first N of the freed slots are refilled before the request; the rest join the D18 pending refill (idle time and decode pieces), the same path the
+# prompt loan's slots already take. Measured (128K needle in conversation A, then 94-token requests of conversation B, x2): first request after the trim 11.6 s -> 4.5 s
+# prompt time (N=0; 300: 7.2 s), its decode -4 %, the next request's -7 % until the idle fill (7.6-10 s); 0 GPU timeouts. Quality gate vs p-off PASS alone (p99 0.0955,
+# top-1 98.16 % = AM). Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0030. Source: campaign generate.opt63.cpp (md5 a7a28403), engine strata_o37j.
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index e241c0b..df72910 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -6164,6 +6164,12 @@ int main(int argc, char** argv) {
+                          cudaGetErrorString(cudaGetLastError()));
+         return ok;
+     };
++    // Opt63 STRATA_KVT_LAZY=K (opt-in; unset = every slot refilled here, as before): a trim copies only the K hottest of the
++    // slots it gives back before the request goes on; the rest stay empty (their experts are misses: the mini computes them,
++    // exact) and go to the Prefill18 pending refill (decode pieces within its stall budget, the idle wait).  After a long
++    // prompt, the next request of another conversation waited for the whole refill (1045 slots, 1.9 GB read and uploaded: 13 s).
++    static const int64_t kvt_lazy = [] { const char* v = std::getenv("STRATA_KVT_LAZY"); return v != nullptr && std::atoll(v) >= 0 ? (int64_t) std::atoll(v) : (int64_t) -1; }();
++    std::vector<std::pair<int32_t, int32_t>> kvt_pend;   // (residency index, slot) a lazy trim left empty, hottest first
+     // A request that needs far fewer cells than the K/V holds gives the rest back: the slots refill with the
+     // profile's hottest experts the GPU does not hold.  Run on a quiet device (as kvg_ensure's `quiesce`).
+     auto kvg_trim = [&](int64_t cells, int64_t hold) -> bool {   // `hold`: the cells a parked conversation could need
+@@ -6210,6 +6216,11 @@ int main(int argc, char** argv) {
+                 const int32_t l = profile[pi].first, e = profile[pi].second;
+                 const size_t i = (size_t) l * (size_t) g.n_expert + (size_t) e;
+                 if (host_res[i] >= 0 || lay.blob_bytes(l) > room) continue;
++                if (kvt_lazy >= 0 && (int64_t) filled.size() >= kvt_lazy) {   // Opt63: past the first K, left for the pending refill
++                    kvt_pend.emplace_back((int32_t) i, (int32_t) s);
++                    ++pi;
++                    break;
++                }
+                 const uint8_t* b = srcp->blob_stable(l, e);
+                 if (b == nullptr) continue;
+                 cudaMemcpyAsync(xcache.device_slot((int32_t) s), b, (size_t) lay.blob_bytes(l), cudaMemcpyHostToDevice,
+@@ -6232,6 +6243,9 @@ int main(int argc, char** argv) {
+         ++kvg.trims;
+         std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
+                              "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
++        if (!kvt_pend.empty())
++            std::fprintf(stderr, "strata kvt: %zu of %lld slots copied at the trim, %zu left to the pending refill (STRATA_KVT_LAZY=%lld)\n",
++                         filled.size(), (long long) (kvg.lo - lo0), kvt_pend.size(), (long long) kvt_lazy);
+         return true;
+     };
+     // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
+@@ -8898,6 +8912,7 @@ int main(int argc, char** argv) {
+             for (size_t k = d18.next; k < hi; ++k) {
+                 const int32_t s = d18.slot[k], i = d18.idx[k];
+                 if (s < d18.lo || s >= slots || occ[(size_t) (s - d18.lo)] || host_res[(size_t) i] >= 0) { ++d18.skipped; continue; }
++                if (kvg.on && s >= kvg.lo && s < kvg.top) { ++d18.skipped; continue; }   // Opt63: the K/V grew back over it
+                 vi.push_back(i);
+                 vs.push_back(s);
+             }
+@@ -9933,6 +9948,21 @@ int main(int argc, char** argv) {
+                     std::fflush(stdout);
+                     return 1;
+                 }
++                if (!kvt_pend.empty()) {   // Opt63: the slots the trim left empty join the pending refill (below any loan: a loan drops only its own region)
++                    int32_t lo = kvt_pend.front().second;
++                    for (const auto& [i, s] : kvt_pend) lo = std::min(lo, s);
++                    if (d18.next >= d18.idx.size()) {
++                        d18.idx.clear(); d18.slot.clear(); d18.next = 0; d18.total = 0; d18.lo = lo;
++                        d18.pieces_dec = d18.slots_dec = d18.pieces_idle = d18.slots_idle = d18.skipped = 0;
++                        d18.spent_ms = d18.idle_ms = 0.0;
++                    } else {
++                        d18.lo = std::min(d18.lo, lo);
++                    }
++                    for (const auto& [i, s] : kvt_pend) { d18.idx.push_back(i); d18.slot.push_back(s); }
++                    d18.total += (int64_t) kvt_pend.size();
++                    d18.active = true;
++                    kvt_pend.clear();
++                }
+             }
+             int64_t reread_to = -1;   // STRATA_CKPT_REREAD only: read [0, reread_to) again instead of restoring
+             if (resume == 0) {
