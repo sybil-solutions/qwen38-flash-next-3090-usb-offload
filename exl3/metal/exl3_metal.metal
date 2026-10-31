@@ -402,14 +402,14 @@ inline void gemm_body_fd(device const half* A, device const uchar* trb, device f
 kernel void gemm_gu_fd(device const half* A [[buffer(0)]], device float* C [[buffer(1)]], device const GT* tiles [[buffer(2)]], constant PP& p [[buffer(3)]],
                        device const UnitP* units [[buffer(4)]],
                        uint3 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup half As[32 * 32]; threadgroup half Bs[32 * 64]; threadgroup float Cs[32 * 64];
+  threadgroup float TGM[32 * 64]; threadgroup half* As = (threadgroup half*)TGM; threadgroup half* Bs = As + 32 * 32; threadgroup float* Cs = TGM;   // Opt27: Cs aliases As/Bs (used after the K loop)
   const GT T = tiles[tg.y];
   const uint proj = tg.z;
   gemm_body_fd<H, FF>(A + (ulong)proj * p.cap * H, units[T.u].blob + (proj ? O_UT : O_GT), C + (ulong)proj * p.cap * FF, T.r0, T.nv, tg.x * 64u, t, sg, As, Bs, Cs);
 }
 kernel void gemm_d_fd(device const half* A [[buffer(0)]], device float* C [[buffer(1)]], device const GT* tiles [[buffer(2)]], device const UnitP* units [[buffer(3)]],
                       uint3 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup half As[32 * 32]; threadgroup half Bs[32 * 64]; threadgroup float Cs[32 * 64];
+  threadgroup float TGM[32 * 64]; threadgroup half* As = (threadgroup half*)TGM; threadgroup half* Bs = As + 32 * 32; threadgroup float* Cs = TGM;   // Opt27: Cs aliases As/Bs (used after the K loop)
   const GT T = tiles[tg.y];
   gemm_body_fd<FF, H>(A, units[T.u].blob + O_DT, C, T.r0, T.nv, tg.x * 64u, t, sg, As, Bs, Cs);
 }
@@ -479,14 +479,14 @@ inline void gemm_body_fd64(device const half* A, device const uchar* trb, device
 kernel void gemm_gu_fd64(device const half* A [[buffer(0)]], device float* C [[buffer(1)]], device const GT* tiles [[buffer(2)]], constant PP& p [[buffer(3)]],
                          device const UnitP* units [[buffer(4)]],
                          uint3 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup half As[64 * 32]; threadgroup half Bs[32 * 64]; threadgroup float Cs[32 * 64];
+  threadgroup float TGM[32 * 64]; threadgroup half* As = (threadgroup half*)TGM; threadgroup half* Bs = As + 64 * 32; threadgroup float* Cs = TGM;   // Opt27: Cs aliases As/Bs (used after the K loop)
   const GT T = tiles[tg.y];
   const uint proj = tg.z;
   gemm_body_fd64<H, FF>(A + (ulong)proj * p.cap * H, units[T.u].blob + (proj ? O_UT : O_GT), C + (ulong)proj * p.cap * FF, T.r0, T.nv, tg.x * 64u, t, sg, As, Bs, Cs);
 }
 kernel void gemm_d_fd64(device const half* A [[buffer(0)]], device float* C [[buffer(1)]], device const GT* tiles [[buffer(2)]], device const UnitP* units [[buffer(3)]],
                         uint3 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup half As[64 * 32]; threadgroup half Bs[32 * 64]; threadgroup float Cs[32 * 64];
+  threadgroup float TGM[32 * 64]; threadgroup half* As = (threadgroup half*)TGM; threadgroup half* Bs = As + 64 * 32; threadgroup float* Cs = TGM;   // Opt27: Cs aliases As/Bs (used after the K loop)
   const GT T = tiles[tg.y];
   gemm_body_fd64<FF, H>(A, units[T.u].blob + O_DT, C, T.r0, T.nv, tg.x * 64u, t, sg, As, Bs, Cs);
 }

@@ -1,0 +1,35 @@
+start 14:38:39 live md5 8da2281c264dd7c7cf8fc931d83b64dd
+### b0 14:38:41
+{"tag": "f95_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35196, "tok_s": 961.5, "wall_s": 35.29, "ts": "2026-10-30T21:42:19Z"}
+{"tag": "f95_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35225, "tok_s": 960.7, "wall_s": 35.28, "ts": "2026-10-30T21:42:54Z"}
+{"tag": "f95_b0", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11651, "tok_s": 688.2, "wall_s": 11.72, "ts": "2026-10-30T21:43:06Z"}
+{"tag": "f95_b0", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9520, "tok_s": 842.2, "wall_s": 9.58, "ts": "2026-10-30T21:43:16Z"}
+{"tag": "f95_b0", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9100, "tok_s": 281.9, "wall_s": 9.16, "ts": "2026-10-30T21:43:25Z"}
+{"tag": "f95_b0", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9117, "tok_s": 281.3, "wall_s": 9.18, "ts": "2026-10-30T21:43:34Z"}
+  GPU timeouts 0 | errors 0
+### m1 14:43:37
+{"tag": "f95_m1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34984, "tok_s": 967.4, "wall_s": 35.07, "ts": "2026-10-30T21:47:14Z"}
+{"tag": "f95_m1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35015, "tok_s": 966.5, "wall_s": 35.07, "ts": "2026-10-30T21:47:49Z"}
+{"tag": "f95_m1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11617, "tok_s": 690.2, "wall_s": 11.69, "ts": "2026-10-30T21:48:01Z"}
+{"tag": "f95_m1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9556, "tok_s": 839.1, "wall_s": 9.62, "ts": "2026-10-30T21:48:11Z"}
+{"tag": "f95_m1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9026, "tok_s": 284.2, "wall_s": 9.1, "ts": "2026-10-30T21:48:20Z"}
+{"tag": "f95_m1", "target": 2500, "run": 2, "prompt_n": 2564, "cache_n": 0, "prompt_ms": 8986, "tok_s": 285.3, "wall_s": 9.05, "ts": "2026-10-30T21:48:29Z"}
+  GPU timeouts 0 | errors 0
+### m2 14:48:32
+{"tag": "f95_m2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35018, "tok_s": 966.4, "wall_s": 35.12, "ts": "2026-10-30T21:52:09Z"}
+{"tag": "f95_m2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34924, "tok_s": 969.0, "wall_s": 35.0, "ts": "2026-10-30T21:52:44Z"}
+{"tag": "f95_m2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11715, "tok_s": 684.4, "wall_s": 11.78, "ts": "2026-10-30T21:52:56Z"}
+{"tag": "f95_m2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9526, "tok_s": 841.7, "wall_s": 9.58, "ts": "2026-10-30T21:53:05Z"}
+{"tag": "f95_m2", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9211, "tok_s": 278.5, "wall_s": 9.27, "ts": "2026-10-30T21:53:15Z"}
+{"tag": "f95_m2", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9047, "tok_s": 283.5, "wall_s": 9.11, "ts": "2026-10-30T21:53:24Z"}
+  GPU timeouts 0 | errors 0
+### b1 14:53:27
+{"tag": "f95_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35352, "tok_s": 957.3, "wall_s": 35.44, "ts": "2026-10-30T21:57:05Z"}
+{"tag": "f95_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35213, "tok_s": 961.1, "wall_s": 35.27, "ts": "2026-10-30T21:57:40Z"}
+{"tag": "f95_b1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11641, "tok_s": 688.7, "wall_s": 11.71, "ts": "2026-10-30T21:57:52Z"}
+{"tag": "f95_b1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9657, "tok_s": 830.3, "wall_s": 9.72, "ts": "2026-10-30T21:58:01Z"}
+{"tag": "f95_b1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9200, "tok_s": 278.8, "wall_s": 9.26, "ts": "2026-10-30T21:58:11Z"}
+{"tag": "f95_b1", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9040, "tok_s": 283.7, "wall_s": 9.09, "ts": "2026-10-30T21:58:20Z"}
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 8da2281c264dd7c7cf8fc931d83b64dd
+CHAIN95DONE

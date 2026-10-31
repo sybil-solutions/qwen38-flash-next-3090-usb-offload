@@ -1,0 +1,15 @@
+# config LM (2026-10-31): config LQ + EXL3M_PF_SUPER=1 on the Opt27 Metal prefill library. Hashes of the repo sources and the deployed files.
+# repo sources (exl3/metal) -> build.sh -> libexl3metal.dylib, byte-identical to the deployed ~/strata-opt96/lib/libexl3metal_s.dylib
+bench_exl3_metal.c
+build.sh*
+exl3_metal.h
+exl3_metal.metal
+exl3_metal.mm
+test_exl3_metal.py
+5502b205b3c90658039ff58acf0ea3e08d19706e708a47a8f462e1afa118e813  exl3_metal.metal
+8e35c1fe15a937c4300221f1386c88dc1cc65f939ffce8232b035ac3f4effc98  exl3_metal.mm
+a0f64f9bd1dcfc2a3d2bb8b310b1025150ea24d5b1583f37b3bbfa059a6976f6  exl3_metal.h
+293ea9dd14eb78686ca0898d64e25b6c87d207a4e7dce15b1e3a2be33616e179  build.sh
+0248dd0b8bcd1dfe2e6de9702a602ed4c1467d7c17fc61f3eb7a2e8b7acedbab  libexl3metal.dylib (build.sh output == deployed libexl3metal_s.dylib)
+3496e9a0709ed1469f8dcefbb9d31d5f2999362b37c97ca58414d1fd0d444ff5  configs/strata-exl3-full512-lm.json.tmpl
+# deployed (mini): live config md5 a9b635bbf634ef32e1d530b15e34a8e9 (rendered, holds the API key: not in this repo); engine strata_o37j md5 89d02bf527e8f3a967fd121fbe597efc (as config LQ)

@@ -15,7 +15,69 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.000000000 Latest configuration: `configs/strata-exl3-full512-lq.json.tmpl` (config LQ, chain82-84, 2026-10-30)
+## 0.0000000000 Latest configuration: `configs/strata-exl3-full512-lm.json.tmpl` (config LM, chain95-96, 2026-10-30/31)
+
+Config **LM** = config LQ (section 0.000000000) + `EXL3M_PF_SUPER=1` on the Opt27 Metal prefill library (`exl3/metal`, built by `exl3/metal/build.sh`:
+`libexl3metal.dylib` sha256 `0248dd0b8bcd1dfe2e6de9702a602ed4c1467d7c17fc61f3eb7a2e8b7acedbab`, byte-identical to the deployed file). Same engine (`strata_o37j`),
+shim, card library and VRAM split as LQ. Production on the mini since 2026-10-31T00:49Z (rollback: the LQ file back, `rollback96.sh`).
+
+What changed in the Metal lane (the Mac GPU computes the experts that are not resident on the 3090; at 33K it is the binding stage, ~37 s of Metal GPU time per
+35.2 s prompt, chain94):
+- **Super-chunks** (`EXL3M_PF_SUPER=1`, `exl3_metal.mm`): consecutive 16-expert chunks whose rows together fit `pf_chunk_rows` share one rot / gate-up GEMM / mid /
+  down GEMM pass; the combine (`comb_pf`) still runs once per original chunk over the same pairs in the same order, so `y` is bit-identical.
+- **Aliased epilogue tile** (`exl3_metal.metal`, always on): the fp32 staging tile `Cs` reuses the threadgroup memory of `As`/`Bs` (used only after the K loop):
+  16 KB -> 8 KB of threadgroup memory per threadgroup, more threadgroups per core. Bit-identical.
+- Bench (Opt27, realistic cold-lane mix, 296 experts / 7.1K pairs per 2K tokens, M1 Max): 26.6 -> 20.6 ms per job at 2K (-22.6 %), 38.9 -> 33.8 ms at 4K (-13 %);
+  `y` bitwise equal to the previous library on the M4. In situ the gain is smaller (+0.75 % at 33K): the card front and the host thread are close behind the Metal lane.
+
+**Source of these numbers:** `results/raw/config-lm/chain95.summary` and `chain96.summary` (the campaign's summaries, copied from the mini); the engine logs, panel logs
+(`q21_lm96.log`, `q21_lm.log`), `d96_*.jsonl`, `final96.log` and `soak96.log` are on the mini and not in `results/raw/`. Mini clock is PDT (UTC-7).
+
+### 0.0000000000.1 Prefill ABBA95 (LQ LM LM LQ, fresh restart per arm, warm 33K first; tok/s run1 / run2)
+
+| arm | 33K | 8K | 2.5K |
+|---|---|---|---|
+| b0 (LQ) | 961.5 / 960.7 | 688.2 / 842.2 | 281.9 / 281.3 |
+| m1 (**LM**) | 967.4 / 966.5 | 690.2 / 839.1 | 284.2 / 285.3 |
+| m2 (**LM**) | 966.4 / 969.0 | 684.4 / 841.7 | 278.5 / 283.5 |
+| b1 (LQ) | 957.3 / 961.1 | 688.7 / 830.3 | 278.8 / 283.7 |
+| **LM vs LQ** | **967.3 vs 960.2 (+0.75 %)**, every LM run above every LQ run | 840.4 vs 836.3 (run 2, +0.5 %) | 282.9 vs 281.4 (+0.5 %) |
+
+0 GPU timeouts, 0 errors.
+
+### 0.0000000000.2 Quality
+
+| check | LM | LQ |
+|---|---|---|
+| `q81_lp.py`, each panel prompt right after a fresh 33K prompt (8 x 33K) | 98.30 % / 0.006790 / **0.0676 PASS** | 97.45 % / 0.005850 / 0.0655 PASS |
+| `q23.sh`, fresh restart: top-1 / mean KL / p99 KL | 98.16 % / 0.006072 / **0.0955 PASS** | 98.01 % / 0.006181 / 0.0955 PASS |
+
+### 0.0000000000.3 Decode ABBA96 (LQ LM LM LQ, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 tok/s (TTFT) | pass 2 tok/s (TTFT) |
+|---|---|---|
+| Aa (LQ) | 32.97 (14.74) | 33.06 (14.36) |
+| Qa (**LM**) | 33.24 (14.63) | 33.34 (14.26) |
+| Qb (**LM**) | 33.11 (14.60) | 33.41 (14.29) |
+| Ab (LQ) | 33.47 (14.79) | 33.11 (14.39) |
+| **LM vs LQ** | **33.28 vs 33.15 tok/s**; paired per prompt: mean +0.40 %, median +0.23 %, LM slower on 11 of 29 | |
+
+0 GPU timeouts.
+
+### 0.0000000000.4 Regression and soak (`final21.sh` + 14-prompt soak, chain96)
+
+| check | LM | LQ (chain83) |
+|---|---|---|
+| realistic decode, 29 requests | 33.53 tok/s, TTFT 14.63 s | 33.27, 14.73 |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| 190K needle (depth 50 %) | FOUND, 255 s | FOUND, 256 s |
+| 5 x 32K needles | FOUND 51/47/32/37/35 s | FOUND 51/48/32/37/36 s |
+| soak: 14 x 32K + 190K | 14/14 FOUND (22-62 s), 190K FOUND 231 s, engine alive | 14/14 (21-63 s), 232 s |
+| decode probe after the soak (mean of 6) | 28.4 tok/s | 28.7 |
+| swap after prompt 14 (engine MALLOC_LARGE swapped) | 1379 MB (588 MB) | 1502 MB (588 MB) |
+| GPU timeouts | 0 | 0 |
+
+## 0.000000000 Previous configuration (production 2026-10-30 18:52Z - 2026-10-31 00:49Z): `configs/strata-exl3-full512-lq.json.tmpl` (config LQ, chain82-84, 2026-10-30)
 
 Config **LQ** = config L without `0031`: config AM (section 0.0000000) + `STRATA_PF_MAC_QMIN_TOK=3000` (`patches/strata/0032`), engine `strata_o37j` (the config L build,
 patches 0001-0032, sources `results/verification/config-l-sha256.txt`) with `STRATA_KVT_LAZY` unset, so `0031` does nothing. Production on the mini since 2026-10-30T18:52Z.

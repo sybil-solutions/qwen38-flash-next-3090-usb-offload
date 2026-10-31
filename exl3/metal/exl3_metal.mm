@@ -67,6 +67,7 @@ struct exl3m_ctx {
     exl3m_stats st{};
     std::string dname;
     int pf_chunk_rows = 4096, pf_chunk_experts = 16;
+    int pf_super = 0;   // Opt27: fused-decode prefill runs rot/gemm/mid/gemm over super-chunks (consecutive chunks whose rows fit pf_chunk_rows); comb stays per chunk -> bit-identical
     int pf_fd = 0;   // Opt23: the prefill GEMMs decode the trellis into their B tile (no decoded-weight scratch / round trip)
     int pf_lm = 0;   // Prefill20: lane-major decoded weights (decode_w_lm + gemm_*_lm: coalesced 16 B stores, bit-identical results)
     int wait_spin = 0, unretained = 0;   // decode latency knobs: poll the command buffer status instead of waitUntilCompleted; unretained references
@@ -173,6 +174,7 @@ exl3m_ctx *exl3m_create(int n_threads, int n_slots) {
         if (const char *e = getenv("EXL3M_UNRETAINED")) c->unretained = atoi(e);
         if (const char *e = getenv("EXL3M_PF_FD")) c->pf_fd = atoi(e);
         if (const char *e = getenv("EXL3M_PF_LM")) c->pf_lm = atoi(e);                 // Prefill20: lane-major decoded weights
+        if (const char *e = getenv("EXL3M_PF_SUPER")) c->pf_super = atoi(e);           // Opt27: super-chunks (fused decode only)
         if (const char *e = getenv("EXL3M_PF_CHUNK_ROWS")) { if (atoi(e) >= 64) c->pf_chunk_rows = atoi(e); }          // prefill scratch size (rows per chunk) ...
         if (const char *e = getenv("EXL3M_PF_CHUNK_EXPERTS")) { if (atoi(e) >= 1) c->pf_chunk_experts = atoi(e); }     // ... and decoded-weight experts per chunk: smaller = less Metal memory
         c->slots.resize((size_t)n_slots);
@@ -226,6 +228,7 @@ int exl3m_unregister(exl3m_ctx *c, const void *base) {
 int exl3m_set_param(exl3m_ctx *c, const char *key, int64_t v) {
     if (!strcmp(key, "pf_fd")) { c->pf_fd = (int)v; return 0; }
     if (!strcmp(key, "pf_lm")) { c->pf_lm = (int)v; return 0; }
+    if (!strcmp(key, "pf_super")) { c->pf_super = (int)v; return 0; }
     if (!strcmp(key, "pf_chunk_rows") && v >= 64) { c->pf_chunk_rows = (int)v; return 0; }
     if (!strcmp(key, "pf_chunk_experts") && v >= 1) { c->pf_chunk_experts = (int)v; return 0; }
     if (!strcmp(key, "wait_spin")) { c->wait_spin = (int)v; return 0; }
@@ -413,9 +416,18 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
             }
             chunks.push_back({u0, nu, rows});
         }
+        // Opt27 super-chunks: consecutive chunks whose rows together fit pf_chunk_rows share one rot / gemm_gu / mid / gemm_d pass (the per-row
+        // results do not depend on the grouping); comb_pf still runs once per chunk over the same pairs in the same order -> y is bit-identical.
+        struct Super { size_t c0, c1; uint32_t rows; };
+        std::vector<Super> supers;
+        for (size_t k = 0; k < chunks.size(); k++) {
+            if (c->pf_fd && c->pf_super && !supers.empty() && supers.back().rows + chunks[k].rows <= (uint32_t)c->pf_chunk_rows) { supers.back().c1 = k + 1; supers.back().rows += chunks[k].rows; }
+            else supers.push_back({k, k + 1, chunks[k].rows});
+        }
         uint32_t cap_rows = 0; int maxg = 0; size_t tbl_bytes = 0;
-        for (auto &ch : chunks) { cap_rows = std::max(cap_rows, ch.rows); maxg = std::max(maxg, ch.u1 - ch.u0);
+        for (auto &ch : chunks) { maxg = std::max(maxg, ch.u1 - ch.u0);
             tbl_bytes += 256 + (size_t)(ch.u1 - ch.u0) * 16 + 256 + (size_t)ch.rows * 8 + 256 + ((size_t)ch.rows / 32 + (size_t)(ch.u1 - ch.u0) + 1) * 32 + 256 + (size_t)ch.rows * 16 + 1024; }
+        for (auto &sp : supers) { cap_rows = std::max(cap_rows, sp.rows); tbl_bytes += 2048; }
         cap_rows += 64;
 
         Slot *s = acquire(c);
@@ -477,12 +489,12 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
         char *tbl = (char *)s->p_tbl.contents; size_t toff = 0;
         auto take = [&](size_t n) { toff = (toff + 255) & ~(size_t)255; size_t o = toff; toff += n; return o; };
         std::vector<int32_t> row_slot((size_t)n_tok, -1);
-        for (auto &ch : chunks) {
+        for (auto &sp : supers) {
+            const Chunk ch = { chunks[sp.c0].u0, chunks[sp.c1 - 1].u1, sp.rows };   // the super-chunk's units and rows (== the chunk without pf_super)
             const int G = ch.u1 - ch.u0; const uint32_t R = ch.rows;
             size_t o_units = take((size_t)G * 16), o_uor = take((size_t)R * 4), o_src = take((size_t)R * 4);
             size_t ntiles_max = (size_t)R / 32 + (size_t)G + 1;
             size_t o_tiles = take(ntiles_max * 16), o_tiles64 = take(ntiles_max * 16);
-            size_t o_touched = take((size_t)R * 4), o_tptr = take(((size_t)R + 1) * 4), o_cps = take((size_t)R * 8);
             UnitPH *U = (UnitPH *)(tbl + o_units); uint32_t *uor = (uint32_t *)(tbl + o_uor); int32_t *src = (int32_t *)(tbl + o_src);
             GTH *tiles = (GTH *)(tbl + o_tiles), *tiles64 = (GTH *)(tbl + o_tiles64); uint32_t ntiles = 0, ntiles64 = 0;
             std::vector<float> pw(R); std::vector<uint32_t> prow(R);
@@ -505,16 +517,6 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
                 } else
                 for (uint32_t r = 0; r < nr; r += 32) tiles[ntiles++] = { (uint32_t)g, U[g].row0 + r, std::min<uint32_t>(32, nr - r), 0 };
             }
-            // combine CSR: touched rows, pairs in chunk order
-            uint32_t *touched = (uint32_t *)(tbl + o_touched), *tptr = (uint32_t *)(tbl + o_tptr); CPH *cps = (CPH *)(tbl + o_cps);
-            uint32_t nt = 0;
-            for (uint32_t i = 0; i < R; i++) { int32_t &rs = row_slot[prow[i]]; if (rs < 0) { rs = (int32_t)nt; touched[nt++] = prow[i]; } }
-            std::vector<uint32_t> cnt(nt + 1, 0);
-            for (uint32_t i = 0; i < R; i++) cnt[(size_t)row_slot[prow[i]] + 1]++;
-            for (uint32_t i = 0; i < nt; i++) cnt[i + 1] += cnt[i];
-            memcpy(tptr, cnt.data(), ((size_t)nt + 1) * 4);
-            { std::vector<uint32_t> fill(cnt.begin(), cnt.end() - 1); for (uint32_t i = 0; i < R; i++) cps[fill[(size_t)row_slot[prow[i]]]++] = { i, pw[i] }; }
-            for (uint32_t i = 0; i < nt; i++) row_slot[touched[i]] = -1;
             // encode
             PPH pp = { R, (uint32_t)s->p_cap, 0, 0 };
             const MTLSize tg128 = MTLSizeMake(128, 1, 1);
@@ -569,11 +571,27 @@ static int prefill_submit_impl(exl3m_ctx *c, const void *x, bool half_io, int n_
             [en setBuffer:s->p_tbl offset:o_tiles atIndex:3];
             if (!(c->skip_mask & 16)) [en dispatchThreadgroups:MTLSizeMake(40, ntiles, 1) threadsPerThreadgroup:tg128];
             }
-            [en setComputePipelineState:c->P.comb_pf];
-            [en setBuffer:s->p_tbl offset:o_units atIndex:0]; [en setBuffer:s->p_tbl offset:o_uor atIndex:1]; [en setBuffer:s->p_Yd offset:0 atIndex:2];
-            [en setBuffer:s->p_tbl offset:o_touched atIndex:3]; [en setBuffer:s->p_tbl offset:o_tptr atIndex:4]; [en setBuffer:s->p_tbl offset:o_cps atIndex:5];
-            [en setBuffer:s->p_y offset:0 atIndex:6];
-            if (!(c->skip_mask & 32)) [en dispatchThreadgroups:MTLSizeMake(20, nt, 1) threadsPerThreadgroup:tg128];
+            // combine, once per chunk of the super-chunk: touched rows, pairs in chunk order (rows of chunk k are [rb, rb + rows) of the super-chunk)
+            uint32_t rb = 0;
+            for (size_t k = sp.c0; k < sp.c1; k++) {
+                const uint32_t Rc = chunks[k].rows;
+                const size_t o_touched = take((size_t)Rc * 4), o_tptr = take(((size_t)Rc + 1) * 4), o_cps = take((size_t)Rc * 8);
+                uint32_t *touched = (uint32_t *)(tbl + o_touched), *tptr = (uint32_t *)(tbl + o_tptr); CPH *cps = (CPH *)(tbl + o_cps);
+                uint32_t nt = 0;
+                for (uint32_t i = rb; i < rb + Rc; i++) { int32_t &rs = row_slot[prow[i]]; if (rs < 0) { rs = (int32_t)nt; touched[nt++] = prow[i]; } }
+                std::vector<uint32_t> cnt(nt + 1, 0);
+                for (uint32_t i = rb; i < rb + Rc; i++) cnt[(size_t)row_slot[prow[i]] + 1]++;
+                for (uint32_t i = 0; i < nt; i++) cnt[i + 1] += cnt[i];
+                memcpy(tptr, cnt.data(), ((size_t)nt + 1) * 4);
+                { std::vector<uint32_t> fill(cnt.begin(), cnt.end() - 1); for (uint32_t i = rb; i < rb + Rc; i++) cps[fill[(size_t)row_slot[prow[i]]]++] = { i, pw[i] }; }
+                for (uint32_t i = 0; i < nt; i++) row_slot[touched[i]] = -1;
+                [en setComputePipelineState:c->P.comb_pf];
+                [en setBuffer:s->p_tbl offset:o_units atIndex:0]; [en setBuffer:s->p_tbl offset:o_uor atIndex:1]; [en setBuffer:s->p_Yd offset:0 atIndex:2];
+                [en setBuffer:s->p_tbl offset:o_touched atIndex:3]; [en setBuffer:s->p_tbl offset:o_tptr atIndex:4]; [en setBuffer:s->p_tbl offset:o_cps atIndex:5];
+                [en setBuffer:s->p_y offset:0 atIndex:6];
+                if (!(c->skip_mask & 32) && nt) [en dispatchThreadgroups:MTLSizeMake(20, nt, 1) threadsPerThreadgroup:tg128];
+                rb += Rc;
+            }
         }
         if (half_io) {   // fp32 rows -> fp16 on the GPU (the host's clamp + cast, bit for bit), behind the last chunk's combine
             const uint32_t nel = (uint32_t)n_tok * H;
