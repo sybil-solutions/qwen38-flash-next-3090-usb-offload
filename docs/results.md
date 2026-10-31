@@ -15,10 +15,70 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.000000000000 Latest configuration: `configs/strata-exl3-full512-lo.json.tmpl` (config LO, chain109-114, 2026-10-31)
+## 0.0000000000000 Latest configuration: `configs/strata-exl3-full512-lp.json.tmpl` (config LP, chain115-117, 2026-10-31)
+
+Config **LP** = config LO (section 0.000000000000) + `STRATA_PREFILL_RING=8`. Same engine (`strata_o37r`), shim, card library, Metal library and VRAM split
+as LO: a template change only, no patch. Production on the mini since 2026-10-31T16:20Z (09:20 PDT).
+
+What it changes: the prompt path keeps a ring of expert-streaming slots on the card (96 at a 3072-token chunk, 170.5 MiB of the 2280 MiB loan,
+chain115's per-section loan dump). Under the Mac lane (`STRATA_PF_MAC=1`) the experts the card does not hold are computed on the Mac, so nothing streams
+through that ring during a long prompt. `STRATA_PREFILL_RING=8` sets it to its minimum (8 = STAGE), and the 33K prompt borrows 1201 card slots instead of 1289:
+88 more resident experts. The rows each expert computes and the order of the sums are unchanged.
+
+**Source of these numbers:** `results/raw/config-lp/chain115.summary` (loan dump), `chain116.summary` (prefill ABBA), `chain117.summary` (quality, decode
+ABBA, regression, soak), copied from the mini. The 33K bench prompt is 33,842 tokens. Mini clock is PDT (UTC-7).
+
+### 0.0000000000000.1 The 33K loan by section (chain115, config LO, T = 3072, `STRATA_PF_LOAN_DUMP=1` on a diagnostic build)
+
+| section | MiB | what it holds |
+|---|---|---|
+| group | 810.8 | the lockstep group's 5 extra fp32 residual streams (T x 4 x 2560) and the parked MoE state |
+| set scratch | 692.7 | the largest of the GDN / attention / MoE scratch sets (the MoE set) |
+| chunk bufs | 425.8 | the chunk's own activations |
+| ring | 170.5 | 96 expert-streaming slots (config LP: 8) |
+| gemm | 96.0 | GEMM scratch and cuBLAS workspace |
+| mac x/y | 65.2 | the Mac lane's packed x and y buffers |
+| dq + mmq | 18.8 | dequant buffers |
+| **total** | **2279.8** | |
+
+### 0.0000000000000.2 Prefill ABBA116 (LO LP LP LO, fresh restart per arm, warm 33K first; tok/s run 1 / run 2)
+
+| prefill size | LO (b0) | LP (r1) | LP (r2) | LO (b1) | LO mean | LP mean | change |
+|---|---|---|---|---|---|---|---|
+| 33K (33,842) | 997.7 / 995.1 | 1001.8 / 998.8 | 1001.9 / 1001.1 | 998.5 / 994.3 | 996.4 | **1000.9** | +0.45 % |
+| 8K (run 2) | 828.3 | 845.0 | 851.1 | 834.6 | 831.5 | **848.1** | +2.0 % |
+| 2.5K | 282.2 / 283.1 | 283.7 / 288.6 | 288.4 / 289.6 | 283.2 / 282.5 | 282.8 | **287.6** | +1.7 % |
+
+Loan (guided refill after the 33K rows): LO 1289 slots, LP 1201. Every LP 33K run is above every LO 33K run; GPU timeouts 0, errors 0. The 8K first run of
+each arm (679-687) follows the 33K rows' refill and is the same in both configs.
+
+### 0.0000000000000.3 Quality (705 teacher-forced positions, top-64-support KL vs the BF16-expert reference; gate top-1 >= 97 %, mean < 0.01, p99 < 0.1)
+
+| check | top-1 | mean KL | p99 KL | gate |
+|---|---|---|---|---|
+| each panel prompt right after a fresh 33K prompt (q81_lp) | 97.87 % | 0.005694 | 0.0639 | PASS |
+| fresh restart (q23) | 98.44 % | 0.006099 | 0.0829 | PASS (identical to LO: short prompts never use the ring) |
+
+### 0.0000000000000.4 Decode ABBA117 (LO LP LP LO, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 | pass 2 |
+|---|---|---|
+| LO (Aa) | 33.55 | 33.68 |
+| LP (Qa) | 33.70 | 33.41 |
+| LP (Qb) | 33.73 | 33.43 |
+| LO (Ab) | 33.53 | 33.73 |
+
+Arm means LO 33.62, LP 33.57 tok/s; paired per prompt LP/LO - 1: mean -0.15 %, median +0.23 %, LP slower on 14 of 29: decode unchanged.
+
+### 0.0000000000000.5 Regression and soak (`final21.sh` + 14-prompt soak, chain117)
+
+final21 PASS: realistic decode 33.30 tok/s, tool reuse and image pass, 190K needle found (189,450 tokens, 252 s), 5 x 32K needles found. Soak: 14/14 found
+(190K in 226 s), swap peak 1513 MB of 2048 (LO 1392), engine alive, 0 GPU timeouts.
+
+## 0.000000000000 Previous configuration (production 2026-10-31 12:29Z - 16:20Z): `configs/strata-exl3-full512-lo.json.tmpl` (config LO, chain109-114, 2026-10-31)
 
 Config **LO** = config LN (section 0.00000000000) + `STRATA_PF_FOLD_SHARED=1` (`patches/strata/0034`), engine `strata_o37r` (= the config LN build with 0034:
-`src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LN). Production on the mini since 2026-10-31T12:29Z.
+`src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LN). Production on the mini 2026-10-31T12:29Z - 16:20Z.
 
 What it changes: a long prompt borrows card expert slots for its buffers (the "loan"; at 33K, 1390 slots of ~1.87 MB). Under `STRATA_PF_GROUP=6` each chunk of a
 lockstep group parks its MoE state until the Mac's y rows arrive: the resident experts' partial sum S, the shared-expert term SH (T x 2560 fp32) and its gate SG

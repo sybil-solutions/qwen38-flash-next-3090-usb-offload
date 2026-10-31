@@ -1,0 +1,3 @@
+# config LP (2026-10-31): config LO + STRATA_PREFILL_RING=8 in the template; no patch, no source change (every other file as config-lo-sha256.txt).
+217d304383d2cca68e0c6c8d0f15e64a1c4c9bd72f567cdd2d8c8a75de25465f  configs/strata-exl3-full512-lp.json.tmpl
+# deployed (mini): engine strata_o37r md5 4f647ce4e450d58735c4859e98ac2b1a (= LO); live config md5 d2fb0bcce16fca03888738852455bda8 (2026-10-31 09:20:04 PDT)

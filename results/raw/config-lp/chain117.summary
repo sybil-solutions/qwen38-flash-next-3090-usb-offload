@@ -1,0 +1,70 @@
+start 06:34:19 live md5 6956b020e88f3a5ef02e17cd169b35f8
+lp.json md5 d2fb0bcce16fca03888738852455bda8 (lo.json 6956b020e88f3a5ef02e17cd169b35f8)
+### lp lp117 06:36:32
+lp rc 0 06:43:39
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 0
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 97.87%, mean KL 0.005694 nats, p99 KL 0.063909 nats, mean |dlogp(target)| 0.07059  (KL = top-64-support estimate)
+GATE: PASS
+post-33K gate: GATE: PASS
+fresh q23 lp rc 0 06:48:11
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.44%, mean KL 0.006099 nats, p99 KL 0.082877 nats, mean |dlogp(target)| 0.06640  (KL = top-64-support estimate)
+GATE: PASS
+Aa pass 1: requests 29 mean tok/s 33.55 ttft 14.52 wall 23.26
+Aa pass 2: requests 29 mean tok/s 33.68 ttft 14.15 wall 22.85
+  Aa GPU timeouts 0 07:12:44
+Qa pass 1: requests 29 mean tok/s 33.70 ttft 14.48 wall 23.16
+Qa pass 2: requests 29 mean tok/s 33.41 ttft 14.14 wall 22.93
+  Qa GPU timeouts 0 07:37:16
+Qb pass 1: requests 29 mean tok/s 33.73 ttft 14.49 wall 23.22
+Qb pass 2: requests 29 mean tok/s 33.43 ttft 14.12 wall 22.92
+  Qb GPU timeouts 0 08:01:50
+Ab pass 1: requests 29 mean tok/s 33.53 ttft 14.55 wall 23.29
+Ab pass 2: requests 29 mean tok/s 33.73 ttft 14.16 wall 22.84
+  Ab GPU timeouts 0 08:26:19
+PAIRED per-prompt lp/LO - 1: n 29, mean -0.15 %, median +0.23 %, lp slower on 14 of 29
+ARM MEANS LO 33.62 lp 33.57
+final21 rc 0 08:57:26
+REALISTIC29 requests 29 mean tok/s 33.30 ttft mean 14.51 wall mean 23.33
+RESULT: PASS (prefix reused True, answer uses the tool result True)
+RESULT: PASS
+ 190k depth  50%: FOUND  (189,450 prompt tokens, 252 s)
+  32k depth  10%: FOUND  (33,286 prompt tokens, 50 s)
+  32k depth  50%: FOUND  (33,286 prompt tokens, 48 s)
+  32k depth  90%: FOUND  (33,286 prompt tokens, 32 s)
+  32k depth  30%: FOUND  (33,286 prompt tokens, 41 s)
+  32k depth  70%: FOUND  (33,286 prompt tokens, 37 s)
+GPU timeouts in the whole regression: 0
+soak rc 0 09:15:19
+prompt 1:   32k depth  10%: FOUND  (33,286 prompt tokens, 51 s)
+prompt 2:   32k depth  50%: FOUND  (33,286 prompt tokens, 44 s)
+prompt 3:   32k depth  90%: FOUND  (33,286 prompt tokens, 44 s)
+prompt 4:   32k depth  30%: FOUND  (33,286 prompt tokens, 36 s)
+prompt 5:   32k depth  70%: FOUND  (33,286 prompt tokens, 33 s)
+SWAP after_5 09:03:30 wired_MiB 12793 swap: total = 2048.00M used = 1051.62M free = 996.38M (encrypted) engine MALLOC_LARGE swapped: 1.1G
+prompt 6:   32k depth  20%: FOUND  (33,286 prompt tokens, 44 s)
+prompt 7:   32k depth  60%: FOUND  (33,286 prompt tokens, 34 s)
+prompt 8:   32k depth  80%: FOUND  (33,286 prompt tokens, 21 s)
+prompt 9:   32k depth  40%: FOUND  (33,286 prompt tokens, 35 s)
+SWAP after_9 09:06:07 wired_MiB 12793 swap: total = 2048.00M used = 1343.19M free = 704.81M (encrypted) engine MALLOC_LARGE swapped: 1.2G
+prompt 10:   32k depth  95%: FOUND  (33,286 prompt tokens, 32 s)
+SWAP after_10 09:06:44 wired_MiB 12774 swap: total = 2048.00M used = 1361.69M free = 686.31M (encrypted) engine MALLOC_LARGE swapped: 1.3G
+prompt 11 (190K):  190k depth  30%: FOUND  (189,450 prompt tokens, 226 s)
+SWAP after_11 09:10:36 wired_MiB 12781 swap: total = 2048.00M used = 1390.88M free = 657.12M (encrypted) engine MALLOC_LARGE swapped: 1.3G
+prompt 11:   32k depth  50%: FOUND  (33,286 prompt tokens, 61 s)
+SWAP after_11 09:11:40 wired_MiB 12777 swap: total = 2048.00M used = 1513.38M free = 534.62M (encrypted) engine MALLOC_LARGE swapped: 698.6M
+prompt 12:   32k depth  15%: FOUND  (33,286 prompt tokens, 44 s)
+SWAP after_12 09:12:30 wired_MiB 12774 swap: total = 2048.00M used = 1513.38M free = 534.62M (encrypted) engine MALLOC_LARGE swapped: 925.5M
+prompt 13:   32k depth  85%: FOUND  (33,286 prompt tokens, 41 s)
+SWAP after_13 09:13:16 wired_MiB 12774 swap: total = 2048.00M used = 1513.38M free = 534.62M (encrypted) engine MALLOC_LARGE swapped: 829.5M
+prompt 14:   32k depth  45%: FOUND  (33,286 prompt tokens, 40 s)
+SWAP after_14 09:14:01 wired_MiB 12888 swap: total = 2048.00M used = 1513.38M free = 534.62M (encrypted) engine MALLOC_LARGE swapped: 1.0G
+decode tok/s 28.2 n 300 drafts 215/249 md5 8af670adc70a
+decode tok/s 32.2 n 300 drafts 162/261 md5 31c296a02227
+decode tok/s 26.6 n 279 drafts 130/232 md5 014264fa7231
+decode tok/s 28.0 n 300 drafts 217/234 md5 f60e112b2b67
+decode tok/s 32.3 n 300 drafts 169/273 md5 d866bdef3293
+decode tok/s 26.2 n 300 drafts 138/265 md5 f65777d14dd0
+engine alive:        1; GPU timeouts 0
+restore22: OK live md5 6956b020e88f3a5ef02e17cd169b35f8
+CHAIN117DONE

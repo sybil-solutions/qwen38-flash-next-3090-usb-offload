@@ -1,0 +1,18 @@
+start 06:05:29 live md5 6956b020e88f3a5ef02e17cd169b35f8
+### d 06:05:30
+{"tag": "f115_d", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 33984, "tok_s": 995.8, "wall_s": 34.08, "ts": "2026-10-31T13:09:05Z"}
+{"tag": "f115_d", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11718, "tok_s": 684.2, "wall_s": 11.79, "ts": "2026-10-31T13:09:17Z"}
+   4 strata loan: T 3072 owned 0 chunk bufs        425.8 MiB
+   4 strata loan: T 3072 owned 0 dq + mmq           18.8 MiB
+   4 strata loan: T 3072 owned 0 gemm               96.0 MiB
+   4 strata loan: T 3072 owned 0 group             810.8 MiB
+   4 strata loan: T 3072 owned 0 kv stage            0.0 MiB
+   4 strata loan: T 3072 owned 0 mac x/y            65.2 MiB
+   4 strata loan: T 3072 owned 0 ring              170.5 MiB
+   4 strata loan: T 3072 owned 0 set scratch       692.7 MiB
+   4 strata loan: T 3072 owned 0 TOTAL   2279.8 MiB (ring slots 96)
+strata d7: req 1 flags 15: guided refill of 1289 slots (342 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 1258 of 4096 candidates in 1291
+strata d7: req 2 flags 15: guided refill of 1289 slots (957 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 228 of 4096 candidates in 175 m
+  GPU timeouts 0
+restore22: OK live md5 6956b020e88f3a5ef02e17cd169b35f8
+CHAIN115DONE

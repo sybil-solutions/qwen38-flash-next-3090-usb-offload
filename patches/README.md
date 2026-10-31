@@ -50,7 +50,9 @@ unchanged at that point, checked with `cmp`); `0005` brings `prefill.cpp` to the
 
 **Config D (`0020`).** Config C + one patch to `generate.cpp` (diff of the end state of `0019` against the Prefill18 source, sha256 in [`results/verification/config-d-sha256.txt`](../results/verification/config-d-sha256.txt)); the config template differs from C by `STRATA_D7_MODE=15` and `STRATA_D18_K=300`.
 
-**Config LO (`0034`; the default since 2026-10-31 12:29Z, `docs/results.md` 0.000000000000).** Config LN + one patch to `prefill.cpp` (diff of the LN source `prefill.opt99.cpp`, 287c2b92, against the LO source `prefill.opt113.cpp`, 52d3164a; engine `strata_o37r`), sha256 in [`results/verification/config-lo-sha256.txt`](../results/verification/config-lo-sha256.txt); the template adds `STRATA_PF_FOLD_SHARED=1`.
+**Config LP (no patch; the default since 2026-10-31 16:20Z, `docs/results.md` 0.0000000000000).** Config LO + `STRATA_PREFILL_RING=8` in the template: an existing knob of the engine built with 0001-0034, so no new patch.
+
+**Config LO (`0034`; the default 2026-10-31 12:29Z - 16:20Z, `docs/results.md` 0.000000000000).** Config LN + one patch to `prefill.cpp` (diff of the LN source `prefill.opt99.cpp`, 287c2b92, against the LO source `prefill.opt113.cpp`, 52d3164a; engine `strata_o37r`), sha256 in [`results/verification/config-lo-sha256.txt`](../results/verification/config-lo-sha256.txt); the template adds `STRATA_PF_FOLD_SHARED=1`.
 
 **Config LN (`0033`; the default 2026-10-31 05:02Z - 12:29Z, `docs/results.md` 0.00000000000).** Config LM + one patch to `prefill.cpp` (diff of the config L source `prefill.opt72.cpp`, 0ba4f1cc, against the LN source `prefill.opt99.cpp`, 287c2b92; engine `strata_o37q`), sha256 in [`results/verification/config-ln-sha256.txt`](../results/verification/config-ln-sha256.txt); the template adds `STRATA_PF_PUSH_NOSYNC=1` and `STRATA_PF_Y2=1`.
 
