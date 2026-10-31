@@ -9,7 +9,8 @@
 #                           Metal toolchain when the mini does not (Command Line Tools alone have no `metal` compiler), then run ./run.sh on the mini
 #   ./run.sh stop           stop the server this script started (pid file $HOME/shim/server.pid)
 # options: --force (replace differing installed files / rebuild), --restart (stop a running server first), --verify-pack (sha256 of the whole 45.8 GB
-#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-lm` = config LM = config LQ + EXL3M_PF_SUPER=1 (exl3/metal Opt27: super-chunk prefill GEMMs, bit-identical), the recommended recipe;
+#          pack against the manifest; reads all of it), --config NAME (template in configs/: default `strata-exl3-full512-ln` = config LN = config LM + STRATA_PF_PUSH_NOSYNC=1 and STRATA_PF_Y2=1 (patch 0033: no GPU drain after the split y push),
+#          the recommended recipe; `-lm` = config LM = config LQ + EXL3M_PF_SUPER=1 (exl3/metal Opt27: super-chunk prefill GEMMs, bit-identical);
 #          `-lq` = config LQ = config AM + STRATA_PF_MAC_QMIN_TOK=3000 (patch 0032); `-am` =
 #          config AM; `-l` = config L = config AM + STRATA_KVT_LAZY=0 (patch 0031) and
 #          STRATA_PF_MAC_QMIN_TOK=3000 (0032), WITHDRAWN as the default on 2026-10-30: requests that follow a long prompt fail the quality gate (docs/results.md 0.00000000.5); config AM = config S2 + STRATA_PF_ALIGN=131072 with
@@ -29,7 +30,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 CHECK=0; FORCE=0; RESTART=0; VERIFY_PACK=0; MODE=up
-CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-lm}
+CONFIG_NAME=${CONFIG_NAME:-strata-exl3-full512-ln}
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
@@ -444,11 +445,11 @@ WIRE_CMD='sudo sysctl iogpu.wired_limit_mb=14336 vm.global_user_wire_limit=15032
 sysnum() { sysctl -n "$1" 2>/dev/null | head -1 | tr -cd '0-9'; }
 host_prereqs() {
   step "host prerequisites ($CONFIG_NAME)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g|strata-exl3-full512-h|strata-exl3-full512-s2|strata-exl3-full512-am|strata-exl3-full512-l|strata-exl3-full512-lq|strata-exl3-full512-lm) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 29 patches, config C..S2's shim); see patches/README.md";; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g|strata-exl3-full512-h|strata-exl3-full512-s2|strata-exl3-full512-am|strata-exl3-full512-l|strata-exl3-full512-lq|strata-exl3-full512-lm|strata-exl3-full512-ln) ;; *) warn "$CONFIG_NAME is an older config: it was measured with the engine and shim of its own step (patches/strata up to 0003 / 0004 / 0005), not with the engine built here (all 29 patches, config C..S2's shim); see patches/README.md";; esac
   local slots; slots=$(python3 -c "import json,sys; print(json.load(open('$CONFIG'))['env'].get('STRATA_EXL3_METAL_SLOTS', '0'))")
   local bytes=$((slots * 1867776))
   info "STRATA_EXL3_METAL_SLOTS $slots: $((bytes / 1000000)) MB of mlocked, Metal-registered expert slots on the mini side (config C ships 6400)"
-  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g|strata-exl3-full512-h|strata-exl3-full512-s2|strata-exl3-full512-am|strata-exl3-full512-l|strata-exl3-full512-lq|strata-exl3-full512-lm) if [ "$slots" != 6400 ]; then warn "config C/D/E/F/G/H/S2 is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
+  case "$CONFIG_NAME" in strata-exl3-full512-c|strata-exl3-full512-d|strata-exl3-full512-e|strata-exl3-full512-f|strata-exl3-full512-g|strata-exl3-full512-h|strata-exl3-full512-s2|strata-exl3-full512-am|strata-exl3-full512-l|strata-exl3-full512-lq|strata-exl3-full512-lm|strata-exl3-full512-ln) if [ "$slots" != 6400 ]; then warn "config C/D/E/F/G/H/S2 is measured with STRATA_EXL3_METAL_SLOTS 6400, the rendered config has $slots"; fi;; esac
   # wired limits: the LRU is locked memory; above the default cap mlock fails (errno 35) and the slots swap out
   local wl gl ul; wl=$(sysnum iogpu.wired_limit_mb); gl=$(sysnum vm.global_user_wire_limit); ul=$(sysnum vm.user_wire_limit)
   # iogpu.wired_limit_mb 0 = the macOS default, which scales with RAM: on the 16 GiB mini it is below 14 GiB, and then vm.global_user_wire_limit (12,451 MiB by default) shows it

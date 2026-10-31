@@ -1,0 +1,6 @@
+# config LN (2026-10-31): config LM + patches/strata/0033 (src/prefill/prefill.cpp only: config L prefill.opt72.cpp md5 0ba4f1cc -> LN prefill.opt99.cpp md5 287c2b92).
+# Checked on the MacBook 2026-10-31: 0033 applies to the config L prefill.cpp and gives the LN source byte for byte. Every other file as config LM (config-lm-sha256.txt, config-l-sha256.txt).
+6038676172fcd073e4eff06ffa135bb2c048b61b15209d2fb1ce7cf99e2025bb  src/prefill/prefill.cpp  [campaign prefill.opt99.cpp, md5 287c2b92 = the prefill.cpp compiled into strata_o37q]
+1a7d28fe50a8a8fa005bddccedc8b3ca218d5ff2efff42089e034ef99accab14  patches/strata/0033-opt99-pf-push-nosync-y2.patch
+b10a2b91c6948a9d34ce87f8635a5b4da9e03243dc2f77d605e8f88b8550cb49  configs/strata-exl3-full512-ln.json.tmpl
+# deployed (mini): engine strata_o37q md5 f5b980a9ee9d0dccf83cccb0f7ae653b; live config md5 dbbf663820ed66311e7a9d9b99fa26f5 (rendered, holds the API key: not in this repo)

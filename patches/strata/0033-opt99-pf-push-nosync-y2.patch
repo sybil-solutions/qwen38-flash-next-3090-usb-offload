@@ -1,0 +1,144 @@
+# Opt98 + Opt99 (2026-10-31, config LN; both inert unless set): the split lockstep group's y push (STRATA_PF_SPLITF / SPLIT2) no longer drains the GPU.
+# STRATA_PF_PUSH_NOSYNC=1: no cudaStreamSynchronize after the y push. On the tgcu shim every stream is one in-order queue (cudaStreamWaitEvent is a no-op,
+# cudaStreamSynchronize / cudaEventSynchronize synchronize everything), so that call waited for the card to finish chunk i's front: ~25 ms of the 56 ms period
+# per chunk-layer at 33K. The relaxed bulk push (TGCU_H2D_RELAX, >= PIPE_MIN) is synchronous on the host, so the link is idle when cudaMemcpyAsync returns and
+# the next x download cannot overlap it. STRATA_PF_Y2=1: a second y landing buffer (mac_y_dev2, odd chunks of a group, its own combine event; +T*N*4 bytes in
+# bytes_needed and carve). STRATA_PF_MAC_STATS adds `ywait` (the host-side wait for the buffer's last combine; not measured under NOSYNC).
+# Measured (ABBA vs config LM, fresh restart per arm): 33K 967.5 -> 991.0 tok/s (+2.4 %), 8K 831.7 -> 834.8, 2.5K 282.2 -> 282.6; Y2 alone is neutral (968.1 vs 968.1).
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0032. Source: campaign prefill.opt99.cpp (md5 287c2b92), engine strata_o37q.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index cf915e7..9ca0e85 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -320,6 +320,7 @@ inline void apply(uint16_t* x, int64_t n, int threads) {
+     for (int64_t p = 0; p < parts; ++p) run_part(j, p);
+ }
+ }  // namespace xq_emu
++inline double pf_ywait_ms = 0;   // Opt98 stats: the host-side wait for the y buffer's last combine (split groups, STRATA_PF_MAC_STATS only)
+ inline bool pf_mac_stats() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_MAC_STATS"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+@@ -363,6 +364,19 @@ inline bool pf_splitf() {
+     static const bool on = [] { const char* v = std::getenv("STRATA_PF_SPLITF"); return v != nullptr && std::atoi(v) != 0; }();
+     return on;
+ }
++// Opt98 STRATA_PF_Y2=1 (split groups only): a second y landing buffer for the odd chunks of a group, so chunk i's y push waits for the combine of chunk i - 2
++// (the last one that read the same buffer) instead of chunk i - 1's; each buffer has its own "combine done" event.
++// Opt99 STRATA_PF_PUSH_NOSYNC=1 (split groups only): no cudaStreamSynchronize after the y push.  On the tgcu shim every stream is one in-order queue and
++// that call drains the whole GPU (chain98: ~25 ms per chunk-layer at 33K, the card finishing chunk i's front); a relaxed bulk push (TGCU_H2D_RELAX,
++// >= PIPE_MIN) is synchronous on the host, so the link is idle when cudaMemcpyAsync returns and the next x download cannot overlap it.
++inline bool pf_push_nosync() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_PF_PUSH_NOSYNC"); return pf_splitf() && v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
++inline bool pf_y2() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_PF_Y2"); return pf_splitf() && v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
+ // One lockstep group: the chunks' threads take turns in a fixed order.  Steps of one chunk: 0 = setup, 1 + 2k = F of layer LB + k (attention, routing, the
+ // resident experts, the x download, the Mac job's submit), 2 + 2k = B of that layer (collect the job, push y, combine, write back the residual),
+ // 1 + 2 * (LE - LB) = tail.  The order is a software pipeline: B of chunk-layer i comes right after F of chunk-layer i + lag (i = layer * G + chunk), so a
+@@ -1023,6 +1037,8 @@ struct Prefill::Impl {
+     size_t cpu_x_n = 0, cpu_rows_n = 0;
+     // STRATA_PF_MAC: the Mac cold-expert lane's buffers (host: the fp16 input rows, their fp32 widening, the fp32 partial sums, the weights readback)
+     float* mac_y_dev = nullptr;
++    float* mac_y_dev2 = nullptr;   // Opt98 STRATA_PF_Y2: the odd chunks' y landing buffer (same layout as mac_y_dev)
++    float* y_dev(int lj) const { return (mac_y_dev2 != nullptr && (lj & 1)) ? mac_y_dev2 : mac_y_dev; }
+     uint16_t *mac_x16 = nullptr, *mac_y16h = nullptr;
+     // STRATA_PF_XPORT8: the packed x rows on the device (quantised before the copy down) and the host's landing buffer (lazy download) / packed y rows (pushed up, dequantised
+     // into mac_y_dev's first half from the packed copy in its second half)
+@@ -1052,6 +1068,8 @@ struct Prefill::Impl {
+     float* grp_w_one = nullptr;                   // [T x K]: weight 1 for the first slot, 0 for the rest
+     bool grp_const_ok = false;
+     cudaEvent_t grp_ev_comb = nullptr, grp_ev_push = nullptr;   // split: the last combine that read mac_y_dev is done / the y push on the copy stream is done
++    cudaEvent_t grp_ev_comb2 = nullptr;                         // Opt98: the last combine that read mac_y_dev2 is done
++    cudaEvent_t ev_comb(int lj) const { return (mac_y_dev2 != nullptr && (lj & 1)) ? grp_ev_comb2 : grp_ev_comb; }
+     std::vector<uint8_t> cpu_nact;
+     std::vector<kernels::cpu::ActQ> cpu_actq;   // a Q2_0 layer's activations (the pool's Q2_0 kernels read ActQ)
+     std::vector<kernels::cpu::ExpertJobMulti> cpu_jobs;
+@@ -1479,6 +1497,7 @@ bool Prefill::carve(size_t T, void* alloc) {
+     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
+     m.mixed_h = o.take<uint16_t>(T * N, ok);
+     if (pf_mac_enabled()) m.mac_y_dev = o.take<float>(T * N, ok);   // STRATA_PF_MAC: the Mac's partial sums [T x N] fp32 (or fp16 in the first half)
++    if (pf_mac_enabled() && pf_y2() && pf_group_n() > 1) m.mac_y_dev2 = o.take<float>(T * N, ok);   // Opt98: the odd chunks' copy
+     if (pf_mac_enabled() && pf_xport8_x()) m.x8_dev = o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16384, ok);   // STRATA_PF_XPORT8: the packed x rows (the y rows' packed copy lives in mac_y_dev's idle second half); +16 KiB: the download is rounded up to whole 16 KiB pages (Prefill20: a tail edge made the shim's lazy download pay a synchronous 3 ms read per layer)
+     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
+     m.bo = m.emb;
+@@ -2165,6 +2184,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     }
+     f(T * N);
+     if (pf_mac_enabled() && pf_xport8_x()) o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16384, ok);   // carve's x8_dev
++    if (pf_mac_enabled() && pf_y2() && pf_group_n() > 1) f(T * N);   // carve's mac_y_dev2 (Opt98)
+     f((size_t) strata::kernels::NG_HC_DIM);
+     strata::kernels::KvHostPools stage;
+     take_stage(o, ss, s, stage, ok);
+@@ -2891,17 +2911,23 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         };
+         auto pf_push_y = [&](const void* src, size_t bytes, size_t dst_off = 0, int64_t dq_n = 0) {   // the Mac rows to the card: plain on the compute stream, or (split) on the copy stream with the host waiting there
+             // dq_n > 0 (STRATA_PF_XPORT8): src is the packed form of dq_n values, landed at mac_y_dev + dst_off (its idle second half); once it is there the device widens it to fp16 in the first half
+-            uint8_t* dst = reinterpret_cast<uint8_t*>(m.mac_y_dev) + dst_off;
++            float* ydev = ls != nullptr ? m.y_dev(lj) : m.mac_y_dev;   // Opt98: the odd chunks land in mac_y_dev2 under STRATA_PF_Y2
++            uint8_t* dst = reinterpret_cast<uint8_t*>(ydev) + dst_off;
+             if (ls != nullptr && ls->split) {
+-                cudaStreamWaitEvent(m.copy, m.grp_ev_comb, 0);   // the last combine that read mac_y_dev is done
++                if (pf_mac_stats() && !pf_push_nosync()) {   // Opt98 stats: how long the host would wait here for the card's last combine of this buffer (a full drain on the shim, so not under Opt99)
++                    const auto tw = std::chrono::steady_clock::now();
++                    cudaEventSynchronize(m.ev_comb(lj));
++                    pf_ywait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
++                }
++                cudaStreamWaitEvent(m.copy, m.ev_comb(lj), 0);   // the last combine that read this y buffer is done
+                 cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, m.copy);
+                 cudaEventRecord(m.grp_ev_push, m.copy);
+-                cudaStreamSynchronize(m.copy);                    // the link is idle again before the next chunk's x comes down (the opposite direction must not overlap)
++                if (!pf_push_nosync()) cudaStreamSynchronize(m.copy);   // the link is idle again before the next chunk's x comes down (the opposite direction must not overlap)
+                 cudaStreamWaitEvent(m.cs, m.grp_ev_push, 0);
+             } else {
+                 cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, m.cs);
+             }
+-            if (dq_n > 0) strata::prefill::xport8_dequant(dst, reinterpret_cast<uint16_t*>(m.mac_y_dev), dq_n, m.cs);
++            if (dq_n > 0) strata::prefill::xport8_dequant(dst, reinterpret_cast<uint16_t*>(ydev), dq_n, m.cs);
+         };
+         if (mac_pf && T >= 512 && T * (ls != nullptr ? (int64_t) ls->n : 1) >= pf_mac_qmin_tok() && (ls == nullptr || lj == 0) && m.mac_ahead == 0 && std::getenv("STRATA_PF_NOEARLYQ") == nullptr) {   // the group's first reads start before layer 0's front (the SSD join of the first layers hides behind the setup + front)
+             for (int64_t ll = LB; ll < std::min<int64_t>(LE, LB + (ls != nullptr ? (int64_t) strata_pf_mac_nsets() : 2)); ++ll) pf_queue_reads(ll);
+@@ -4599,8 +4625,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             t4 = Clk::now();
+                             if (pf_mac_stats()) {
+                                 auto ms = [](Clk::time_point a, Clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+-                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f mgpu %.1f xdq %.1f ms\n",
+-                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period, strata_pf_mac_gpu_ms(), xdq_ms);
++                                std::fprintf(stderr, "strata pf-mac: L%lld c%d T=%lld cold=%zu pairs=%zu rows=%lld | front %.1f | x_fetch %.1f | conv+pairs %.1f | blobs(join) %.1f | metal(%s) %.1f | y_conv %.1f | y_push %.1f | issue %.1f gpuwait %.1f submit %.1f period %.1f mgpu %.1f xdq %.1f ywait %.1f ms\n",
++                                             (long long) l, lj, (long long) T, m.mac_cold.size(), eidx.size(), (long long) st_rows, ms(tl0, t0), ms(t0, t1), ms(t1, t2), mm[0], ls ? "wait" : "call", mm[1], ms(t3, t3c), ms(t3c, t4), st_issue, st_gpuwait, st_sub, st_period, strata_pf_mac_gpu_ms(), xdq_ms, pf_ywait_ms);
+                             }
+                         }
+                     }
+@@ -4635,10 +4661,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     }
+                     if (mac_layer && ls != nullptr) {   // lockstep: the parked partial sum + the Mac rows (the same fmaf chain: slot t -> row t with weight 1 gives the parked sum back)
+                         if (pf_mac_y16())
+-                            moe_combine_peer16(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], (const uint16_t*) m.mac_y_dev, T, m.bo, T, m.cs);
++                            moe_combine_peer16(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], (const uint16_t*) m.y_dev(lj), T, m.bo, T, m.cs);
+                         else
+-                            moe_combine_peer(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], m.mac_y_dev, T, m.bo, T, m.cs);
+-                        if (ls->split) cudaEventRecord(m.grp_ev_comb, m.cs);
++                            moe_combine_peer(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], m.y_dev(lj), T, m.bo, T, m.cs);
++                        if (ls->split) cudaEventRecord(m.ev_comb(lj), m.cs);
+                     } else if (mac_layer && pf_mac_y16())
+                         moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.shared, m.sg, (const uint16_t*) m.mac_y_dev, T * K - rows_cpu, m.bo, T, m.cs);
+                     else if (mac_layer)
+@@ -4867,12 +4893,14 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                 err = std::string("prefill: the lockstep group's constants: ") + cudaGetErrorString(cudaGetLastError());
+                 return false;
+             }
+-            if (pf_splitf() && (m.grp_ev_comb == nullptr || m.grp_ev_push == nullptr) &&
+-                (cudaEventCreateWithFlags(&m.grp_ev_comb, cudaEventDisableTiming) != cudaSuccess || cudaEventCreateWithFlags(&m.grp_ev_push, cudaEventDisableTiming) != cudaSuccess)) {
++            if (pf_splitf() && (m.grp_ev_comb == nullptr || m.grp_ev_push == nullptr || m.grp_ev_comb2 == nullptr) &&
++                (cudaEventCreateWithFlags(&m.grp_ev_comb, cudaEventDisableTiming) != cudaSuccess || cudaEventCreateWithFlags(&m.grp_ev_push, cudaEventDisableTiming) != cudaSuccess ||
++                 cudaEventCreateWithFlags(&m.grp_ev_comb2, cudaEventDisableTiming) != cudaSuccess)) {
+                 err = "prefill: the lockstep group's events";
+                 return false;
+             }
+             if (m.grp_ev_comb != nullptr) cudaEventRecord(m.grp_ev_comb, m.cs);   // (so the first push's wait is on a recorded event)
++            if (m.grp_ev_comb2 != nullptr) cudaEventRecord(m.grp_ev_comb2, m.cs);   // (Opt98: the same for the odd chunks' buffer)
+             m.grp_const_ok = true;
+         }
+         for (int64_t g0 = 0; g0 < n;) {

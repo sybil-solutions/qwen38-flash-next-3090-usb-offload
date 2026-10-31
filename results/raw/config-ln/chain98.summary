@@ -1,0 +1,43 @@
+start 18:17:47 live md5 a9b635bbf634ef32e1d530b15e34a8e9
+### s0 18:17:49
+{"tag": "f98_s0", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 39606, "tok_s": 854.4, "wall_s": 39.68, "ts": "2026-10-31T01:21:35Z"}
+{"tag": "f98_s0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 39531, "tok_s": 856.1, "wall_s": 39.6, "ts": "2026-10-31T01:22:14Z"}
+  GPU timeouts 0 | errors 0
+### s2 18:22:18
+{"tag": "f98_s2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 39597, "tok_s": 854.7, "wall_s": 39.68, "ts": "2026-10-31T01:26:04Z"}
+{"tag": "f98_s2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 39653, "tok_s": 853.5, "wall_s": 39.71, "ts": "2026-10-31T01:26:43Z"}
+  GPU timeouts 0 | errors 0
+### b0 18:26:47
+{"tag": "f98_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34984, "tok_s": 967.4, "wall_s": 35.06, "ts": "2026-10-31T01:30:23Z"}
+{"tag": "f98_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34960, "tok_s": 968.0, "wall_s": 35.01, "ts": "2026-10-31T01:30:58Z"}
+{"tag": "f98_b0", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11647, "tok_s": 688.4, "wall_s": 11.66, "ts": "2026-10-31T01:31:10Z"}
+{"tag": "f98_b0", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9681, "tok_s": 828.2, "wall_s": 9.74, "ts": "2026-10-31T01:31:20Z"}
+{"tag": "f98_b0", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9248, "tok_s": 277.4, "wall_s": 9.32, "ts": "2026-10-31T01:31:29Z"}
+{"tag": "f98_b0", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9093, "tok_s": 282.1, "wall_s": 9.16, "ts": "2026-10-31T01:31:38Z"}
+  GPU timeouts 0 | errors 0
+### y1 18:31:41
+{"tag": "f98_y1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34895, "tok_s": 969.8, "wall_s": 34.98, "ts": "2026-10-31T01:35:18Z"}
+{"tag": "f98_y1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35066, "tok_s": 965.1, "wall_s": 35.12, "ts": "2026-10-31T01:35:53Z"}
+{"tag": "f98_y1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11753, "tok_s": 682.2, "wall_s": 11.82, "ts": "2026-10-31T01:36:05Z"}
+{"tag": "f98_y1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9655, "tok_s": 830.5, "wall_s": 9.71, "ts": "2026-10-31T01:36:15Z"}
+{"tag": "f98_y1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9231, "tok_s": 277.9, "wall_s": 9.3, "ts": "2026-10-31T01:36:24Z"}
+{"tag": "f98_y1", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9123, "tok_s": 281.2, "wall_s": 9.18, "ts": "2026-10-31T01:36:33Z"}
+  GPU timeouts 0 | errors 0
+### y2 18:36:37
+{"tag": "f98_y2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34978, "tok_s": 967.5, "wall_s": 35.06, "ts": "2026-10-31T01:40:14Z"}
+{"tag": "f98_y2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34888, "tok_s": 970.0, "wall_s": 34.95, "ts": "2026-10-31T01:40:48Z"}
+{"tag": "f98_y2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11791, "tok_s": 680.0, "wall_s": 11.86, "ts": "2026-10-31T01:41:00Z"}
+{"tag": "f98_y2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9694, "tok_s": 827.1, "wall_s": 9.75, "ts": "2026-10-31T01:41:10Z"}
+{"tag": "f98_y2", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9290, "tok_s": 276.1, "wall_s": 9.35, "ts": "2026-10-31T01:41:19Z"}
+{"tag": "f98_y2", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9136, "tok_s": 280.8, "wall_s": 9.2, "ts": "2026-10-31T01:41:29Z"}
+  GPU timeouts 0 | errors 0
+### b1 18:41:32
+{"tag": "f98_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34924, "tok_s": 969.0, "wall_s": 35.0, "ts": "2026-10-31T01:45:08Z"}
+{"tag": "f98_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34966, "tok_s": 967.9, "wall_s": 35.04, "ts": "2026-10-31T01:45:43Z"}
+{"tag": "f98_b1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11884, "tok_s": 674.7, "wall_s": 11.95, "ts": "2026-10-31T01:45:55Z"}
+{"tag": "f98_b1", "target": 8000, "run": 2, "prompt_n": 8017, "cache_n": 0, "prompt_ms": 9701, "tok_s": 826.4, "wall_s": 9.76, "ts": "2026-10-31T01:46:05Z"}
+{"tag": "f98_b1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9242, "tok_s": 277.5, "wall_s": 9.32, "ts": "2026-10-31T01:46:14Z"}
+{"tag": "f98_b1", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9114, "tok_s": 281.4, "wall_s": 9.17, "ts": "2026-10-31T01:46:24Z"}
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 a9b635bbf634ef32e1d530b15e34a8e9
+CHAIN98DONE

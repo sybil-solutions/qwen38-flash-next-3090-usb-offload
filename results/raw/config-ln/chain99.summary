@@ -1,0 +1,39 @@
+start 18:49:03 live md5 a9b635bbf634ef32e1d530b15e34a8e9
+### b0 18:49:06
+{"tag": "f99_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34904, "tok_s": 969.6, "wall_s": 34.99, "ts": "2026-10-31T01:52:42Z"}
+{"tag": "f99_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34980, "tok_s": 967.5, "wall_s": 35.04, "ts": "2026-10-31T01:53:17Z"}
+{"tag": "f99_b0", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11629, "tok_s": 689.5, "wall_s": 11.7, "ts": "2026-10-31T01:53:29Z"}
+{"tag": "f99_b0", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9635, "tok_s": 832.2, "wall_s": 9.69, "ts": "2026-10-31T01:53:39Z"}
+{"tag": "f99_b0", "target": 2500, "run": 1, "prompt_n": 2564, "cache_n": 0, "prompt_ms": 9165, "tok_s": 279.7, "wall_s": 9.23, "ts": "2026-10-31T01:53:48Z"}
+{"tag": "f99_b0", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9125, "tok_s": 281.1, "wall_s": 9.19, "ts": "2026-10-31T01:53:57Z"}
+  GPU timeouts 0 | errors 0
+### n1 18:54:00
+{"tag": "f99_n1", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 34191, "tok_s": 989.8, "wall_s": 34.27, "ts": "2026-10-31T01:57:36Z"}
+{"tag": "f99_n1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34148, "tok_s": 991.0, "wall_s": 34.21, "ts": "2026-10-31T01:58:10Z"}
+{"tag": "f99_n1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11877, "tok_s": 675.1, "wall_s": 11.95, "ts": "2026-10-31T01:58:22Z"}
+{"tag": "f99_n1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9657, "tok_s": 830.3, "wall_s": 9.72, "ts": "2026-10-31T01:58:31Z"}
+{"tag": "f99_n1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9128, "tok_s": 281.0, "wall_s": 9.19, "ts": "2026-10-31T01:58:41Z"}
+{"tag": "f99_n1", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9092, "tok_s": 282.1, "wall_s": 9.14, "ts": "2026-10-31T01:58:50Z"}
+  GPU timeouts 0 | errors 0
+### n2 18:58:53
+{"tag": "f99_n2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34196, "tok_s": 989.7, "wall_s": 34.28, "ts": "2026-10-31T02:02:28Z"}
+{"tag": "f99_n2", "target": 33000, "run": 2, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 34057, "tok_s": 993.6, "wall_s": 34.13, "ts": "2026-10-31T02:03:02Z"}
+{"tag": "f99_n2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11742, "tok_s": 682.9, "wall_s": 11.81, "ts": "2026-10-31T02:03:14Z"}
+{"tag": "f99_n2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9553, "tok_s": 839.3, "wall_s": 9.61, "ts": "2026-10-31T02:03:24Z"}
+{"tag": "f99_n2", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9082, "tok_s": 282.4, "wall_s": 9.14, "ts": "2026-10-31T02:03:33Z"}
+{"tag": "f99_n2", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 8998, "tok_s": 285.0, "wall_s": 9.06, "ts": "2026-10-31T02:03:42Z"}
+  GPU timeouts 0 | errors 0
+### b1 19:03:45
+{"tag": "f99_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34986, "tok_s": 967.3, "wall_s": 35.07, "ts": "2026-10-31T02:07:22Z"}
+{"tag": "f99_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35051, "tok_s": 965.5, "wall_s": 35.11, "ts": "2026-10-31T02:07:57Z"}
+{"tag": "f99_b1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11714, "tok_s": 684.5, "wall_s": 11.78, "ts": "2026-10-31T02:08:09Z"}
+{"tag": "f99_b1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9647, "tok_s": 831.1, "wall_s": 9.7, "ts": "2026-10-31T02:08:19Z"}
+{"tag": "f99_b1", "target": 2500, "run": 1, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 8967, "tok_s": 286.1, "wall_s": 9.03, "ts": "2026-10-31T02:08:28Z"}
+{"tag": "f99_b1", "target": 2500, "run": 2, "prompt_n": 2565, "cache_n": 0, "prompt_ms": 9101, "tok_s": 281.8, "wall_s": 9.17, "ts": "2026-10-31T02:08:37Z"}
+  GPU timeouts 0 | errors 0
+### sn 19:08:40
+{"tag": "f99_sn", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 34305, "tok_s": 986.5, "wall_s": 34.39, "ts": "2026-10-31T02:12:16Z"}
+{"tag": "f99_sn", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34207, "tok_s": 989.3, "wall_s": 34.27, "ts": "2026-10-31T02:12:50Z"}
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 a9b635bbf634ef32e1d530b15e34a8e9
+CHAIN99DONE

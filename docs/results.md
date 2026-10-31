@@ -15,7 +15,76 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.0000000000 Latest configuration: `configs/strata-exl3-full512-lm.json.tmpl` (config LM, chain95-96, 2026-10-30/31)
+## 0.00000000000 Latest configuration: `configs/strata-exl3-full512-ln.json.tmpl` (config LN, chain97-100, 2026-10-31)
+
+Config **LN** = config LM (section 0.0000000000) + `STRATA_PF_PUSH_NOSYNC=1` + `STRATA_PF_Y2=1` (`patches/strata/0033`), engine `strata_o37q` (= the config L build with
+0033: `src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LM). Production on the mini since 2026-10-31T05:02Z.
+
+What it changes: in a split lockstep group (`STRATA_PF_SPLITF`/`SPLIT2`) the B turn pushes the Mac's y rows and then called `cudaStreamSynchronize` on the copy
+stream, meant to leave the half-duplex link idle before the next chunk's x comes down. On the tgcu shim every stream is one in-order queue: that call drains the
+whole GPU, i.e. waits for the card to finish chunk i's front, ~25 ms of the 56 ms period per 33K chunk-layer (`ywait`, chain98). The relaxed bulk push
+(`TGCU_H2D_RELAX=1`, >= `TGCU_PIPE_MIN`) is synchronous on the host, so the link is already idle when the copy call returns: `STRATA_PF_PUSH_NOSYNC=1` drops the
+drain. `STRATA_PF_Y2=1` adds a second y buffer (odd chunks) so the push waits only on the combine two chunks back; alone it is neutral (chain98: 33K 968.1 vs 968.1).
+
+**Source of these numbers:** `results/raw/config-ln/chain98.summary`, `chain99.summary`, `chain100.summary` (copied from the mini); engine and panel logs
+(`f98_*`, `f99_*`, `q21_ln100.log`, `q21_ln.log`, `d100_*.jsonl`, `final100.log`, `soak100.log`) are on the mini, not in `results/raw/`. Mini clock is PDT (UTC-7).
+
+### 0.00000000000.1 Where the 33K time goes (`STRATA_PF_MAC_STATS=1`, per chunk-layer means, 528 chunk-layers)
+
+| term | LQ (chain94) | LM (chain97) | LN (chain99 `sn`) |
+|---|---|---|---|
+| period (host thread, F turn to F turn) | 56.6 ms | 56.1 | **54.8** |
+| y push | 25.5 | 25.4 (of which ~25 is the drain) | **13.5** (the transfer) |
+| host waiting for the card (`gpuwait`) | 3.4 | 3.4 | 12.0 |
+| Metal wait | 3.8 | 3.5 | 5.1 |
+| Metal job (`mgpu`, submit to done) | 140.1 | 131.5 | 141.8 |
+| x download | 13.5 | 13.4 | 13.5 |
+
+With the drain gone the host waits on the card instead: the 3090's own work per chunk-layer (~55 ms) is what binds a 33K prompt under LN.
+
+### 0.00000000000.2 Prefill ABBA99 (LM LN LN LM, fresh restart per arm, warm 33K first; tok/s run1 / run2)
+
+| arm | 33K | 8K | 2.5K |
+|---|---|---|---|
+| b0 (LM, `strata_o37j`) | 969.6 / 967.5 | 689.5 / 832.2 | 279.7 / 281.1 |
+| n1 (**LN**, `strata_o37q`) | 989.8 / 991.0 | 675.1 / 830.3 | 281.0 / 282.1 |
+| n2 (**LN**) | 989.7 / 993.6 | 682.9 / 839.3 | 282.4 / 285.0 |
+| b1 (LM) | 967.3 / 965.5 | 684.5 / 831.1 | 286.1 / 281.8 |
+| **LN vs LM** | **991.0 vs 967.5 (+2.4 %)**, every LN run above every LM run | 834.8 vs 831.7 (run 2) | 282.6 vs 282.2 |
+
+0 GPU timeouts, 0 errors.
+
+### 0.00000000000.3 Quality
+
+| check | LN | LM |
+|---|---|---|
+| `q81_lp.py`, each panel prompt right after a fresh 33K prompt (8 x 33K) | 98.01 % / 0.005067 / **0.0695 PASS** | 98.30 % / 0.006790 / 0.0676 PASS |
+| `q23.sh`, fresh restart: top-1 / mean KL / p99 KL | 98.16 % / 0.006293 / **0.0674 PASS** | 98.16 % / 0.006072 / 0.0955 PASS |
+
+### 0.00000000000.4 Decode ABBA100 (LM LN LN LM, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 tok/s (TTFT) | pass 2 tok/s (TTFT) |
+|---|---|---|
+| Aa (LM) | 33.45 (14.64) | 33.33 (14.25) |
+| Qa (**LN**) | 33.22 (14.58) | 33.59 (14.21) |
+| Qb (**LN**) | 33.13 (14.55) | 33.56 (14.20) |
+| Ab (LM) | 33.37 (14.61) | 33.39 (14.24) |
+| **LN vs LM** | **33.38 vs 33.38 tok/s**; paired per prompt: mean +0.05 %, median +0.07 %, LN slower on 13 of 29 | |
+
+### 0.00000000000.5 Regression and soak (`final21.sh` + 14-prompt soak, chain100)
+
+| check | LN | LM (chain96) |
+|---|---|---|
+| realistic decode, 29 requests | 33.13 tok/s, TTFT 14.57 s | 33.53, 14.63 |
+| tool reuse / image | PASS / PASS | PASS / PASS |
+| 190K needle (depth 50 %) | FOUND, 254 s | FOUND, 255 s |
+| 5 x 32K needles | FOUND 51/47/32/37/34 s | FOUND 51/47/32/37/35 s |
+| soak: 14 x 32K + 190K | 14/14 FOUND (21-60 s), 190K FOUND 231 s, engine alive | 14/14 (22-62 s), 231 s |
+| decode probe after the soak (mean of 6) | 29.2 tok/s | 28.4 |
+| swap after prompt 14 (engine MALLOC_LARGE swapped) | 1550 MB (587 MB) | 1379 MB (588 MB) |
+| GPU timeouts | 0 | 0 |
+
+## 0.0000000000 Previous configuration (production 2026-10-31 00:49Z - 05:02Z): `configs/strata-exl3-full512-lm.json.tmpl` (config LM, chain95-96, 2026-10-30/31)
 
 Config **LM** = config LQ (section 0.000000000) + `EXL3M_PF_SUPER=1` on the Opt27 Metal prefill library (`exl3/metal`, built by `exl3/metal/build.sh`:
 `libexl3metal.dylib` sha256 `0248dd0b8bcd1dfe2e6de9702a602ed4c1467d7c17fc61f3eb7a2e8b7acedbab`, byte-identical to the deployed file). Same engine (`strata_o37j`),
