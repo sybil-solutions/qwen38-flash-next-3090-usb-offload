@@ -1,0 +1,27 @@
+start 00:33:09 live md5 dbbf663820ed66311e7a9d9b99fa26f5
+### b0 00:33:11
+{"tag": "f109_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34231, "tok_s": 988.6, "wall_s": 34.33, "ts": "2026-10-31T07:36:47Z"
+{"tag": "f109_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34100, "tok_s": 992.4, "wall_s": 34.16, "ts": "2026-10-31T07:37:21Z"
+  GPU timeouts 0 | errors 0
+### c1 00:37:24
+{"tag": "f109_c1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35614, "tok_s": 950.3, "wall_s": 35.72, "ts": "2026-10-31T07:40:59Z"
+{"tag": "f109_c1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35782, "tok_s": 945.8, "wall_s": 35.86, "ts": "2026-10-31T07:41:35Z"
+  GPU timeouts 0 | errors 0
+### d1 00:41:39
+{"tag": "f109_d1", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 37582, "tok_s": 900.5, "wall_s": 37.66, "ts": "2026-10-31T07:45:22Z"
+{"tag": "f109_d1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 37614, "tok_s": 899.7, "wall_s": 37.68, "ts": "2026-10-31T07:46:00Z"
+  GPU timeouts 0 | errors 0
+### d2 00:46:03
+{"tag": "f109_d2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 37628, "tok_s": 899.4, "wall_s": 37.71, "ts": "2026-10-31T07:49:47Z"
+{"tag": "f109_d2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 37560, "tok_s": 901.0, "wall_s": 37.63, "ts": "2026-10-31T07:50:25Z"
+  GPU timeouts 0 | errors 0
+### c2 00:50:28
+{"tag": "f109_c2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35698, "tok_s": 948.0, "wall_s": 35.79, "ts": "2026-10-31T07:54:08Z"
+{"tag": "f109_c2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35721, "tok_s": 947.4, "wall_s": 35.78, "ts": "2026-10-31T07:54:44Z"
+  GPU timeouts 0 | errors 0
+### b1 00:54:47
+{"tag": "f109_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34179, "tok_s": 990.1, "wall_s": 34.24, "ts": "2026-10-31T07:58:22Z"
+{"tag": "f109_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34237, "tok_s": 988.5, "wall_s": 34.3, "ts": "2026-10-31T07:58:57Z"}
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 dbbf663820ed66311e7a9d9b99fa26f5
+CHAIN109DONE

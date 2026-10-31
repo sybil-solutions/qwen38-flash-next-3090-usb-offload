@@ -1,0 +1,35 @@
+start 01:59:40 live md5 dbbf663820ed66311e7a9d9b99fa26f5
+### b0 01:59:43
+{"tag": "f112_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34163, "tok_s": 990.6, "wall_s": 34.24, "ts": "2026-10-31T09:03:18Z"
+{"tag": "f112_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34121, "tok_s": 991.8, "wall_s": 34.18, "ts": "2026-10-31T09:03:52Z"
+{"tag": "f112_b0", "target": 8000, "run": 1, "prompt_n": 8017, "cache_n": 0, "prompt_ms": 11687, "tok_s": 686.0, "wall_s": 11.75, "ts": "2026-10-31T09:04:03Z"}
+{"tag": "f112_b0", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9553, "tok_s": 839.3, "wall_s": 9.61, "ts": "2026-10-31T09:04:13Z"}
+strata d7: req 2 flags 15: guided refill of 1390 slots (1062 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 304 of 4096 candidates in 244 ms; refill 1449 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 141 of 4096 candidates in 93 ms; refill 1446 ms
+  GPU timeouts 0 | errors 0
+### r1 02:04:16
+{"tag": "f112_r1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34508, "tok_s": 980.7, "wall_s": 34.6, "ts": "2026-10-31T09:07:52Z"}
+{"tag": "f112_r1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34523, "tok_s": 980.3, "wall_s": 34.58, "ts": "2026-10-31T09:08:27Z"
+{"tag": "f112_r1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11920, "tok_s": 672.7, "wall_s": 11.99, "ts": "2026-10-31T09:08:39Z"}
+{"tag": "f112_r1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9757, "tok_s": 821.8, "wall_s": 9.82, "ts": "2026-10-31T09:08:49Z"}
+strata d7: req 2 flags 15: guided refill of 1390 slots (1062 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 299 of 4096 candidates in 238 ms; refill 1432 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 138 of 4096 candidates in 83 ms; refill 1456 ms
+  GPU timeouts 0 | errors 0
+### r2 02:08:52
+{"tag": "f112_r2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34526, "tok_s": 980.2, "wall_s": 34.62, "ts": "2026-10-31T09:12:28Z"
+{"tag": "f112_r2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34310, "tok_s": 986.4, "wall_s": 34.38, "ts": "2026-10-31T09:13:02Z"
+{"tag": "f112_r2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11939, "tok_s": 671.6, "wall_s": 12.01, "ts": "2026-10-31T09:13:14Z"}
+{"tag": "f112_r2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9810, "tok_s": 817.3, "wall_s": 9.87, "ts": "2026-10-31T09:13:24Z"}
+strata d7: req 2 flags 15: guided refill of 1390 slots (1062 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 302 of 4096 candidates in 242 ms; refill 1452 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 134 of 4096 candidates in 94 ms; refill 1379 ms
+  GPU timeouts 0 | errors 0
+### b1 02:13:28
+{"tag": "f112_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34151, "tok_s": 991.0, "wall_s": 34.22, "ts": "2026-10-31T09:17:03Z"
+{"tag": "f112_b1", "target": 33000, "run": 2, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 34041, "tok_s": 994.1, "wall_s": 34.1, "ts": "2026-10-31T09:17:37Z"}
+{"tag": "f112_b1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11634, "tok_s": 689.2, "wall_s": 11.7, "ts": "2026-10-31T09:17:48Z"}
+{"tag": "f112_b1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9523, "tok_s": 842.0, "wall_s": 9.58, "ts": "2026-10-31T09:17:58Z"}
+strata d7: req 2 flags 15: guided refill of 1390 slots (1062 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 308 of 4096 candidates in 251 ms; refill 1416 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33834 prompt tokens; copies 304 staged + 0 plain; warm 142 of 4096 candidates in 87 ms; refill 1439 ms
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 dbbf663820ed66311e7a9d9b99fa26f5
+CHAIN112DONE

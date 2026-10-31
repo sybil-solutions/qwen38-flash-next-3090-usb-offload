@@ -1,0 +1,6 @@
+# config LO (2026-10-31): config LN + patches/strata/0034 (src/prefill/prefill.cpp only: LN prefill.opt99.cpp md5 287c2b92 -> LO prefill.opt113.cpp md5 52d3164a).
+# Checked on the MacBook 2026-10-31: 0034 applies to the LN prefill.cpp and gives the LO source byte for byte. Every other file as config LN (config-ln-sha256.txt).
+ef7cb80f1c2aa39cd831feb0975b0a871617a93576964400f0ee5c4383dde126  src/prefill/prefill.cpp  [campaign prefill.opt113.cpp, md5 52d3164a = the prefill.cpp compiled into strata_o37r]
+af2465e100aaa3e4c10a0edade7d2cddbd7c53f03ddb6f4c032db4d88224e606  patches/strata/0034-opt113-pf-fold-shared.patch
+4d850a1b0a85775e4b6a80c7048936e989630f8a781ae9377703be851b966063  configs/strata-exl3-full512-lo.json.tmpl
+# deployed (mini): engine strata_o37r md5 4f647ce4e450d58735c4859e98ac2b1a; live config md5 6956b020e88f3a5ef02e17cd169b35f8 (rendered, holds the API key: not in this repo)

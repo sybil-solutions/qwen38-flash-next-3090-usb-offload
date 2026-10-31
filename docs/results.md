@@ -15,10 +15,79 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.00000000000 Latest configuration: `configs/strata-exl3-full512-ln.json.tmpl` (config LN, chain97-100, 2026-10-31)
+## 0.000000000000 Latest configuration: `configs/strata-exl3-full512-lo.json.tmpl` (config LO, chain109-114, 2026-10-31)
+
+Config **LO** = config LN (section 0.00000000000) + `STRATA_PF_FOLD_SHARED=1` (`patches/strata/0034`), engine `strata_o37r` (= the config LN build with 0034:
+`src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LN). Production on the mini since 2026-10-31T12:29Z.
+
+What it changes: a long prompt borrows card expert slots for its buffers (the "loan"; at 33K, 1390 slots of ~1.87 MB). Under `STRATA_PF_GROUP=6` each chunk of a
+lockstep group parks its MoE state until the Mac's y rows arrive: the resident experts' partial sum S, the shared-expert term SH (T x 2560 fp32) and its gate SG
+(T floats). With 0034 the first combine adds the gated shared term into S (`S = resident + sigm(sg) * shared`) and the final combine is `S + Mac rows`, so SH and SG
+are neither allocated nor copied, and `bytes_needed` / `group_extra_bytes` shrink by the same amount: the 33K loan falls 1390 -> 1289 slots, each a resident
+expert back on the 3090. Numerics: `(resident + shared) + Mac` instead of `(resident + Mac) + shared`, fp32 association only.
+
+**Source of these numbers:** `results/raw/config-lo/chain109.summary` .. `chain114.summary` (copied from the mini); engine and panel logs (`f109_*` .. `f113_*`,
+`q21_lo114.log`, `q21_lo.log`, `d114_*.jsonl`, `final114.log`, `soak114.log`) are on the mini, not in `results/raw/`. Mini clock is PDT (UTC-7).
+The bench prompt for the "33K" row is 33,842 tokens.
+
+### 0.000000000000.1 Why the loan matters (chain109-112, config LN, fresh restart per arm, 33K x2 per arm, ABBA)
+
+| arm | change vs LN | 33K chunks | loan (slots) | 33K tok/s (mean of 4) | 8K run 2 | source |
+|---|---|---|---|---|---|---|
+| LN | `--prefill 3072` | 12 x 2820 | 1390 | 989.9 | | chain109 / 110 |
+| bigger chunk | `--prefill 3328` | 11 x 3077 | 1492 | 947.9 (-4.2 %) | | chain109 |
+| bigger chunk | `--prefill 3712` | 10 x 3384 | 1645 | 900.2 (-9.1 %) | | chain109 |
+| smaller chunk | `--prefill 2816` | 13 x 2604 | 1200 | 773.5 (-21.9 %) | | chain110 |
+| smaller chunk | `--prefill 2560` | 14 x 2418 | 1098 | 821.0 (-17.1 %) | | chain110 |
+| one group | `STRATA_PF_GROUP=12` | 12 x 2820 | 1998 | 961.4 (-3.0 %) | | chain111 |
+| one group, 12 Metal jobs | + `STRATA_EXL3_METAL_JOBS=12` | 12 x 2820 | 1998 | 960.6 | | chain111 |
+| LN (chain112 control) | | 12 x 2820 | 1390 | 991.9 | 840.7 | chain112 |
+| fewer card slots | `--vram-reserve-mib 610` (~160 slots less) | 12 x 2820 | 1390 | 981.9 (-1.0 %) | 819.6 (-2.5 %) | chain112 |
+
+12 chunks = exactly two layer-major groups of 6; any other count leaves a partial group (smaller chunks lose despite a smaller loan). With the chunking fixed, card
+slots are worth ~+0.6 % at 33K and ~+1.6 % at 8K per 100 slots, which sized 0034. None of these arms was promoted; `--prefill 3072` and `STRATA_PF_GROUP=6` stay.
+
+### 0.000000000000.2 Prefill ABBA113 (LN LO LO LN, fresh restart per arm, warm 33K first; tok/s run1 / run2)
+
+| arm | 33K | 8K | 2.5K | loan |
+|---|---|---|---|---|
+| LN (b0) | 991.1 / 989.9 | 690.0 / 840.7 | 284.9 / 282.0 | 1390 |
+| LO (f1) | 997.0 / 996.6 | 692.9 / 850.4 | 286.1 / 284.8 | 1289 |
+| LO (f2) | 998.2 / 994.2 | 695.8 / 851.5 | 286.6 / 284.7 | 1289 |
+| LN (b1) | 988.4 / 989.3 | 690.2 / 840.0 | 282.2 / 285.4 | 1390 |
+| **mean LN -> LO** | **989.7 -> 996.5 (+0.69 %)** | run 2: **840.4 -> 851.0 (+1.26 %)** | 283.6 -> 285.6 (+0.7 %) | |
+
+Every LO 33K run is above every LN run. The 8K run 1 is the first request after a 33K prompt (pending refill of the borrowed slots), as in every config. 0 GPU timeouts.
+
+### 0.000000000000.3 Quality (705 teacher-forced positions, top-64-support KL vs the BF16-expert reference; gate top-1 >= 97 %, mean < 0.01, p99 < 0.1)
+
+| run | top-1 | mean KL | p99 KL | gate |
+|---|---|---|---|---|
+| LO, each panel prompt right after a fresh ~33K prompt (`q81_lp.py`, 8 x 33K) | 98.44 % | 0.006284 | 0.081663 | PASS |
+| LO, fresh restart (`q23.sh`) | 98.44 % | 0.006099 | 0.082877 | PASS |
+| LN for reference (section 0.00000000000.3) | 98.01 % / 98.16 % | 0.005067 / 0.006293 | 0.0695 / 0.0674 | PASS |
+
+### 0.000000000000.4 Decode ABBA114 (LN LO LO LN, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 tok/s | pass 2 tok/s |
+|---|---|---|
+| LN (Aa) | 33.01 | 33.70 |
+| LO (Qa) | 33.49 | 33.75 |
+| LO (Qb) | 33.27 | 33.57 |
+| LN (Ab) | 33.25 | 33.20 |
+
+Paired per prompt LO / LN - 1: mean **+0.73 %**, median +0.68 %, LO slower on 10 of 29; arm means LN 33.29, LO 33.52 tok/s. 0 GPU timeouts.
+
+### 0.000000000000.5 Regression and soak (`final21.sh` + 14-prompt soak, chain114)
+
+final21: realistic29 33.60 tok/s (TTFT 14.53 s), tool-result prefix reuse PASS, image PASS, 190K needle FOUND (189,450 tokens, 254 s), 5 x 32K needles FOUND,
+0 GPU timeouts. Soak: 14 / 14 32K needles FOUND plus a 190K needle at prompt 11 (227 s); swap peak 1392 MB of 2048 (LN's soak: 1550); decode probe after the soak
+28.2 / 33.5 / 24.4 / 28.3 / 32.5 / 25.9 tok/s; engine alive, 0 GPU timeouts.
+
+## 0.00000000000 Previous configuration (production 2026-10-31 05:02Z - 12:29Z): `configs/strata-exl3-full512-ln.json.tmpl` (config LN, chain97-100, 2026-10-31)
 
 Config **LN** = config LM (section 0.0000000000) + `STRATA_PF_PUSH_NOSYNC=1` + `STRATA_PF_Y2=1` (`patches/strata/0033`), engine `strata_o37q` (= the config L build with
-0033: `src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LM). Production on the mini since 2026-10-31T05:02Z.
+0033: `src/prefill/prefill.cpp` only; shim, card library, Metal library and VRAM split as LM). Production on the mini 2026-10-31T05:02Z - 12:29Z.
 
 What it changes: in a split lockstep group (`STRATA_PF_SPLITF`/`SPLIT2`) the B turn pushes the Mac's y rows and then called `cudaStreamSynchronize` on the copy
 stream, meant to leave the half-duplex link idle before the next chunk's x comes down. On the tgcu shim every stream is one in-order queue: that call drains the

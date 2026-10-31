@@ -1,0 +1,39 @@
+start 01:31:08 live md5 dbbf663820ed66311e7a9d9b99fa26f5
+### b0 01:31:11
+{"tag": "f111_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34088, "tok_s": 992.8, "wall_s": 34.17, "ts": "2026-10-31T08:34:46Z"
+{"tag": "f111_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34216, "tok_s": 989.1, "wall_s": 34.28, "ts": "2026-10-31T08:35:20Z"
+strata d7: req 2 flags 15: guided refill of 1390 slots (1062 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 303 of 4096 candidates in 253 ms; refill 1409 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 144 of 4096 candidates in 87 ms; refill 1464 ms
+  GPU timeouts 0 | errors 0
+### g1 01:35:23
+{"tag": "f111_g1", "target": 33000, "run": 1, "prompt_n": 33841, "cache_n": 0, "prompt_ms": 35191, "tok_s": 961.6, "wall_s": 35.36, "ts": "2026-10-31T08:39:01Z"
+{"tag": "f111_g1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35042, "tok_s": 965.7, "wall_s": 35.14, "ts": "2026-10-31T08:39:36Z"
+strata d7: req 2 flags 15: guided refill of 1998 slots (1638 changed) from 33834 prompt tokens; copies 304 staged + 0 plain; warm 807 of 4096 candidates in 737 ms; refill 1453 ms
+strata d7: req 3 flags 15: guided refill of 1998 slots (1686 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 176 of 4096 candidates in 117 ms; refill 1428 ms
+  GPU timeouts 0 | errors 0
+### h1 01:39:40
+{"tag": "f111_h1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35284, "tok_s": 959.1, "wall_s": 35.38, "ts": "2026-10-31T08:43:18Z"
+{"tag": "f111_h1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35186, "tok_s": 961.8, "wall_s": 35.25, "ts": "2026-10-31T08:43:53Z"
+strata d7: req 2 flags 15: guided refill of 1998 slots (1662 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 777 of 4096 candidates in 711 ms; refill 1502 ms
+strata d7: req 3 flags 15: guided refill of 1998 slots (1690 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 175 of 4096 candidates in 113 ms; refill 1478 ms
+  GPU timeouts 0 | errors 0
+### h2 01:43:56
+{"tag": "f111_h2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35158, "tok_s": 962.6, "wall_s": 35.25, "ts": "2026-10-31T08:47:35Z"
+{"tag": "f111_h2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35302, "tok_s": 958.7, "wall_s": 35.37, "ts": "2026-10-31T08:48:10Z"
+strata d7: req 2 flags 15: guided refill of 1998 slots (1650 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 784 of 4096 candidates in 735 ms; refill 1449 ms
+strata d7: req 3 flags 15: guided refill of 1998 slots (1694 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 178 of 4096 candidates in 116 ms; refill 1450 ms
+  GPU timeouts 0 | errors 0
+### g2 01:48:13
+{"tag": "f111_g2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35187, "tok_s": 961.8, "wall_s": 35.28, "ts": "2026-10-31T08:51:51Z"
+{"tag": "f111_g2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 35383, "tok_s": 956.5, "wall_s": 35.46, "ts": "2026-10-31T08:52:26Z"
+strata d7: req 2 flags 15: guided refill of 1998 slots (1654 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 786 of 4096 candidates in 710 ms; refill 1483 ms
+strata d7: req 3 flags 15: guided refill of 1998 slots (1694 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 173 of 4096 candidates in 113 ms; refill 1455 ms
+  GPU timeouts 0 | errors 0
+### b1 01:52:30
+{"tag": "f111_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34184, "tok_s": 990.0, "wall_s": 34.28, "ts": "2026-10-31T08:56:05Z"
+{"tag": "f111_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 34148, "tok_s": 991.0, "wall_s": 34.21, "ts": "2026-10-31T08:56:40Z"
+strata d7: req 2 flags 15: guided refill of 1390 slots (1066 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 306 of 4096 candidates in 246 ms; refill 1436 ms
+strata d7: req 3 flags 15: guided refill of 1390 slots (1086 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 141 of 4096 candidates in 85 ms; refill 1454 ms
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 dbbf663820ed66311e7a9d9b99fa26f5
+CHAIN111DONE

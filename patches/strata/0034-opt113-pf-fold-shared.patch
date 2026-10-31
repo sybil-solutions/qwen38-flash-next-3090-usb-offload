@@ -1,0 +1,113 @@
+# Opt113 (2026-10-31, config LO; inert unless set): STRATA_PF_FOLD_SHARED=1 (needs STRATA_PF_GROUP > 1) parks each lockstep chunk's MoE partial sum with the
+# gated shared-expert term already added (S = resident rows + sigm(sg) * shared), so the group no longer keeps the shared term (T x N fp32) and its gate (T
+# floats) per chunk, and the final combine is S + the Mac rows. bytes_needed and group_extra_bytes count two buffers less per grouped chunk: the prompt's
+# card loan falls 1390 -> 1289 slots at 33K (G = 6, 2820-token chunks), every one a resident expert back on the 3090; two device copies less per chunk-layer.
+# Numerics: (resident + shared) + Mac instead of (resident + Mac) + shared, fp32 association only.
+# Measured (ABBA vs config LN, fresh restart per arm): 33K 989.7 -> 996.5 tok/s (+0.69 %), 8K 840.4 -> 851.0 (+1.26 %), 2.5K 283.6 -> 285.6.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0033. Source: campaign prefill.opt113.cpp (md5 52d3164a), engine strata_o37r.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 9ca0e85..22cf72c 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -328,6 +328,14 @@ inline bool pf_mac_stats() {
+ // STRATA_PF_GROUP=G (>1, needs the Mac lane): G chunks of a prompt run layer-major in lockstep (Prefill::run_impl), so each layer's cold blobs are read once per
+ // group; each extra chunk keeps its own residual stream R (T x D fp32) and QSA step table on the device.  STRATA_PF_GROUP_NOFUSE=1 also unfuses the layer-boundary
+ // write+norm at G=1 (the exactness A/B: the group has to unfuse it, another chunk's turn comes between the write and the next norm).
++// Opt113 STRATA_PF_FOLD_SHARED=1 (needs STRATA_PF_GROUP > 1): the lockstep group parks each chunk's MoE partial sum with the gated shared term already
++// added (S = resident rows + sigm(sg) * shared) instead of three buffers (S, SH = shared, SG = gate), so the final combine is S + Mac rows: two T x N fp32
++// buffers + T floats less per grouped chunk in the borrowed region (~97 cache slots at a 2820-token chunk, G = 6) and two device copies less per chunk-layer.
++// The sum is (resident + shared) + Mac instead of (resident + Mac) + shared: fp32 association only.
++inline bool pf_fold_shared() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_PF_FOLD_SHARED"); return v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
+ inline int pf_group_n() {
+     static const int v = [] {
+         const char* e = std::getenv("STRATA_PF_GROUP");
+@@ -1513,8 +1521,10 @@ bool Prefill::carve(size_t T, void* alloc) {
+     m.grp_const_ok = false;
+     if (pf_group_n() > 1) {   // the group's parked per-chunk state, the zero block and the index constants of the final combine (bytes_needed counts them)
+         for (int j = 0; j < pf_group_n(); ++j) {
+-            m.S_x.push_back(o.take<float>(T * N, ok)); m.SH_x.push_back(o.take<float>(T * N, ok));
+-            m.SG_x.push_back(o.take<float>(T, ok)); m.INJ_x.push_back(o.take<float>(T * HC, ok));
++            m.S_x.push_back(o.take<float>(T * N, ok));
++            if (pf_fold_shared()) { m.SH_x.push_back(nullptr); m.SG_x.push_back(nullptr); }   // Opt113: folded into S_x
++            else { m.SH_x.push_back(o.take<float>(T * N, ok)); m.SG_x.push_back(o.take<float>(T, ok)); }
++            m.INJ_x.push_back(o.take<float>(T * HC, ok));
+         }
+         m.grp_zero = o.take<float>(T * N, ok); m.grp_slot_id = o.take<int32_t>(T * K, ok); m.grp_w_one = o.take<float>(T * K, ok);
+     }
+@@ -2111,7 +2121,8 @@ uint64_t Prefill::group_extra_bytes(int64_t chunk) {
+     if (g <= 1) return 0;
+     const auto up2m = [](uint64_t b) { return (b + 2097151ull) / 2097152ull * 2097152ull; };
+     const uint64_t extra = up2m(T * (uint64_t) D * 4) + up2m(T * (uint64_t) strata::kernels::kStepCount * 4);   // one more residual stream + step table
+-    const uint64_t park = 2 * up2m(T * (uint64_t) N * 4) + up2m(T * 4) + up2m(T * (uint64_t) HC * 4);          // parked partial sum, shared term, gate, injection
++    const uint64_t park = pf_fold_shared() ? up2m(T * (uint64_t) N * 4) + up2m(T * (uint64_t) HC * 4)       // Opt113: partial sum (shared folded in), injection
++                                           : 2 * up2m(T * (uint64_t) N * 4) + up2m(T * 4) + up2m(T * (uint64_t) HC * 4);   // parked partial sum, shared term, gate, injection
+     return (g - 1) * extra + g * park + up2m(T * (uint64_t) N * 4) + 2 * up2m(T * (uint64_t) K * 4);
+ }
+ double Prefill::pinned_share() { return g_pinned_share; }
+@@ -2159,7 +2170,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     o.take<int32_t>(T * strata::kernels::kStepCount, ok);
+     for (int j = 1; j < pf_group_n(); ++j) { f(T * D); o.take<int32_t>(T * strata::kernels::kStepCount, ok); }   // the lockstep group's extra chunks (carve)
+     if (pf_group_n() > 1) {
+-        for (int j = 0; j < pf_group_n(); ++j) { f(T * N); f(T * N); f(T); f(T * HC); }
++        for (int j = 0; j < pf_group_n(); ++j) { f(T * N); if (!pf_fold_shared()) { f(T * N); f(T); } f(T * HC); }   // (Opt113: S only)
+         f(T * N); o.take<int32_t>(T * K, ok); f(T * K);
+     }
+     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
+@@ -4434,12 +4445,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             if (!mac_x8) { err = "prefill: STRATA_PF_SPLIT2 needs the packed x transport (STRATA_PF_XPORT8=1)"; return false; }
+                             const int64_t rows_res = T * K - rows_cpu;
+                             const size_t sj = (size_t) lj;
++                            const float* park_sh = pf_fold_shared() ? m.shared : m.grp_zero;   // Opt113: the gated shared term goes into S now
+                             if (pf_mac_y16())
+-                                moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                                moe_combine_peer16(m.Dm, m.slot_dev, m.w, park_sh, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+                             else
+-                                moe_combine_peer(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+-                            cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
+-                            cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                moe_combine_peer(m.Dm, m.slot_dev, m.w, park_sh, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                            if (!pf_fold_shared()) {
++                                cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                            }
+                             cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
+                             parked_early = true;
+                             ls->done();
+@@ -4513,12 +4527,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 const int64_t rows_res = T * K - rows_cpu;
+                                 const size_t sj = (size_t) lj;
+                                 if (!parked_early) {
++                                    const float* park_sh = pf_fold_shared() ? m.shared : m.grp_zero;   // Opt113: the gated shared term goes into S now
+                                     if (pf_mac_y16())
+-                                        moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                                        moe_combine_peer16(m.Dm, m.slot_dev, m.w, park_sh, m.sg, (const uint16_t*) m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+                                     else
+-                                        moe_combine_peer(m.Dm, m.slot_dev, m.w, m.grp_zero, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
+-                                    cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
+-                                    cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                        moe_combine_peer(m.Dm, m.slot_dev, m.w, park_sh, m.sg, m.grp_zero, rows_res, m.S_x[sj], T, m.cs);
++                                    if (!pf_fold_shared()) {
++                                        cudaMemcpyAsync(m.SH_x[sj], m.shared, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                        cudaMemcpyAsync(m.SG_x[sj], m.sg, (size_t) T * 4, cudaMemcpyDeviceToDevice, m.cs);
++                                    }
+                                     cudaMemcpyAsync(m.INJ_x[sj], m.inj, (size_t) T * HC * 4, cudaMemcpyDeviceToDevice, m.cs);
+                                 }
+                                 void* job = nullptr;
+@@ -4660,10 +4677,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             copy_f32_wide(m.Dm + (size_t) m.pp->back_at * N, m.pp->host_rows, m.pp->back_rows * N, m.cs);
+                     }
+                     if (mac_layer && ls != nullptr) {   // lockstep: the parked partial sum + the Mac rows (the same fmaf chain: slot t -> row t with weight 1 gives the parked sum back)
++                        const float* fin_sh = pf_fold_shared() ? m.grp_zero : m.SH_x[(size_t) lj];   // Opt113: folded (0 * sigm(0) = 0)
++                        const float* fin_sg = pf_fold_shared() ? m.grp_zero : m.SG_x[(size_t) lj];
+                         if (pf_mac_y16())
+-                            moe_combine_peer16(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], (const uint16_t*) m.y_dev(lj), T, m.bo, T, m.cs);
++                            moe_combine_peer16(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, fin_sh, fin_sg, (const uint16_t*) m.y_dev(lj), T, m.bo, T, m.cs);
+                         else
+-                            moe_combine_peer(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, m.SH_x[(size_t) lj], m.SG_x[(size_t) lj], m.y_dev(lj), T, m.bo, T, m.cs);
++                            moe_combine_peer(m.S_x[(size_t) lj], m.grp_slot_id, m.grp_w_one, fin_sh, fin_sg, m.y_dev(lj), T, m.bo, T, m.cs);
+                         if (ls->split) cudaEventRecord(m.ev_comb(lj), m.cs);
+                     } else if (mac_layer && pf_mac_y16())
+                         moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.shared, m.sg, (const uint16_t*) m.mac_y_dev, T * K - rows_cpu, m.bo, T, m.cs);
