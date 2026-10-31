@@ -1,0 +1,198 @@
+# Opt115 + Opt116 + Opt117 (2026-10-31, config LR; each inert unless set). Prompt-path scratch the grouped EXL3 MoE arm never reads is no longer borrowed
+# from the card's expert slots, so the long-prompt loan falls 1201 -> 1060 slots at 33K (config LP -> LR), every one a resident expert back on the 3090.
+# Opt116 STRATA_PF_EXL3_SLIM=1: on an EXL3 pack with the grouped prompt kernel, exl3_moe runs every expert Xs -> Dm with its own gate/up and down scratch,
+#   so the FP16 dequant path's GU (T x K x 1280 fp32) and Hh (T x K x 640 fp16) are neither allocated nor counted (~190 MiB at a 3072-token chunk).
+# Opt117 STRATA_PF_EXL3_NOXS=1: the expert library's new exl3s_prefill_moe_tok (exl3/strata_m4/exl3_strata_pf_host.cu, config LR) reads each sorted row's
+#   input at its token in the [T][N] fp16 activations, so the gathered [T x K][N] copy Xs (150 MiB at 3072 tokens) goes too. Resolved at run time from the
+#   loaded library (dladdr / dlopen RTLD_NOLOAD / dlsym); without it the request stops with an error instead of falling back.
+# Opt115 STRATA_PF_LOAN_DUMP=1: diagnostic, one stderr line per loan section (gemm, chunk bufs, group, set scratch, dq + mmq, ring, mac x/y, kv stage).
+# Numerics: the same kernels read the same row values: bit-identical to config LP.
+# Measured (ABBA vs config LP, fresh restart per arm): 33K 1003.0 -> 1013.6 tok/s (+1.06 %), 8K 852.0 -> 866.8 (+1.7 %), 2.5K 288.3 -> 289.4.
+# Base: Strata v0.1.41 (fb58e0dbc839) + patches/strata/0001..0034. Source: campaign prefill.opt117.cpp (md5 195d34a7), engine strata_o37u.
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 22cf72c..bca15af 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -40,6 +40,7 @@
+ #include "strata/core/peer_experts.hpp"
+ #include "strata/prefill/kernels.hpp"
+ 
++#include <dlfcn.h>   // Opt117: dladdr / dlopen(RTLD_NOLOAD) / dlsym for exl3s_prefill_moe_tok
+ #include <cuda_runtime.h>
+ 
+ #include <algorithm>
+@@ -1300,6 +1301,40 @@ const MmqPlan& mmq_plan() {
+     }();
+     return plan;
+ }
++// Opt116 STRATA_PF_EXL3_SLIM=1: an EXL3 pack on the grouped prompt kernel (STRATA_EXL3_PF unset) runs every expert as
++// Xs -> Dm inside exl3_moe (its own gate/up and down scratch), so the FP16 dequant path's GU (T*K*1280 fp32) and Hh
++// (T*K*640 fp16) are never written or read: not allocated, not counted, so the prompt path borrows ~190 MiB fewer of
++// the card's expert slots at a 3072-token chunk.  Same kernels, same rows: bit-identical output.
++inline bool pf_exl3_slim() {
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_PF_EXL3_SLIM");
++        return v != nullptr && std::atoi(v) != 0 && strata::kernels::cpu::expert_layout().exl3 && core::exl3_pf_grouped();
++    }();
++    return on;
++}
++// Opt117 STRATA_PF_EXL3_NOXS=1 (the same grouped EXL3 arm): exl3_moe gathers each row's input through its own token
++// table, so the expert library's exl3s_prefill_moe_tok reads the [T][N] fp16 activations (mixed_h) at each sorted row's
++// token instead of a gathered [T*K][N] copy (Xs, 150 MiB at a 3072-token chunk): not allocated, not counted.  The rows'
++// values are the gathered copy's: bit-identical.  Needs the library's exl3s_prefill_moe_tok (Opt117 build), else stops.
++inline bool pf_exl3_noxs() {
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_PF_EXL3_NOXS");
++        return v != nullptr && std::atoi(v) != 0 && strata::kernels::cpu::expert_layout().exl3 && core::exl3_pf_grouped();
++    }();
++    return on;
++}
++using PfMoeTok = int (*)(void*, const uint16_t*, float*, int, const int32_t*, const int32_t*, const unsigned long long*, int,
++                         const unsigned*, const int32_t*, cudaStream_t);
++// the loaded expert library's exl3s_prefill_moe_tok (found from its exl3s_prefill_moe: the library is RTLD_LOCAL)
++inline PfMoeTok pf_moe_tok(const void* any_sym) {
++    static PfMoeTok fn = [any_sym]() -> PfMoeTok {
++        Dl_info di{};
++        if (any_sym == nullptr || dladdr(any_sym, &di) == 0 || di.dli_fname == nullptr) return nullptr;
++        void* h = dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
++        return h ? (PfMoeTok) dlsym(h, "exl3s_prefill_moe_tok") : nullptr;
++    }();
++    return fn;
++}
+ // #136 P3: a layout whose chunks run the fused experts (STRATA_PF_FUSED=1, the Q2_0 pack, a streamed chunk of
+ // stream_all_min() tokens or more).  Its GU, H and Xq hold only the fused path's grouping tables, int8 H and per-token
+ // int8 activations, and Hq nothing: ~100 KB a token less than MMQ's FP32 GU / H and per-slot q8_1 rows, which is what
+@@ -1326,9 +1361,9 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused) {
+     Alloc a; a.count_only = true; bool ok = true;
+     a.take<float>(T * n_expert, ok); a.take<float>(T * K, ok); a.take<int32_t>(T * K, ok); a.take<int32_t>(T * K, ok);
+     a.take<int32_t>(T * K, ok);
+-    if (mp.fallback) a.take<uint16_t>(T * K * N, ok);
+-    a.take<float>(mb.gu, ok);
+-    if (mp.fallback) a.take<uint16_t>(T * K * 640, ok);
++    if (mp.fallback && !pf_exl3_noxs()) a.take<uint16_t>(T * K * N, ok);   // Opt117: no gathered copy
++    if (!pf_exl3_slim()) a.take<float>(mb.gu, ok);                       // Opt116: not on the grouped EXL3 arm
++    if (mp.fallback && !pf_exl3_slim()) a.take<uint16_t>(T * K * 640, ok);
+     a.take<float>(T * K * N, ok); a.take<float>(T * 640, ok);
+     a.take<float>(T * 640, ok); a.take<uint16_t>(T * 640, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
+     if (mp.any) {
+@@ -1561,9 +1596,9 @@ bool Prefill::carve(size_t T, void* alloc) {
+         m.logits = c.take<float>(T * m.g->n_expert, ok); m.w = c.take<float>(T * K, ok); m.ids = c.take<int32_t>(T * K, ok);
+         m.slot_dev = c.take<int32_t>(T * K, ok); m.src_dev = c.take<int32_t>(T * K, ok);
+         const MmqPlan& mp = mmq_plan();
+-        m.Xs = mp.fallback ? c.take<uint16_t>(T * K * N, ok) : nullptr;
+-        m.GU = c.take<float>(mb.gu, ok);
+-        m.Hh = mp.fallback ? c.take<uint16_t>(T * K * 640, ok) : nullptr;
++        m.Xs = mp.fallback && !pf_exl3_noxs() ? c.take<uint16_t>(T * K * N, ok) : nullptr;   // Opt117
++        m.GU = pf_exl3_slim() ? nullptr : c.take<float>(mb.gu, ok);                                   // Opt116
++        m.Hh = mp.fallback && !pf_exl3_slim() ? c.take<uint16_t>(T * K * 640, ok) : nullptr;
+         m.Dm = c.take<float>(T * K * N, ok);
+         m.sgate = c.take<float>(T * 640, ok); m.sup = c.take<float>(T * 640, ok); m.sh_h = c.take<uint16_t>(T * 640, ok);
+         m.shared = c.take<float>(T * N, ok); m.sg = c.take<float>(T, ok);
+@@ -2146,6 +2181,12 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     Alloc o;
+     o.count_only = true;
+     if (owned_pages) o.granule = 2ull << 20;
++    // Opt115 STRATA_PF_LOAN_DUMP=1: one stderr line per call site kind with the running byte count after each section (diagnostic)
++    static const bool dump = [] { const char* v = std::getenv("STRATA_PF_LOAN_DUMP"); return v != nullptr && std::atoi(v) != 0; }();
++    static int dumped = 0;
++    const bool pr = dump && dumped < 4 && chunk >= 2048;
++    uint64_t mark0 = 0;
++    auto sec = [&](const char* what) { if (pr) std::fprintf(stderr, "strata loan: T %zu owned %d %-14s %8.1f MiB\n", T, (int) owned_pages, what, (double) (o.used - mark0) / 1048576.0); mark0 = o.used; };
+     o.take<uint16_t>((size_t) GEMM_SCRATCH, ok);
+     o.take<uint8_t>(GEMM_WS, ok);
+     auto f = [&](size_t n) { o.take<float>(n, ok); };
+@@ -2154,6 +2195,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     // `grs`.  Net over-count T*(D-HC)*4 bytes: 42 MB at a 1024-token chunk, 252 MB (48 Q8_0 slots) at 6144 - the
+     // prompt path was told it had less room than it did.  Safe - the direction is over-estimating, and `take`
+     // still bounds-checks - but it under-sizes every loan, so every chunk the scan picks is one step smaller.
++    sec("gemm");
+     if (ring_bytes_on()) {
+         f(T * N); f(T * D);
+         if (gr_unfused()) f(T * D);
+@@ -2168,11 +2210,13 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     if (bf16x2_hc(f16_io)) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
+     if (bf16x2(f16_io)) o.take<uint16_t>(T * N, ok);
+     o.take<int32_t>(T * strata::kernels::kStepCount, ok);
++    sec("chunk bufs");
+     for (int j = 1; j < pf_group_n(); ++j) { f(T * D); o.take<int32_t>(T * strata::kernels::kStepCount, ok); }   // the lockstep group's extra chunks (carve)
+     if (pf_group_n() > 1) {
+         for (int j = 0; j < pf_group_n(); ++j) { f(T * N); if (!pf_fold_shared()) { f(T * N); f(T); } f(T * HC); }   // (Opt113: S only)
+         f(T * N); o.take<int32_t>(T * K, ok); f(T * K);
+     }
++    sec("group");
+     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
+     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
+     s.idx_dim = g.idx_key_dim;
+@@ -2180,6 +2224,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     const int64_t max_blocks = ss.qsa_states[ss.qsa_primary()].max_cells / s.idx_block + 2;
+     o.take<uint8_t>((size_t) std::max({gdn_set_bytes(T), qsa_set_bytes(T, cap, max_blocks, 256, 32, s),
+                                        moe_set_bytes(T, g.n_expert, fused_layout(T, true))}), ok);
++    sec("set scratch");
+     for (int i = 0; i < DQ; ++i) { o.take<uint16_t>(1280 * 2560, ok); o.take<uint16_t>(2560 * 640, ok); }
+     if (mmq_plan().any) {
+         const MmqPlan& mp = mmq_plan();
+@@ -2188,17 +2233,22 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+         o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
+         o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
+     }
++    sec("dq + mmq");
+     if (owned_pages) {
+         if (ring_slots(T) > 0) o.take<uint8_t>((size_t) ring_slots(T) * (size_t) MAXBLOB(), ok);   // one allocation
+     } else {
+         for (int i = 0; i < ring_slots(T); ++i) o.take<uint8_t>((size_t) MAXBLOB(), ok);
+     }
++    sec("ring");
+     f(T * N);
+     if (pf_mac_enabled() && pf_xport8_x()) o.take<uint8_t>(strata::prefill::xport8::packed_bytes((int64_t) (T * N)) + 16384, ok);   // carve's x8_dev
+     if (pf_mac_enabled() && pf_y2() && pf_group_n() > 1) f(T * N);   // carve's mac_y_dev2 (Opt98)
+     f((size_t) strata::kernels::NG_HC_DIM);
++    sec("mac x/y");
+     strata::kernels::KvHostPools stage;
+     take_stage(o, ss, s, stage, ok);
++    sec("kv stage");
++    if (pr) { std::fprintf(stderr, "strata loan: T %zu owned %d TOTAL %8.1f MiB (ring slots %lld)\n", T, (int) owned_pages, (double) o.used / 1048576.0, (long long) ring_slots(T)); ++dumped; }
+     return o.used + (8u << 20);   // alignment slack
+ }
+ 
+@@ -3890,7 +3940,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                                 cudaMemcpyHostToDevice, m.cs);
+                             }
+                         } else {
+-                            gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
++                            if (m.Xs) gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);   // Opt117: none without Xs
+                         }
+                         // multi-GPU: the peer's share, enqueued before the primary's own experts so both cards work at once
+                         peer_now = use_mmq && !order_peer.empty();
+@@ -4275,6 +4325,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                             if (xg == nullptr) return false;
+                             pt.mark(kPfGemmGU, cs);
+                             const core::Exl3Gpu::LayerFmt lf = xg->fmt(l);
++                            if (m.Xs == nullptr) {   // Opt117: the activations at each row's token
++                                const PfMoeTok tok = pf_moe_tok((const void*) xg->prefill_moe);
++                                if (tok == nullptr) { err = "prefill: STRATA_PF_EXL3_NOXS needs the expert library's exl3s_prefill_moe_tok"; return false; }
++                                if (n > 0 && tok(xg->pf_ctx, m.mixed_h, m.Dm, n, c, o, b, lf.bits, lf.off, src_h, m.cs) != 0) {
++                                    err = "prefill: EXL3 grouped MoE failed at layer " + std::to_string(l);
++                                    return false;
++                                }
++                                return true;
++                            }
+                             if (n > 0 && xg->prefill_moe(xg->pf_ctx, m.Xs, m.Dm, n, c, o, b, lf.bits, lf.off, m.cs) != 0) {
+                                 err = "prefill: EXL3 grouped MoE failed at layer " + std::to_string(l);
+                                 return false;
+@@ -4347,6 +4406,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                 return true;
+                             }
+                             const int q = (int) (j % DQ);
++                            if (m.GU == nullptr || m.Hh == nullptr || m.Xs == nullptr) { err = "prefill: STRATA_PF_EXL3_SLIM has no FP16 expert buffers"; return false; }
+                             if (lay.native) {
+                                 // plan v0.3 P6: a native pack's layer, dequantized by llama.cpp's own formulas
+                                 const auto& f = lay.fmt[(size_t) l];
+@@ -4713,7 +4773,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                         // (fused: GU and H hold the grouping tables and int8 rows, not floats)
+                         // (the CPU's rows, the last rows_cpu of GU and H, are never written by the GPU: not checked)
+                         const int64_t gpu_rows = T * K - rows_cpu;
+-                        const int64_t bgu = fused_l ? 0 : bad(m.GU, gpu_rows * 1280), bdm = bad(m.Dm, T * K * N),
++                        const int64_t bgu = fused_l || m.GU == nullptr ? 0 : bad(m.GU, gpu_rows * 1280), bdm = bad(m.Dm, T * K * N),
+                                       bbo = bad(m.bo, T * N);
+                         const int64_t bh = m.H && !fused_l ? bad(m.H, gpu_rows * 640) : -1;
+                         static int64_t reported = -1;

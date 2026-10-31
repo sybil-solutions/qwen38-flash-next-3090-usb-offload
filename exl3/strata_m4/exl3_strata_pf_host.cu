@@ -81,9 +81,12 @@ extern "C" size_t exl3s_pf_vram_bytes(void* ctx) {
 // blob[i]: device address of its EXL3 blob (VRAM slot or staged ring copy).  Writes Dm[off[i] + r] = expert_i(Xs[off[i]
 // + r]) (fp32, unweighted, every listed row overwritten; others untouched).  cnt/off/blob are HOST arrays.  Launches:
 // one table kernel + one exl3_moe_kernel per row tier present (<= 3), after one host -> device table upload.
-extern "C" int exl3s_prefill_moe(void* ctx, const uint16_t* Xs, float* Dm, int n_experts, const int32_t* cnt,
-                                 const int32_t* off, const unsigned long long* blob, int K, const unsigned* field_off,
-                                 cudaStream_t s) {
+// Opt117: `tok` (HOST, may be null): the token of each sorted row; then `Xs` is the [T][2560] fp16 prompt activations
+// and the kernel reads row r's input at Xs[tok[r]] (exl3_moe's own token_sorted gather), so the caller keeps no gathered
+// [T*K][2560] copy.  The rows' values, and so the output, are exactly those of the gathered copy.
+static int prefill_moe_impl(void* ctx, const uint16_t* Xs, float* Dm, int n_experts, const int32_t* cnt,
+                            const int32_t* off, const unsigned long long* blob, int K, const unsigned* field_off,
+                            const int32_t* tok, cudaStream_t s) {
     Pf* p = (Pf*) ctx;
     // entries: experts split into <= kRowsCap-row pieces, grouped by tier (largest tier first, as upstream launches)
     struct Ent { unsigned long long b; int off, cnt; };
@@ -109,7 +112,7 @@ extern "C" int exl3s_prefill_moe(void* ctx, const uint16_t* Xs, float* Dm, int n
     int at = 0, n_t[3] = {0, 0, 0};
     for (int i = 0; i < E; ++i) {
         t_ent[i] = ent[i].b; t_cnt[i] = ent[i].cnt; t_base[i] = ent[i].off;
-        for (int r = 0; r < ent[i].cnt; ++r) t_tok[at + r] = ent[i].off + r;   // token_sorted: the row itself
+        for (int r = 0; r < ent[i].cnt; ++r) t_tok[at + r] = tok ? tok[ent[i].off + r] : ent[i].off + r;   // token_sorted: the row itself
         at += ent[i].cnt;
         ++n_t[ent[i].cnt > kTier2 ? 2 : ent[i].cnt > kTier1 ? 1 : 0];
     }
@@ -163,4 +166,16 @@ extern "C" int exl3s_prefill_moe(void* ctx, const uint16_t* Xs, float* Dm, int n
             return -4;
     }
     return cudaGetLastError() == cudaSuccess ? 0 : -5;
+}
+
+extern "C" int exl3s_prefill_moe(void* ctx, const uint16_t* Xs, float* Dm, int n_experts, const int32_t* cnt,
+                                 const int32_t* off, const unsigned long long* blob, int K, const unsigned* field_off,
+                                 cudaStream_t s) {
+    return prefill_moe_impl(ctx, Xs, Dm, n_experts, cnt, off, blob, K, field_off, nullptr, s);
+}
+// Opt117: X = the [T][2560] fp16 activations, tok = each sorted row's token (HOST)
+extern "C" int exl3s_prefill_moe_tok(void* ctx, const uint16_t* X, float* Dm, int n_experts, const int32_t* cnt,
+                                     const int32_t* off, const unsigned long long* blob, int K, const unsigned* field_off,
+                                     const int32_t* tok, cudaStream_t s) {
+    return prefill_moe_impl(ctx, X, Dm, n_experts, cnt, off, blob, K, field_off, tok, s);
 }

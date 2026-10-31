@@ -1,0 +1,11 @@
+# config LR (2026-10-31): config LP + patches/strata/0035 (src/prefill/prefill.cpp: LO/LP prefill.opt113.cpp md5 52d3164a -> LR prefill.opt117.cpp md5 195d34a7)
+# + exl3/strata_m4/exl3_strata_pf_host.cu (adds exl3s_prefill_moe_tok; md5 dbe9343b -> 117443f8) + STRATA_PF_EXL3_SLIM=1 / STRATA_PF_EXL3_NOXS=1 in the template.
+# Checked on the MacBook 2026-10-31: 0035 applies to the LO prefill.cpp and gives the LR source byte for byte. Every other file as config LP (config-lp-sha256.txt).
+ea5cd3555a02658a57efc643fb818d5aa84a2318d68fbef47f764964f0fa86cc  src/prefill/prefill.cpp  [campaign prefill.opt117.cpp, md5 195d34a7 = the prefill.cpp compiled into strata_o37u]
+b5c30f85025fc2aeffe19780e92fcb929d5d6f7efe800383bcc31436b4fac11f  exl3/strata_m4/exl3_strata_pf_host.cu  [campaign exl3_strata_pf_host_o117.cu, md5 117443f8]
+61fef11b05cd4a24e151b81eb0904652be446138b89ef4dc3d55a4e8412e6435  patches/strata/0035-opt116-117-pf-exl3-slim-noxs.patch
+d989ec713c4672295ac3282c171c0c9a14e20c1ba69cf8c470652be2b255daa3  configs/strata-exl3-full512-lr.json.tmpl
+# deployed (mini): engine strata_o37u sha256 2a4f659fac93a614491ba8b35945479c7e0e7685fe92fe81253c6e451e13d6f4 (md5 12730acd);
+# expert library libstrata_exl3_o117.dylib sha256 5cee95649b99b63fee831c18bbc4faceadc8f6f8555952df793f6251b2abf080 (md5 74d797c9), built with exl3/strata_m4/build.sh's
+# flags from this host file and the Oct-11 sources and fatbins of the default libstrata_exl3.dylib, loaded through STRATA_EXL3_GPU_LIB (run.sh builds the same
+# sources as the default libstrata_exl3.dylib, so the template needs no GPU_LIB); live config md5 071bb80464bdaf1ad292869b55c51408 (2026-10-31 12:37:13 PDT)
