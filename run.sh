@@ -341,7 +341,7 @@ build_libs() {
     elif [ -f "$BUNDLE/metal/libexl3metal.dylib" ]; then mkdir -p "$HOME/exl3/metal"; cp "$BUNDLE/metal/libexl3metal.dylib" "$HOME/exl3/metal/libexl3metal.dylib"; ok "installed libexl3metal.dylib from $BUNDLE/metal"
     else bad "no Metal toolchain and no $BUNDLE/metal/libexl3metal.dylib: run ./run.sh --build-metal on a Mac with the Metal toolchain"; fi
   else ok "libexl3metal.dylib present"; fi
-  [ -f "$HOME/exl3/metal/libexl3metal.dylib" ] && expected_sha libexl3metal "$HOME/exl3/metal/libexl3metal.dylib" 0248dd0b8bcd1dfe2e6de9702a602ed4c1467d7c17fc61f3eb7a2e8b7acedbab
+  [ -f "$HOME/exl3/metal/libexl3metal.dylib" ] && expected_sha libexl3metal "$HOME/exl3/metal/libexl3metal.dylib" 31849fa68888420558c975986d4db39ca501c77734aaa896c7068af5536e73a6   # config LS (Opt125); LM / LR: 0248dd0b
   # libcudart (the CUDA runtime shim) embeds CPython: use the interpreter the tinygrad venv runs on
   py_prefix=$("$HOME/tinygrad/.venv/bin/python" -c "import sys; print(sys.base_prefix)")
   h=$(hash_files "$REPO/shim/tgcudart.cpp" "$REPO/shim/tgcublas.cpp" "$REPO/shim/tgcuda_launch.h" "$REPO/shim/build-libcudart.sh"); h="$h-$(basename "$py_prefix")"
