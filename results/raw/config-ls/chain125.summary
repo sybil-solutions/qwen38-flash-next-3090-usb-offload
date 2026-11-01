@@ -1,0 +1,43 @@
+start 14:33:47 live md5 071bb80464bdaf1ad292869b55c51408
+### b0 14:33:50
+{"tag": "f125_b0", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 33335, "tok_s": 1015.2, "wall_s": 33.41, "ts": "2026-10-31T21:37:24Z
+{"tag": "f125_b0", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 33262, "tok_s": 1017.4, "wall_s": 33.32, "ts": "2026-10-31T21:37:57Z
+{"tag": "f125_b0", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11392, "tok_s": 703.9, "wall_s": 11.46, "ts": "2026-10-31T21:38:09Z"}
+{"tag": "f125_b0", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9260, "tok_s": 865.9, "wall_s": 9.32, "ts": "2026-10-31T21:38:18Z"}
+strata pf-mac: 3 sets x 402 slots (2.25 GB) borrowed from the LRU's coldest slots per prompt, fd 12
+strata d7: req 1 flags 15: guided refill of 1060 slots (319 changed) from 33834 prompt tokens; copies 304 staged + 0 plain; warm 1085 of 4096 candidates in 1093 ms; refill 1434 ms
+strata d7: req 2 flags 15: guided refill of 1060 slots (732 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 217 of 4096 candidates in 161 ms; refill 1423 ms
+   front mean 54.8 med 49.2 | x_fetch mean 13.5 med 13.4 | conv+pairs mean 1.4 med 1.4 | blobs(join) mean 0.0 med 0.0 | metal(wait) mean 4.0 med 0.3 | y_conv mean 1.0 med 1.0 | y_push mean 14.0 med 13.0 | issue mean 36.6 med 32.7 | gpuwait mean 11.6 med 10.6 | submit mean 0.7 med 0.4 | period mean 54.0 med 48.8 | mgpu mean 131.6 med 123.3 | xdq mean 1.3 med 1.3 | ywait mean 0.0 med 0.0 | cold mean 281.5 med 281.5
+  GPU timeouts 0 | errors 0
+### m1 14:38:22
+{"tag": "f125_m1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 32252, "tok_s": 1049.3, "wall_s": 32.33, "ts": "2026-10-31T21:41:53Z
+{"tag": "f125_m1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 32237, "tok_s": 1049.8, "wall_s": 32.29, "ts": "2026-10-31T21:42:26Z
+{"tag": "f125_m1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11280, "tok_s": 710.8, "wall_s": 11.35, "ts": "2026-10-31T21:42:37Z"}
+{"tag": "f125_m1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9231, "tok_s": 868.6, "wall_s": 9.29, "ts": "2026-10-31T21:42:46Z"}
+strata pf-mac: 3 sets x 402 slots (2.25 GB) borrowed from the LRU's coldest slots per prompt, fd 12
+strata d7: req 1 flags 15: guided refill of 1060 slots (321 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 1087 of 4096 candidates in 1098 ms; refill 1433 ms
+strata d7: req 2 flags 15: guided refill of 1060 slots (732 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 216 of 4096 candidates in 165 ms; refill 1432 ms
+   front mean 52.7 med 48.6 | x_fetch mean 13.4 med 13.4 | conv+pairs mean 1.4 med 1.4 | blobs(join) mean 0.0 med 0.0 | metal(wait) mean 2.3 med 0.4 | y_conv mean 1.0 med 1.0 | y_push mean 13.6 med 12.9 | issue mean 34.3 med 31.7 | gpuwait mean 11.9 med 10.7 | submit mean 0.6 med 0.4 | period mean 51.9 med 48.1 | mgpu mean 108.1 med 93.2 | xdq mean 1.3 med 1.3 | ywait mean 0.0 med 0.0 | cold mean 281.4 med 280.5
+  GPU timeouts 0 | errors 0
+### m2 14:42:50
+{"tag": "f125_m2", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 32300, "tok_s": 1047.8, "wall_s": 32.38, "ts": "2026-10-31T21:46:22Z
+{"tag": "f125_m2", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 32317, "tok_s": 1047.2, "wall_s": 32.38, "ts": "2026-10-31T21:46:54Z
+{"tag": "f125_m2", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11300, "tok_s": 709.5, "wall_s": 11.37, "ts": "2026-10-31T21:47:05Z"}
+{"tag": "f125_m2", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9349, "tok_s": 857.6, "wall_s": 9.41, "ts": "2026-10-31T21:47:15Z"}
+strata pf-mac: 3 sets x 402 slots (2.25 GB) borrowed from the LRU's coldest slots per prompt, fd 12
+strata d7: req 1 flags 15: guided refill of 1060 slots (321 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 1086 of 4096 candidates in 1094 ms; refill 1433 ms
+strata d7: req 2 flags 15: guided refill of 1060 slots (732 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 211 of 4096 candidates in 158 ms; refill 1440 ms
+   front mean 52.7 med 48.6 | x_fetch mean 13.4 med 13.4 | conv+pairs mean 1.4 med 1.4 | blobs(join) mean 0.0 med 0.0 | metal(wait) mean 2.2 med 0.3 | y_conv mean 1.0 med 1.0 | y_push mean 13.6 med 12.9 | issue mean 34.3 med 31.7 | gpuwait mean 11.9 med 10.6 | submit mean 0.6 med 0.4 | period mean 51.9 med 48.1 | mgpu mean 107.2 med 93.2 | xdq mean 1.3 med 1.3 | ywait mean 0.0 med 0.0 | cold mean 281.0 med 281.0
+  GPU timeouts 0 | errors 0
+### b1 14:47:18
+{"tag": "f125_b1", "target": 33000, "run": 1, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 33410, "tok_s": 1012.9, "wall_s": 33.49, "ts": "2026-10-31T21:50:52Z
+{"tag": "f125_b1", "target": 33000, "run": 2, "prompt_n": 33842, "cache_n": 0, "prompt_ms": 33449, "tok_s": 1011.7, "wall_s": 33.51, "ts": "2026-10-31T21:51:26Z
+{"tag": "f125_b1", "target": 8000, "run": 1, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 11454, "tok_s": 700.0, "wall_s": 11.52, "ts": "2026-10-31T21:51:37Z"}
+{"tag": "f125_b1", "target": 8000, "run": 2, "prompt_n": 8018, "cache_n": 0, "prompt_ms": 9341, "tok_s": 858.4, "wall_s": 9.4, "ts": "2026-10-31T21:51:47Z"}
+strata pf-mac: 3 sets x 402 slots (2.25 GB) borrowed from the LRU's coldest slots per prompt, fd 12
+strata d7: req 1 flags 15: guided refill of 1060 slots (323 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 1085 of 4096 candidates in 1094 ms; refill 1429 ms
+strata d7: req 2 flags 15: guided refill of 1060 slots (732 changed) from 33835 prompt tokens; copies 304 staged + 0 plain; warm 216 of 4096 candidates in 161 ms; refill 1436 ms
+   front mean 55.0 med 49.2 | x_fetch mean 13.5 med 13.4 | conv+pairs mean 1.4 med 1.4 | blobs(join) mean 0.0 med 0.0 | metal(wait) mean 4.0 med 0.3 | y_conv mean 1.0 med 1.0 | y_push mean 14.1 med 13.0 | issue mean 36.9 med 32.7 | gpuwait mean 11.5 med 10.6 | submit mean 0.7 med 0.4 | period mean 54.1 med 48.7 | mgpu mean 131.2 med 123.9 | xdq mean 1.3 med 1.3 | ywait mean 0.0 med 0.0 | cold mean 281.0 med 280.0
+  GPU timeouts 0 | errors 0
+restore22: OK live md5 071bb80464bdaf1ad292869b55c51408
+CHAIN125DONE

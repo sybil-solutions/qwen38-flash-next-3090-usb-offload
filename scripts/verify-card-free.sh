@@ -46,18 +46,19 @@ step_patches() {   # every Strata patch applies, in order, to a pristine v0.1.41
   local n=0 h f
   while read -r h f _; do
     case $h in ""|\#*) continue;; esac
-    # files changed after config L take the hash of the latest config that changed them: exl3/metal/* from config LM (Opt27; its manifest names them
-    # relative to exl3/metal/), src/prefill/prefill.cpp from config LR (patches 0033 + 0034 + 0035)
+    # files changed after config L take the hash of the latest config that changed them: exl3/metal/* from config LS (exl3_metal.metal, Opt125) or else
+    # config LM (Opt27; both manifests name them relative to exl3/metal/), src/prefill/prefill.cpp from config LR (patches 0033 + 0034 + 0035)
     local o=""
     case $f in
-      exl3/metal/*) o=$(awk -v b="${f#exl3/metal/}" '$2 == b {print $1}' $REPO/results/verification/config-lm-sha256.txt);;
+      exl3/metal/*) o=$(awk -v b="${f#exl3/metal/}" '$2 == b {print $1}' $REPO/results/verification/config-ls-sha256.txt)
+                    [ -n "$o" ] || o=$(awk -v b="${f#exl3/metal/}" '$2 == b {print $1}' $REPO/results/verification/config-lm-sha256.txt);;
       src/prefill/prefill.cpp) o=$(awk '$2 == "src/prefill/prefill.cpp" {print $1}' $REPO/results/verification/config-lr-sha256.txt);;
     esac
     [ -n "$o" ] && h=$o
     case $f in shim/*|exl3/*) f=$REPO/$f;; *) f=$WORK/strata/$f;; esac
     expect_sha $f $h "${f#$REPO/}"; n=$((n + 1))
   done < $REPO/results/verification/config-l-sha256.txt
-  echo "$n files match results/verification/config-l-sha256.txt (exl3/metal/* as config-lm-sha256.txt, prefill.cpp as config-lr-sha256.txt)"
+  echo "$n files match results/verification/config-l-sha256.txt (exl3/metal/* as config-ls / config-lm-sha256.txt, prefill.cpp as config-lr-sha256.txt)"
   expect_sha $REPO/exl3/strata_m4/exl3_strata_pf_host.cu $(awk '$2 == "exl3/strata_m4/exl3_strata_pf_host.cu" {print $1}' $REPO/results/verification/config-lr-sha256.txt) "exl3/strata_m4/exl3_strata_pf_host.cu (config LR)"
   logged profile-d8w4 1 env STRATA_TOOLS=$WORK/strata/tools python3 $REPO/exl3/make_profile_wholelayers.py $WORK/d8w4 0,1,2,6
   [ "$(md5 -q $WORK/d8w4/profile.bin)" = 2ac3b7e1436c1720487993969c651c5c ] && echo "exl3/make_profile_wholelayers.py 0,1,2,6 -> d8w4/profile.bin md5 2ac3b7e1... MATCH" || fail "d8w4 profile does not reproduce"

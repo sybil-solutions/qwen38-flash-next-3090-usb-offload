@@ -1,0 +1,10 @@
+# config LS (2026-11-01 01:19Z): config LR + the Opt125 Metal prefill library. One source file changes: exl3/metal/exl3_metal.metal (the fused-decode prefill
+# GEMMs gemm_body_fd / gemm_body_fd64 run only the 8-row blocks of each simdgroup's rows that hold valid rows, through mma_k32<NA, NR>; rows >= nv are never
+# stored and the per-element MMA order is unchanged, so y is bitwise equal to the config LM/LR library). The template is the LR template byte for byte.
+# Checked on the MacBook 2026-10-31: exl3/metal/build.sh on this source gives the deployed library byte for byte (md5 01fa2f88).
+abc5348d1f8836ad5a4cea393b243362f963294648349f8aece57a75568043c1  exl3_metal.metal
+8e35c1fe15a937c4300221f1386c88dc1cc65f939ffce8232b035ac3f4effc98  exl3_metal.mm
+d989ec713c4672295ac3282c171c0c9a14e20c1ba69cf8c470652be2b255daa3  configs/strata-exl3-full512-ls.json.tmpl
+# deployed (mini): ~/strata-opt125/lib/libexl3metal_o125.dylib sha256 31849fa68888420558c975986d4db39ca501c77734aaa896c7068af5536e73a6 (md5 01fa2f8873c58171445ea8f9fd5249be), loaded through
+# STRATA_EXL3_METAL_LIB (run.sh builds the same library from exl3/metal, so the template needs no METAL_LIB); engine strata_o37u and every other file as config LR;
+# live config md5 02c3fc049b31c4444f3599829252b28e (2026-10-31 18:19:07 PDT)

@@ -350,6 +350,22 @@ kernel void gemm_d_lm(device const half* A [[buffer(0)]], device const half* Wd 
   gemm_body<FF, H, true, true>(A, Wd + (ulong)T.u * (H * FF), C, T.r0, T.nv, tg.x * 64u, t, sg, As, Bs, Cs);
 }
 
+// Opt125: the MMAs of one 32-deep K step for the first NA (1..4) 8-row blocks of a simdgroup's rows (rows >= nv are never stored, so blocks
+// past the tile's valid rows skip their loads and MMAs); same per-element MMA order as the full tile -> bit-identical.
+template <uint NA, uint NR>
+inline void mma_k32(thread simdgroup_float8x8 (&acc)[NR][4], threadgroup const half* Ar, threadgroup const half* Bc) {
+  for (uint kk = 0; kk < 32u; kk += 8u) {
+    simdgroup_half8x8 a, b0, b1, b2, b3;
+    simdgroup_load(b0, Bc + kk * 64u, 64); simdgroup_load(b1, Bc + kk * 64u + 8u, 64);
+    simdgroup_load(b2, Bc + kk * 64u + 16u, 64); simdgroup_load(b3, Bc + kk * 64u + 24u, 64);
+    for (uint q = 0; q < NA; q++) {
+      simdgroup_load(a, Ar + (q * 8u) * 32u + kk, 32);
+      simdgroup_multiply_accumulate(acc[q][0], a, b0, acc[q][0]); simdgroup_multiply_accumulate(acc[q][1], a, b1, acc[q][1]);
+      simdgroup_multiply_accumulate(acc[q][2], a, b2, acc[q][2]); simdgroup_multiply_accumulate(acc[q][3], a, b3, acc[q][3]);
+    }
+  }
+}
+
 // Opt23 (fused decode): the GEMM decodes its B tile from the trellis itself (no decoded-weight round trip through DRAM: decode_w wrote and gemm_* re-read 9.8 MB per expert).
 // Each simdgroup decodes the two 16x16 tiles (k16 = 0, 1) of its 16-column slab per k step with the same decode8 lane layout as decode_w, and scatters them into Bs at the positions gemm_body's
 // lane-major path uses: the MMA operands, their order and the accumulators are unchanged, so the result is bit-identical to decode_w + gemm_*.
@@ -362,6 +378,7 @@ inline void gemm_body_fd(device const half* A, device const uchar* trb, device f
   for (uint a = 0; a < 2; a++) for (uint b = 0; b < 4; b++) acc[a][b] = simdgroup_float8x8(0.f);
   const uint arow = t >> 2, apart = t & 3u;
   const uint lane = t & 31u, dc = lane >> 2, dq = lane & 3u;
+  const uint na = nv > sgm * 16u ? min(2u, (nv - sgm * 16u + 7u) / 8u) : 0u;   // Opt125: valid 8-row blocks of this simdgroup's 16 rows
   const device uint* tr = (const device uint*)trb;
   for (uint k0 = 0; k0 < K; k0 += 32u) {
     *(threadgroup half4*)(As + arow * 32u + apart * 8u) = *(device const half4*)(A + (ulong)(r0 + arow) * K + k0 + apart * 8u);
@@ -376,18 +393,9 @@ inline void gemm_body_fd(device const half* A, device const uchar* trb, device f
       dst[(2u * dq + 8u) * 64u + 8u] = v[6]; dst[(2u * dq + 9u) * 64u + 8u] = v[7];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint kk = 0; kk < 32u; kk += 8u) {
-      simdgroup_half8x8 a0, a1, b0, b1, b2, b3;
-      simdgroup_load(a0, As + (sgm * 16u) * 32u + kk, 32);
-      simdgroup_load(a1, As + (sgm * 16u + 8u) * 32u + kk, 32);
-      simdgroup_load(b0, Bs + kk * 64u + sgn * 32u, 64);
-      simdgroup_load(b1, Bs + kk * 64u + sgn * 32u + 8u, 64);
-      simdgroup_load(b2, Bs + kk * 64u + sgn * 32u + 16u, 64);
-      simdgroup_load(b3, Bs + kk * 64u + sgn * 32u + 24u, 64);
-      simdgroup_multiply_accumulate(acc[0][0], a0, b0, acc[0][0]); simdgroup_multiply_accumulate(acc[0][1], a0, b1, acc[0][1]);
-      simdgroup_multiply_accumulate(acc[0][2], a0, b2, acc[0][2]); simdgroup_multiply_accumulate(acc[0][3], a0, b3, acc[0][3]);
-      simdgroup_multiply_accumulate(acc[1][0], a1, b0, acc[1][0]); simdgroup_multiply_accumulate(acc[1][1], a1, b1, acc[1][1]);
-      simdgroup_multiply_accumulate(acc[1][2], a1, b2, acc[1][2]); simdgroup_multiply_accumulate(acc[1][3], a1, b3, acc[1][3]);
+    {
+      threadgroup const half* Ar = As + (sgm * 16u) * 32u; threadgroup const half* Bc = Bs + sgn * 32u;
+      switch (na) { case 1: mma_k32<1, 2>(acc, Ar, Bc); break; case 2: mma_k32<2, 2>(acc, Ar, Bc); break; default: break; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
@@ -425,6 +433,7 @@ inline void gemm_body_fd64(device const half* A, device const uchar* trb, device
   for (uint a = 0; a < 4; a++) for (uint b = 0; b < 4; b++) acc[a][b] = simdgroup_float8x8(0.f);
   const uint arow = t >> 2, apart = t & 3u;
   const uint lane = t & 31u, dc = lane >> 2, dq = lane & 3u;
+  const uint na = nv > sgm * 32u ? min(4u, (nv - sgm * 32u + 7u) / 8u) : 0u;   // Opt125: valid 8-row blocks of this simdgroup's 32 rows
   const device uint* tr = (const device uint*)trb;
   for (uint k0 = 0; k0 < K; k0 += 32u) {
     for (uint hh = 0; hh < 2u; hh++) {
@@ -442,24 +451,9 @@ inline void gemm_body_fd64(device const half* A, device const uchar* trb, device
       dst[(2u * dq + 8u) * 64u + 8u] = v[6]; dst[(2u * dq + 9u) * 64u + 8u] = v[7];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint kk = 0; kk < 32u; kk += 8u) {
-      simdgroup_half8x8 a0, a1, a2, a3, b0, b1, b2, b3;
-      simdgroup_load(a0, As + (sgm * 32u) * 32u + kk, 32);
-      simdgroup_load(a1, As + (sgm * 32u + 8u) * 32u + kk, 32);
-      simdgroup_load(a2, As + (sgm * 32u + 16u) * 32u + kk, 32);
-      simdgroup_load(a3, As + (sgm * 32u + 24u) * 32u + kk, 32);
-      simdgroup_load(b0, Bs + kk * 64u + sgn * 32u, 64);
-      simdgroup_load(b1, Bs + kk * 64u + sgn * 32u + 8u, 64);
-      simdgroup_load(b2, Bs + kk * 64u + sgn * 32u + 16u, 64);
-      simdgroup_load(b3, Bs + kk * 64u + sgn * 32u + 24u, 64);
-      simdgroup_multiply_accumulate(acc[0][0], a0, b0, acc[0][0]); simdgroup_multiply_accumulate(acc[0][1], a0, b1, acc[0][1]);
-      simdgroup_multiply_accumulate(acc[0][2], a0, b2, acc[0][2]); simdgroup_multiply_accumulate(acc[0][3], a0, b3, acc[0][3]);
-      simdgroup_multiply_accumulate(acc[1][0], a1, b0, acc[1][0]); simdgroup_multiply_accumulate(acc[1][1], a1, b1, acc[1][1]);
-      simdgroup_multiply_accumulate(acc[1][2], a1, b2, acc[1][2]); simdgroup_multiply_accumulate(acc[1][3], a1, b3, acc[1][3]);
-      simdgroup_multiply_accumulate(acc[2][0], a2, b0, acc[2][0]); simdgroup_multiply_accumulate(acc[2][1], a2, b1, acc[2][1]);
-      simdgroup_multiply_accumulate(acc[2][2], a2, b2, acc[2][2]); simdgroup_multiply_accumulate(acc[2][3], a2, b3, acc[2][3]);
-      simdgroup_multiply_accumulate(acc[3][0], a3, b0, acc[3][0]); simdgroup_multiply_accumulate(acc[3][1], a3, b1, acc[3][1]);
-      simdgroup_multiply_accumulate(acc[3][2], a3, b2, acc[3][2]); simdgroup_multiply_accumulate(acc[3][3], a3, b3, acc[3][3]);
+    {
+      threadgroup const half* Ar = As + (sgm * 32u) * 32u; threadgroup const half* Bc = Bs + sgn * 32u;
+      switch (na) { case 1: mma_k32<1, 4>(acc, Ar, Bc); break; case 2: mma_k32<2, 4>(acc, Ar, Bc); break; case 3: mma_k32<3, 4>(acc, Ar, Bc); break; case 4: mma_k32<4, 4>(acc, Ar, Bc); break; default: break; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }

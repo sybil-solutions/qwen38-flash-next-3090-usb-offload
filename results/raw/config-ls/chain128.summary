@@ -1,0 +1,63 @@
+start 15:45:54 live md5 071bb80464bdaf1ad292869b55c51408
+ls.json md5 02c3fc049b31c4444f3599829252b28e (lr.json 071bb80464bdaf1ad292869b55c51408)
+fresh q23 ls rc 0 15:50:21
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.01%, mean KL 0.007280 nats, p99 KL 0.092846 nats, mean |dlogp(target)| 0.07596  (KL = top-64-support estimate)
+GATE: PASS
+Aa pass 1: requests 29 mean tok/s 33.82 ttft 14.46 wall 23.14
+Aa pass 2: requests 29 mean tok/s 34.16 ttft 14.05 wall 22.63
+  Aa GPU timeouts 0 16:14:45
+Qa pass 1: requests 29 mean tok/s 33.76 ttft 13.92 wall 22.59
+Qa pass 2: requests 29 mean tok/s 33.78 ttft 13.55 wall 22.26
+  Qa GPU timeouts 0 16:38:42
+Qb pass 1: requests 29 mean tok/s 33.88 ttft 13.88 wall 22.54
+Qb pass 2: requests 29 mean tok/s 33.92 ttft 13.52 wall 22.19
+  Qb GPU timeouts 0 17:02:36
+Ab pass 1: requests 29 mean tok/s 33.47 ttft 14.42 wall 23.15
+Ab pass 2: requests 29 mean tok/s 33.50 ttft 14.06 wall 22.79
+  Ab GPU timeouts 0 17:27:04
+PAIRED per-prompt ls/LR - 1: n 29, mean +0.35 %, median +0.36 %, ls slower on 10 of 29
+ARM MEANS LR 33.74 ls 33.83
+final21 rc 0 17:57:15
+REALISTIC29 requests 29 mean tok/s 33.68 ttft mean 13.93 wall mean 22.62
+RESULT: PASS (prefix reused True, answer uses the tool result True)
+RESULT: PASS
+ 190k depth  50%: FOUND  (189,450 prompt tokens, 234 s)
+  32k depth  10%: FOUND  (33,286 prompt tokens, 48 s)
+  32k depth  50%: FOUND  (33,286 prompt tokens, 45 s)
+  32k depth  90%: FOUND  (33,286 prompt tokens, 31 s)
+  32k depth  30%: FOUND  (33,286 prompt tokens, 41 s)
+  32k depth  70%: FOUND  (33,286 prompt tokens, 35 s)
+GPU timeouts in the whole regression: 0
+soak rc 0 18:14:31
+prompt 1:   32k depth  10%: FOUND  (33,286 prompt tokens, 49 s)
+prompt 2:   32k depth  50%: FOUND  (33,286 prompt tokens, 42 s)
+prompt 3:   32k depth  90%: FOUND  (33,286 prompt tokens, 41 s)
+prompt 4:   32k depth  30%: FOUND  (33,286 prompt tokens, 35 s)
+prompt 5:   32k depth  70%: FOUND  (33,286 prompt tokens, 31 s)
+SWAP after_5 18:03:11 wired_MiB 12792 swap: total = 2048.00M used = 993.12M free = 1054.88M (encrypted) engine MALLOC_LARGE swapped: 1.0G
+prompt 6:   32k depth  20%: FOUND  (33,286 prompt tokens, 41 s)
+prompt 7:   32k depth  60%: FOUND  (33,286 prompt tokens, 32 s)
+prompt 8:   32k depth  80%: FOUND  (33,286 prompt tokens, 21 s)
+prompt 9:   32k depth  40%: FOUND  (33,286 prompt tokens, 32 s)
+SWAP after_9 18:05:40 wired_MiB 12793 swap: total = 2048.00M used = 1259.38M free = 788.62M (encrypted) engine MALLOC_LARGE swapped: 998.2M
+prompt 10:   32k depth  95%: FOUND  (33,286 prompt tokens, 30 s)
+SWAP after_10 18:06:16 wired_MiB 12775 swap: total = 2048.00M used = 1251.38M free = 796.62M (encrypted) engine MALLOC_LARGE swapped: 1.2G
+prompt 11 (190K):  190k depth  30%: FOUND  (189,450 prompt tokens, 212 s)
+SWAP after_11 18:09:54 wired_MiB 12790 swap: total = 2048.00M used = 1260.12M free = 787.88M (encrypted) engine MALLOC_LARGE swapped: 1.3G
+prompt 11:   32k depth  50%: FOUND  (33,286 prompt tokens, 59 s)
+SWAP after_11 18:10:55 wired_MiB 12809 swap: total = 2048.00M used = 1413.62M free = 634.38M (encrypted) engine MALLOC_LARGE swapped: 586.7M
+prompt 12:   32k depth  15%: FOUND  (33,286 prompt tokens, 41 s)
+SWAP after_12 18:11:43 wired_MiB 12792 swap: total = 2048.00M used = 1413.62M free = 634.38M (encrypted) engine MALLOC_LARGE swapped: 1.0G
+prompt 13:   32k depth  85%: FOUND  (33,286 prompt tokens, 41 s)
+SWAP after_13 18:12:29 wired_MiB 12773 swap: total = 2048.00M used = 1365.62M free = 682.38M (encrypted) engine MALLOC_LARGE swapped: 907.8M
+prompt 14:   32k depth  45%: FOUND  (33,286 prompt tokens, 38 s)
+SWAP after_14 18:13:13 wired_MiB 12775 swap: total = 2048.00M used = 1365.62M free = 682.38M (encrypted) engine MALLOC_LARGE swapped: 882.4M
+decode tok/s 28.4 n 300 drafts 216/244 md5 f60e112b2b67
+decode tok/s 31.7 n 300 drafts 163/285 md5 4ec9fbbd8e1b
+decode tok/s 26.3 n 300 drafts 143/241 md5 be86789901ae
+decode tok/s 28.1 n 300 drafts 216/235 md5 f60e112b2b67
+decode tok/s 32.0 n 300 drafts 161/267 md5 f89510dd212a
+decode tok/s 27.5 n 297 drafts 154/257 md5 2dd919954a49
+engine alive:        1; GPU timeouts 0
+restore22: OK live md5 071bb80464bdaf1ad292869b55c51408
+CHAIN128DONE

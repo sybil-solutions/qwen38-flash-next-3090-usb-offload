@@ -1,0 +1,12 @@
+start 14:54:05 live md5 071bb80464bdaf1ad292869b55c51408
+ls.json md5 02c3fc049b31c4444f3599829252b28e (lr.json 071bb80464bdaf1ad292869b55c51408)
+### lp ls126 14:56:17
+lp rc 0 15:03:11
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 1
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.58%, mean KL 0.005830 nats, p99 KL 0.107814 nats, mean |dlogp(target)| 0.07497  (KL = top-64-support estimate)
+GATE: FAIL: p99 KL 0.1078 >= 0.1
+post-33K gate: GATE: FAIL: p99 KL 0.1078 >= 0.1
+post-33K panel did not pass: stop
+restore22: OK live md5 071bb80464bdaf1ad292869b55c51408
+CHAIN126DONE

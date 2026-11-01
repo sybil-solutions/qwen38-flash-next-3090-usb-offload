@@ -1,0 +1,33 @@
+start 15:06:03 live md5 071bb80464bdaf1ad292869b55c51408
+### lp lr127a 15:08:17
+lp rc 0 15:15:24
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 1
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.01%, mean KL 0.006544 nats, p99 KL 0.102513 nats, mean |dlogp(target)| 0.07842  (KL = top-64-support estimate)
+GATE: FAIL: p99 KL 0.1025 >= 0.1
+### lp ls127a 15:17:42
+lp rc 0 15:24:35
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 0
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.16%, mean KL 0.006138 nats, p99 KL 0.080730 nats, mean |dlogp(target)| 0.07087  (KL = top-64-support estimate)
+GATE: PASS
+### lp lr127b 15:26:54
+lp rc 0 15:33:58
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 0
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.01%, mean KL 0.006870 nats, p99 KL 0.090478 nats, mean |dlogp(target)| 0.07994  (KL = top-64-support estimate)
+GATE: PASS
+### lp ls127b 15:36:16
+lp rc 0 15:43:10
+  not-a-window 0 | GPU timeouts 0 | 33K prompts 8 | kvt lines 0
+  lpcmp p-off rc 0
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.16%, mean KL 0.004873 nats, p99 KL 0.072845 nats, mean |dlogp(target)| 0.06688  (KL = top-64-support estimate)
+GATE: PASS
+### lpcmp lr127a vs lr127b (LR run-to-run)
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.01%, mean KL 0.005730 nats, p99 KL 0.052970 nats, mean |dlogp(target)| 0.06884  (KL = top-64-support estimate)
+GATE: PASS
+### lpcmp ls127a vs ls127b (LS run-to-run)
+TOTAL: baseline positions 705, matched 705 (coverage 100.00%), top-1 agreement 98.87%, mean KL 0.005203 nats, p99 KL 0.066589 nats, mean |dlogp(target)| 0.05939  (KL = top-64-support estimate)
+GATE: PASS
+restore22: OK live md5 071bb80464bdaf1ad292869b55c51408
+CHAIN127DONE

@@ -15,11 +15,83 @@ Decode: 3 fixed prompts, up to 300 tokens, run twice right after a server restar
 Prefill: a document prompt with a random first line so no prefix cache applies, `max_tokens` 2, tok/s = `prompt_n / prompt_ms`
 (`bench/ls_pf.py`, `bench/final_long.py pf`). Needle: `bench/final_long.py needle TOKENS DEPTH` (Strata's `tools/needle_bench.py` haystack).
 
-## 0.00000000000000 Latest configuration: `configs/strata-exl3-full512-lr.json.tmpl` (config LR, chain118-119, 2026-10-31)
+## 0.000000000000000 Latest configuration: `configs/strata-exl3-full512-ls.json.tmpl` (config LS, chain125-128, 2026-10-31 / 11-01)
+
+Config **LS** = config LR (section 0.00000000000000) on the Opt125 Metal prefill library: one source change, `exl3/metal/exl3_metal.metal`. Template, engine
+(`strata_o37u`), shim, expert library, placement and VRAM split as LR; the LS template is the LR template byte for byte, because `run.sh` builds the Metal library
+from `exl3/metal`. Production on the mini since 2026-11-01T01:19Z (2026-10-31 18:19 PDT).
+
+What it changes: the Mac GPU computes every expert the card does not hold, and during a 33K prompt it is busy almost the whole time (264 pair jobs x ~130 ms ~ 34 s
+of a 33.3 s prompt), so its job time is on the critical path (handing it more experts loses 16-29 %, chain122). Each fused-decode prefill GEMM tile covers 32 or 64
+rows of one expert; an expert with 33-64 rows takes a 64-row tile and its 1-32 leftover rows a 32-row tile, so on a pair job's mix ~21 % of the computed rows are
+padding. On the M4 the GEMMs run near the MMA peak, so the padding costs time. `gemm_body_fd` / `gemm_body_fd64` now run, per simdgroup, only the 8-row blocks
+that hold valid rows (`mma_k32<NA, NR>`, NA chosen once per tile). Rows past the tile's valid rows are never stored and the per-element MMA order is unchanged:
+y is bitwise equal to the LR library (checked on the M1 Max and the M4).
+
+**Source of these numbers:** `results/raw/config-ls/chain125.summary` (prefill ABBA, b = LR, m = LS), `chain126.summary` (first gate attempt, stopped at the
+post-33K panel), `chain127.summary` (pre-registered repeat panels), `chain128.summary` (fresh q23, decode ABBA, regression, soak), copied from the mini. The 33K
+bench prompt is 33,842 tokens. Mini clock is PDT (UTC-7).
+
+### 0.000000000000000.1 Metal job microbench (Mac mini M4, between chains; realistic pair job: 5664 tokens, 312 cold experts, 21.6K pairs; y bitwise compared; kernel split = job minus the job with that kernel skipped)
+
+| library | job (ms) | gemm gate/up | gemm down | rot + mid + comb |
+|---|---|---|---|---|
+| LR (`libexl3metal_s`) | 90.5 | 51.1 | 25.6 | 13.2 |
+| LS, skip in the 64-row kernel only | 89.5 | | | |
+| **LS** (`libexl3metal_o125`) | **83.3** | | | 12.5 |
+
+Not kept: the earlier 64x128 wide kernel (94.1 ms on the M4), a barrier-free 4-columns-per-lane FWHT in rot / mid / comb (83.2 ms: those kernels are
+memory-bound), and super-chunk sizes 8192 / 16384 rows (33K 1011.2 / 999.0 vs 1013.8 tok/s, chain124).
+
+### 0.000000000000000.2 Prefill ABBA125 (b0 m1 m2 b1, fresh restart per arm, warm 33K first; tok/s run 1 / run 2)
+
+| prefill size | LR (b0) | LS (m1) | LS (m2) | LR (b1) | LR mean | LS mean | LS vs LR |
+|---|---|---|---|---|---|---|---|
+| 33K (33,842) | 1015.2 / 1017.4 | 1049.3 / 1049.8 | 1047.8 / 1047.2 | 1012.9 / 1011.7 | 1014.3 | **1048.5** | +3.4 % |
+| 8K (run 2) | 865.9 | 868.6 | 857.6 | 858.4 | 862.2 | **863.1** | +0.1 % |
+
+Every LS 33K run is above every LR run. Mac GPU time per pair job 131.6 / 131.2 -> 108.1 / 107.2 ms (-18 %, more than the microbench: real routing has more small
+experts); Mac wait per chunk-layer 4.0 -> 2.2 ms; period 54.0 -> 51.9 ms. The link (x 13.4 + y 13.6 ms per period) is now the larger term. GPU timeouts 0.
+
+### 0.000000000000000.3 Quality (705 teacher-forced positions, top-64-support KL vs the BF16-expert reference; gate top-1 >= 97 %, mean < 0.01, p99 < 0.1)
+
+| check | top-1 | mean KL | p99 KL | gate |
+|---|---|---|---|---|
+| post-33K panel, LS (chain126) | 98.58 % | 0.005830 | 0.1078 | FAIL (p99) |
+| post-33K panel, LR (chain127 a) | 98.01 % | 0.006544 | 0.1025 | FAIL (p99) |
+| post-33K panel, LS (chain127 a) | 98.16 % | 0.006138 | 0.0807 | PASS |
+| post-33K panel, LR (chain127 b) | 98.01 % | 0.006870 | 0.0905 | PASS |
+| post-33K panel, LS (chain127 b) | 98.16 % | 0.004873 | 0.0728 | PASS |
+| fresh restart (q23), LS (chain128) | 98.01 % | 0.007280 | 0.0928 | PASS |
+
+The panel that follows a 33K prompt is not run-to-run deterministic: LR against LR gives mean KL 0.005730 (p99 0.0530), LS against LS 0.005203, LS against LR
+0.004193, and LR itself failed the p99 gate in one of its three post-33K runs (0.0789 in chain119, 0.1025, 0.0905). After chain126's single failure a repeat rule
+was written down before any rerun (two more panels per config, alternating; LS continues only if both LS repeats pass and its mean p99 is not above LR's): LS
+0.0807 / 0.0728 (mean 0.0768) against LR 0.1025 / 0.0905 (0.0965). From a fresh restart the engine is deterministic: LS's per-position log is byte-identical to
+LR's (same numbers as section 0.00000000000000.2).
+
+### 0.000000000000000.4 Decode ABBA128 (LR LS LS LR, fresh restart per arm, the 29-prompt realistic set twice per arm)
+
+| arm | pass 1 | pass 2 | TTFT (s) |
+|---|---|---|---|
+| LR (Aa) | 33.82 | 34.16 | 14.46 / 14.05 |
+| LS (Qa) | 33.76 | 33.78 | 13.92 / 13.55 |
+| LS (Qb) | 33.88 | 33.92 | 13.88 / 13.52 |
+| LR (Ab) | 33.47 | 33.50 | 14.42 / 14.06 |
+
+Arm means LR 33.74, LS 33.83 tok/s; paired per prompt LS/LR - 1: mean +0.35 %, median +0.36 %, LS slower on 10 of 29 (decode unchanged; Opt125 touches only
+the prefill kernels).
+
+### 0.000000000000000.5 Regression and soak (`final21.sh` + 14-prompt soak, chain128)
+
+final21 PASS: realistic decode 33.68 tok/s, tool reuse and image pass, 190K needle found (189,450 tokens, 234 s; LR 247 s), 5 x 32K needles found. Soak: 14/14
+found (190K in 212 s; LR 224 s), swap peak 1414 MB of 2048 (LR 1549), engine alive, 0 GPU timeouts.
+
+## 0.00000000000000 Previous configuration (production 2026-10-31 19:37Z - 2026-11-01 01:19Z): `configs/strata-exl3-full512-lr.json.tmpl` (config LR, chain118-119, 2026-10-31)
 
 Config **LR** = config LP (section 0.0000000000000) + `STRATA_PF_EXL3_SLIM=1` + `STRATA_PF_EXL3_NOXS=1` (`patches/strata/0035`, engine `strata_o37u`) + the expert
 library's new `exl3s_prefill_moe_tok` (`exl3/strata_m4/exl3_strata_pf_host.cu`). Shim, Metal library, placement and VRAM split as LP. Production on the mini since
-2026-10-31T19:37Z (12:37 PDT).
+2026-10-31T19:37Z (12:37 PDT) until config LS (2026-11-01T01:19Z). Measured on the config LM Metal source (tag `config-lr-2026-10-31`).
 
 What it changes: chain115's loan dump put the MoE scratch set (692.7 MiB at T = 3072) behind only the group's residual streams. On an EXL3 pack with the grouped
 prompt kernel, the expert kernel runs every routed row Xs -> Dm with its own gate/up and down scratch, so two of the set's buffers belong to the FP16 dequant
